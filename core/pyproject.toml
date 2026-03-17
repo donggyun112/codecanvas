@@ -1,0 +1,23 @@
+[project]
+name = "codecanvas"
+version = "0.1.0"
+description = "Python request flow explainer for FastAPI"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "libcst>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "httpx",
+]
+
+[project.scripts]
+codecanvas = "codecanvas.server.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

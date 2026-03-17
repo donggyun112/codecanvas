@@ -1,0 +1,11 @@
+{
+  "name": "codecanvas-monorepo",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r run build",
+    "watch": "pnpm -r run --parallel watch",
+    "prepackage": "node ./scripts/sync-core.mjs copy",
+    "package": "pnpm run build && cd extension && pnpm exec vsce package",
+    "postpackage": "node ./scripts/sync-core.mjs clean"
+  }
+}

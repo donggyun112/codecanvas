@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.pyc
+__pycache__/
+*.egg-info/
+.venv/
+.env
+*.vsix
+references/
+*.db
+.DS_Store
+webview/src/styles/*.css.map
+extension/media/assets/
+test_flow_output.json

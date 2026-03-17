@@ -1,0 +1,54 @@
+{
+  "name": "codecanvas",
+  "displayName": "CodeCanvas",
+  "description": "Python request flow explainer - visualize how FastAPI requests flow through your code",
+  "version": "0.1.0",
+  "publisher": "codecanvas",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Visualization", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codecanvas.analyze",
+        "title": "CodeCanvas: Analyze Project"
+      },
+      {
+        "command": "codecanvas.showFlow",
+        "title": "CodeCanvas: Show Request Flow"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codecanvas",
+          "title": "CodeCanvas",
+          "icon": "$(graph)"
+        }
+      ]
+    },
+    "views": {
+      "codecanvas": [
+        {
+          "type": "webview",
+          "id": "codecanvas.sidebar",
+          "name": "Endpoints"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsup src/extension.ts --format cjs --dts --out-dir dist --external vscode",
+    "watch": "tsup src/extension.ts --watch --format cjs --out-dir dist --external vscode",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0"
+  }
+}

@@ -1,0 +1,13 @@
+.vscode/**
+src/**
+node_modules/**
+tsconfig.json
+**/*.ts
+**/*.map
+core/.venv/**
+core/__pycache__/**
+core/**/__pycache__/**
+core/.git/**
+core/dist/**
+core/build/**
+core/*.egg-info/**
