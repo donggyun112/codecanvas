@@ -280,9 +280,17 @@ class FlowGraphBuilder:
             for nid in node_ids:
                 graph.nodes[nid].parent_id = file_id
 
-        # Also assign L4 error nodes to their parent file
+        # Also assign L4 nodes to their parent function when known, otherwise file
         for node in list(graph.nodes.values()):
             if node.level == 4 and node.file_path and node.file_path in file_node_map:
+                function_id = node.metadata.get("function_id")
+                if function_id and function_id in graph.nodes:
+                    node.parent_id = function_id
+                    parent_func = graph.nodes[function_id]
+                    if node.id not in parent_func.children:
+                        parent_func.children.append(node.id)
+                    continue
+
                 node.parent_id = file_node_map[node.file_path]
                 file_node = graph.nodes[file_node_map[node.file_path]]
                 if node.id not in file_node.children:

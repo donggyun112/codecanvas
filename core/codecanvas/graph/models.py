@@ -42,6 +42,8 @@ class NodeType(enum.Enum):
     EXCEPTION = "exception"
     LOOP = "loop"
     ASSIGNMENT = "assignment"
+    RETURN = "return"
+    STEP = "step"
 
 
 class Confidence(enum.Enum):

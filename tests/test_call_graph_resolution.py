@@ -79,3 +79,42 @@ def test_db_method_chains_do_not_bind_to_unrelated_execute_methods(tmp_path: Pat
         and edge.edge_type == EdgeType.QUERIES
         for edge in flow.edges
     )
+
+
+def test_level4_logic_steps_describe_function_body() -> None:
+    flow = _build_flow(ROOT / "sample-fastapi", "POST", "/api/v1/auth/login")
+
+    logic_nodes = [node for node in flow.nodes.values() if node.level == 4]
+
+    assert any(
+        node.node_type == NodeType.ASSIGNMENT
+        and "service = AuthService(db)" in node.display_name
+        for node in logic_nodes
+    )
+    assert any(
+        node.node_type == NodeType.BRANCH
+        and node.metadata.get("condition") == "user is None"
+        for node in logic_nodes
+    )
+    assert any(
+        node.node_type == NodeType.RETURN
+        and "LoginResponse" in node.display_name
+        for node in logic_nodes
+    )
+
+
+def test_level4_logic_steps_include_loop_and_return_for_script_entrypoint() -> None:
+    builder = FlowGraphBuilder(str(ROOT / "sample-script"))
+    entry = next(entry for entry in builder.get_entrypoints() if entry.kind == "script")
+    flow = builder.build_flow(entry)
+
+    logic_nodes = [node for node in flow.nodes.values() if node.level == 4]
+
+    assert any(
+        node.node_type == NodeType.LOOP and "for item in items" in node.display_name
+        for node in logic_nodes
+    )
+    assert any(
+        node.node_type == NodeType.RETURN and "write_report(summary)" in node.display_name
+        for node in logic_nodes
+    )

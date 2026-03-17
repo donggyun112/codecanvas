@@ -58,6 +58,15 @@ if target:
         err = " (ERROR)" if edge.is_error_path else ""
         print(f"    {edge.source_id} -> {edge.target_id} ({edge.edge_type.value}){label}{err}")
 
+    has_assignment = any(node.node_type.value == "assignment" for node in flow.nodes.values())
+    has_branch = any(node.node_type.value == "branch" for node in flow.nodes.values())
+    has_return = any(node.node_type.value == "return" for node in flow.nodes.values())
+    print(f"\n  L4 assignments present: {has_assignment}")
+    print(f"  L4 branches present: {has_branch}")
+    print(f"  L4 returns present: {has_return}")
+    if not has_assignment or not has_branch or not has_return:
+        raise AssertionError("function logic layer is missing assignment/branch/return nodes")
+
     # Save JSON output
     with open("test_flow_output.json", "w") as f:
         json.dump(flow.to_dict(), f, indent=2)
@@ -110,6 +119,8 @@ print(f"  Entrypoint node present: {'entrypoint' in script_flow.nodes}")
 has_load_items = any(node.name == "load_items" for node in script_flow.nodes.values())
 has_normalize_item = any(node.name == "normalize_item" for node in script_flow.nodes.values())
 has_batch_report = any(node.name == "BatchReport" for node in script_flow.nodes.values())
+has_loop = any(node.node_type.value == "loop" for node in script_flow.nodes.values())
+has_return = any(node.node_type.value == "return" for node in script_flow.nodes.values())
 low_signal_unresolved = [
     node.id for node in script_flow.nodes.values()
     if node.id.startswith("unresolved.") and any(
@@ -119,6 +130,8 @@ low_signal_unresolved = [
 print(f"  load_items in flow: {has_load_items}")
 print(f"  normalize_item in flow: {has_normalize_item}")
 print(f"  BatchReport in flow: {has_batch_report}")
+print(f"  loop logic present: {has_loop}")
+print(f"  return logic present: {has_return}")
 print(f"  low-signal unresolved nodes: {low_signal_unresolved}")
 if not has_load_items:
     raise AssertionError("script flow did not include load_items()")
@@ -126,5 +139,7 @@ if not has_normalize_item:
     raise AssertionError("nested normalize_item() was not resolved in script flow")
 if not has_batch_report:
     raise AssertionError("BatchReport constructor was not resolved in script flow")
+if not has_loop or not has_return:
+    raise AssertionError("script flow should expose loop/return logic nodes at Level 4")
 if low_signal_unresolved:
     raise AssertionError(f"low-signal calls should be collapsed: {low_signal_unresolved}")

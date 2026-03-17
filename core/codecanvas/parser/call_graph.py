@@ -40,6 +40,7 @@ class FunctionDef:
     definition_type: str = "function"  # function | class
     class_qname: str | None = None
     local_types: dict[str, str] = field(default_factory=dict)
+    logic_steps: list[LogicStep] = field(default_factory=list)
 
 
 @dataclass
@@ -56,6 +57,17 @@ class CallSite:
     raise_status: int | None = None # HTTP status code if HTTPException
     owner_parts: tuple[str, ...] = ()
     is_attribute_call: bool = False
+
+
+@dataclass
+class LogicStep:
+    """A summarized top-level logic step inside a function body."""
+    node_type: NodeType
+    display_name: str
+    description: str
+    line: int
+    line_end: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # Heuristic patterns for detecting DB and external API calls
@@ -172,6 +184,7 @@ class CallGraphBuilder:
                     return_annotation=self._annotation_str(node.returns),
                     class_qname=class_qname,
                     local_types=local_types,
+                    logic_steps=self._extract_logic_steps(node),
                 )
                 self._functions[qname] = func_def
                 self._name_index.setdefault(node.name, []).append(qname)
@@ -370,6 +383,7 @@ class CallGraphBuilder:
                 },
             )
             nodes[node.id] = node
+            edge_counter = self._add_logic_nodes(func, node.id, nodes, edges, edge_counter)
 
             # Process each call inside this function
             for call in func.calls:
@@ -490,6 +504,56 @@ class CallGraphBuilder:
 
         traverse(handler_func, 0)
         return nodes, edges
+
+    def _add_logic_nodes(
+        self,
+        func: FunctionDef,
+        function_node_id: str,
+        nodes: dict[str, FlowNode],
+        edges: list[FlowEdge],
+        edge_counter: int,
+    ) -> int:
+        """Attach Level 4 statement summaries to a function node."""
+        previous_id = function_node_id
+        for index, step in enumerate(func.logic_steps):
+            node_id = f"{function_node_id}.logic.{index}"
+            nodes[node_id] = FlowNode(
+                id=node_id,
+                node_type=step.node_type,
+                name=step.display_name,
+                display_name=step.display_name,
+                description=step.description,
+                file_path=func.file_path,
+                line_start=step.line,
+                line_end=step.line_end,
+                confidence=Confidence.DEFINITE,
+                evidence=[Evidence(
+                    source="static_analysis",
+                    file_path=func.file_path,
+                    line_number=step.line,
+                    detail=step.display_name,
+                )],
+                metadata={"function_id": function_node_id, **step.metadata},
+                level=4,
+            )
+            edge_counter += 1
+            edge_type = EdgeType.RETURNS if step.node_type == NodeType.RETURN else EdgeType.CALLS
+            edges.append(FlowEdge(
+                id=f"e{edge_counter}",
+                source_id=previous_id,
+                target_id=node_id,
+                edge_type=edge_type,
+                confidence=Confidence.DEFINITE,
+                evidence=[Evidence(
+                    source="static_analysis",
+                    file_path=func.file_path,
+                    line_number=step.line,
+                    detail=step.display_name,
+                )],
+                condition=step.metadata.get("condition"),
+            ))
+            previous_id = node_id
+        return edge_counter
 
     def resolve_function_id(
         self,
@@ -626,6 +690,129 @@ class CallGraphBuilder:
             return preferred
         return candidates[0]
 
+    def _extract_logic_steps(
+        self,
+        func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> list[LogicStep]:
+        """Summarize top-level statements inside a function body."""
+        steps: list[LogicStep] = []
+        for stmt in func_node.body:
+            step = self._logic_step_from_statement(stmt)
+            if step is not None:
+                steps.append(step)
+        return steps
+
+    def _logic_step_from_statement(self, stmt: ast.stmt) -> LogicStep | None:
+        """Build a logic-step summary for a statement."""
+        if isinstance(stmt, ast.Assign):
+            targets = ", ".join(
+                ast.unparse(target) if hasattr(ast, "unparse") else self._get_name(target)
+                for target in stmt.targets
+            )
+            value = self._expr_summary(stmt.value)
+            return LogicStep(
+                node_type=NodeType.ASSIGNMENT,
+                display_name=f"{targets} = {self._compact(value)}",
+                description=f"Assign `{targets}` from {value}.",
+                line=stmt.lineno,
+                line_end=stmt.end_lineno,
+                metadata={"target": targets, "value": value},
+            )
+
+        if isinstance(stmt, ast.AnnAssign):
+            target = ast.unparse(stmt.target) if hasattr(ast, "unparse") else self._get_name(stmt.target)
+            value = self._expr_summary(stmt.value) if stmt.value else "annotated value"
+            return LogicStep(
+                node_type=NodeType.ASSIGNMENT,
+                display_name=f"{target} = {self._compact(value)}",
+                description=f"Assign `{target}` from {value}.",
+                line=stmt.lineno,
+                line_end=stmt.end_lineno,
+                metadata={"target": target, "value": value},
+            )
+
+        if isinstance(stmt, ast.AugAssign):
+            target = ast.unparse(stmt.target) if hasattr(ast, "unparse") else self._get_name(stmt.target)
+            op = self._operator_symbol(stmt.op)
+            value = self._expr_summary(stmt.value)
+            return LogicStep(
+                node_type=NodeType.ASSIGNMENT,
+                display_name=f"{target} {op}= {self._compact(value)}",
+                description=f"Update `{target}` with `{op}=` using {value}.",
+                line=stmt.lineno,
+                line_end=stmt.end_lineno,
+                metadata={"target": target, "value": value},
+            )
+
+        if isinstance(stmt, ast.If):
+            condition = ast.unparse(stmt.test) if hasattr(ast, "unparse") else "condition"
+            body_summary = self._summarize_block(stmt.body)
+            else_summary = self._summarize_block(stmt.orelse)
+            description = f"If `{condition}`, {body_summary}."
+            if else_summary:
+                description += f" Otherwise, {else_summary}."
+            return LogicStep(
+                node_type=NodeType.BRANCH,
+                display_name=f"if {self._compact(condition)}",
+                description=description,
+                line=stmt.lineno,
+                line_end=stmt.end_lineno,
+                metadata={"condition": condition},
+            )
+
+        if isinstance(stmt, (ast.For, ast.AsyncFor)):
+            target = ast.unparse(stmt.target) if hasattr(ast, "unparse") else self._get_name(stmt.target)
+            iterator = self._expr_summary(stmt.iter)
+            body_summary = self._summarize_block(stmt.body)
+            return LogicStep(
+                node_type=NodeType.LOOP,
+                display_name=f"for {target} in {self._compact(iterator)}",
+                description=f"Loop over {iterator} as `{target}` and {body_summary}.",
+                line=stmt.lineno,
+                line_end=stmt.end_lineno,
+                metadata={"target": target, "iterator": iterator},
+            )
+
+        if isinstance(stmt, ast.While):
+            condition = ast.unparse(stmt.test) if hasattr(ast, "unparse") else "condition"
+            body_summary = self._summarize_block(stmt.body)
+            return LogicStep(
+                node_type=NodeType.LOOP,
+                display_name=f"while {self._compact(condition)}",
+                description=f"Repeat while `{condition}` and {body_summary}.",
+                line=stmt.lineno,
+                line_end=stmt.end_lineno,
+                metadata={"condition": condition},
+            )
+
+        if isinstance(stmt, ast.Return):
+            value = self._expr_summary(stmt.value)
+            return LogicStep(
+                node_type=NodeType.RETURN,
+                display_name=f"return {self._compact(value)}",
+                description=f"Return {value}.",
+                line=stmt.lineno,
+                line_end=stmt.end_lineno,
+                metadata={"value": value},
+            )
+
+        if isinstance(stmt, ast.Expr):
+            if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
+                return None
+            value = self._expr_summary(stmt.value)
+            if not value:
+                return None
+            return LogicStep(
+                node_type=NodeType.STEP,
+                display_name=self._compact(value),
+                description=f"Execute {value}.",
+                line=stmt.lineno,
+                line_end=stmt.end_lineno,
+                metadata={"value": value},
+            )
+
+        return None
+
     def _classify_function(self, func: FunctionDef) -> NodeType:
         """Classify a function into a semantic node type."""
         if func.definition_type == "class":
@@ -700,6 +887,98 @@ class CallGraphBuilder:
         }
         prefix = prefix_map.get(node_type, "Run step")
         return f"{prefix}: {human_name}."
+
+    def _summarize_block(self, statements: list[ast.stmt]) -> str:
+        """Summarize a block of statements into one review-friendly phrase."""
+        parts: list[str] = []
+        for stmt in statements[:3]:
+            summary = self._statement_summary(stmt)
+            if summary:
+                parts.append(summary)
+        if not parts:
+            return "continue execution"
+        text = ", then ".join(parts)
+        remaining = len(statements) - len(parts)
+        if remaining > 0:
+            text += f", and {remaining} more step{'s' if remaining != 1 else ''}"
+        return text
+
+    def _statement_summary(self, stmt: ast.stmt) -> str:
+        """Summarize one statement for branch/loop descriptions."""
+        if isinstance(stmt, ast.Assign):
+            targets = ", ".join(
+                ast.unparse(target) if hasattr(ast, "unparse") else self._get_name(target)
+                for target in stmt.targets
+            )
+            return f"set `{targets}`"
+        if isinstance(stmt, ast.AnnAssign):
+            target = ast.unparse(stmt.target) if hasattr(ast, "unparse") else self._get_name(stmt.target)
+            return f"set `{target}`"
+        if isinstance(stmt, ast.AugAssign):
+            target = ast.unparse(stmt.target) if hasattr(ast, "unparse") else self._get_name(stmt.target)
+            return f"update `{target}`"
+        if isinstance(stmt, ast.Return):
+            return f"return {self._expr_summary(stmt.value)}"
+        if isinstance(stmt, ast.Raise):
+            if isinstance(stmt.exc, ast.Call):
+                func_name, _, _ = self._get_call_target(stmt.exc)
+                return f"raise `{func_name}`"
+            return "raise an exception"
+        if isinstance(stmt, ast.Expr):
+            if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
+                return ""
+            value = self._expr_summary(stmt.value)
+            return f"execute {value}" if value else ""
+        if isinstance(stmt, ast.If):
+            condition = ast.unparse(stmt.test) if hasattr(ast, "unparse") else "condition"
+            return f"branch on `{condition}`"
+        if isinstance(stmt, (ast.For, ast.AsyncFor)):
+            target = ast.unparse(stmt.target) if hasattr(ast, "unparse") else self._get_name(stmt.target)
+            return f"iterate `{target}`"
+        if isinstance(stmt, ast.While):
+            condition = ast.unparse(stmt.test) if hasattr(ast, "unparse") else "condition"
+            return f"loop while `{condition}`"
+        return ""
+
+    def _expr_summary(self, expr: ast.expr | None) -> str:
+        """Summarize an expression in a compact but readable form."""
+        if expr is None:
+            return "no value"
+        if hasattr(ast, "unparse"):
+            return self._compact(ast.unparse(expr))
+        if isinstance(expr, ast.Name):
+            return expr.id
+        if isinstance(expr, ast.Constant):
+            return repr(expr.value)
+        return "expression"
+
+    @staticmethod
+    def _compact(text: str, limit: int = 80) -> str:
+        """Normalize and truncate source snippets for node labels."""
+        compact = " ".join(text.split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 3] + "..."
+
+    @staticmethod
+    def _operator_symbol(operator: ast.operator) -> str:
+        """Render an assignment operator symbol for AugAssign."""
+        mapping: dict[type[ast.operator], str] = {
+            ast.Add: "+",
+            ast.Sub: "-",
+            ast.Mult: "*",
+            ast.Div: "/",
+            ast.Mod: "%",
+            ast.Pow: "**",
+            ast.FloorDiv: "//",
+            ast.BitAnd: "&",
+            ast.BitOr: "|",
+            ast.BitXor: "^",
+            ast.LShift: "<<",
+            ast.RShift: ">>",
+            ast.MatMult: "@",
+        }
+        return mapping.get(type(operator), "?")
 
     def _describe_unresolved_call(self, call: CallSite) -> str:
         """Describe a call target we could not resolve statically."""

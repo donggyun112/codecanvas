@@ -160,6 +160,9 @@ export class FlowPanelProvider {
         .type-exception { border-top: 3px solid #e74c3c; background: rgba(231,76,60,0.08); }
         .type-branch { border-top: 3px solid #f39c12; }
         .type-loop { border-top: 3px solid #2ecc71; }
+        .type-assignment { border-top: 3px solid #2980b9; }
+        .type-return { border-top: 3px solid #27ae60; background: rgba(39,174,96,0.08); }
+        .type-step { border-top: 3px solid #7f8c8d; }
         .type-file { border-top: 3px solid #8e44ad; }
         .type-module { border-top: 3px solid #2c3e50; }
 
