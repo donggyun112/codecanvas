@@ -38,6 +38,8 @@ class FunctionDef:
     params: list[str] = field(default_factory=list)
     return_annotation: str | None = None
     definition_type: str = "function"  # function | class
+    class_qname: str | None = None
+    local_types: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -52,6 +54,8 @@ class CallSite:
     is_http_call: bool = False
     is_raise: bool = False          # raise SomeException(...)
     raise_status: int | None = None # HTTP status code if HTTPException
+    owner_parts: tuple[str, ...] = ()
+    is_attribute_call: bool = False
 
 
 # Heuristic patterns for detecting DB and external API calls
@@ -107,6 +111,7 @@ class CallGraphBuilder:
         self._name_index: dict[str, list[str]] = {}   # simple name -> [qualified_names]
         self._file_asts: dict[str, ast.Module] = {}
         self._module_map: dict[str, str] = {}          # file_path -> module name
+        self._class_attr_types: dict[str, dict[str, str]] = {}
         self._analyzed = False
 
     def analyze_project(self) -> None:
@@ -145,11 +150,13 @@ class CallGraphBuilder:
         namespace: str,
         file_path: str,
         class_name: str | None = None,
+        class_qname: str | None = None,
     ) -> None:
         """Recursively visit function/class definitions."""
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 qname = f"{namespace}.{node.name}"
+                local_types, self_attr_types = self._extract_assignment_types(node)
                 func_def = FunctionDef(
                     name=node.name,
                     qualified_name=qname,
@@ -163,11 +170,15 @@ class CallGraphBuilder:
                     docstring=ast.get_docstring(node) or "",
                     params=[a.arg for a in node.args.args if a.arg != "self"],
                     return_annotation=self._annotation_str(node.returns),
+                    class_qname=class_qname,
+                    local_types=local_types,
                 )
                 self._functions[qname] = func_def
                 self._name_index.setdefault(node.name, []).append(qname)
+                if node.name == "__init__" and class_qname and self_attr_types:
+                    self._class_attr_types.setdefault(class_qname, {}).update(self_attr_types)
                 # Index nested functions inside this function scope as lexical children.
-                self._visit_definitions(node, qname, file_path, class_name)
+                self._visit_definitions(node, qname, file_path, class_name, class_qname)
 
             elif isinstance(node, ast.ClassDef):
                 class_qname = f"{namespace}.{node.name}"
@@ -193,10 +204,11 @@ class CallGraphBuilder:
                     params=[a.arg for a in init_node.args.args if a.arg != "self"] if init_node else [],
                     return_annotation=node.name,
                     definition_type="class",
+                    class_qname=class_qname,
                 )
                 self._functions[class_qname] = class_def
                 self._name_index.setdefault(node.name, []).append(class_qname)
-                self._visit_definitions(node, class_qname, file_path, node.name)
+                self._visit_definitions(node, class_qname, file_path, node.name, class_qname)
 
     def _extract_calls(self, func_node: ast.AST) -> list[CallSite]:
         """Extract all function calls within a function body using recursive traversal.
@@ -252,7 +264,7 @@ class CallGraphBuilder:
         # Handle raise statements — capture error response paths
         if isinstance(node, ast.Raise) and node.exc:
             if isinstance(node.exc, ast.Call):
-                func_name = self._get_call_target(node.exc)
+                func_name, _, _ = self._get_call_target(node.exc)
                 if func_name:
                     status_code = self._extract_status_code(node.exc)
                     calls.append(CallSite(
@@ -267,7 +279,7 @@ class CallGraphBuilder:
 
         # Extract calls from this node
         if isinstance(node, ast.Call):
-            func_name = self._get_call_target(node)
+            func_name, owner_parts, is_attribute_call = self._get_call_target(node)
             is_db = self._is_db_call(node)
             is_http = self._is_http_call(node)
             if func_name and not self._should_ignore_call(func_name) and not self._is_low_signal_call(node, is_db, is_http):
@@ -279,6 +291,8 @@ class CallGraphBuilder:
                     branch_condition=branch_ctx[1] if branch_ctx else None,
                     is_db_call=is_db,
                     is_http_call=is_http,
+                    owner_parts=owner_parts,
+                    is_attribute_call=is_attribute_call,
                 ))
 
         if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
@@ -456,7 +470,11 @@ class CallGraphBuilder:
                         id=f"e{edge_counter}",
                         source_id=node.id,
                         target_id=stub_id,
-                        edge_type=EdgeType.CALLS,
+                        edge_type=(
+                            EdgeType.QUERIES if call.is_db_call
+                            else EdgeType.REQUESTS if call.is_http_call
+                            else EdgeType.CALLS
+                        ),
                         confidence=Confidence.INFERRED,
                         evidence=[Evidence(
                             source="static_analysis",
@@ -522,18 +540,17 @@ class CallGraphBuilder:
 
     def _resolve_call(self, call: CallSite, caller: FunctionDef) -> FunctionDef | None:
         """Try to resolve a call to a known function definition."""
+        if call.is_attribute_call:
+            resolved = self._resolve_attribute_call(call, caller)
+            if resolved is not None:
+                return resolved
+
+            # Avoid binding object/client method chains like
+            # `client.table(...).execute()` to unrelated project methods
+            # purely because the last segment shares a name.
+            return None
+
         name = call.func_name
-        # Strip method calls: "self.method" -> "method" within same class
-        if "." in name:
-            parts = name.split(".")
-            if parts[0] == "self" and caller.class_name:
-                method_name = parts[-1]
-                # Look in same class
-                for qname, func in self._functions.items():
-                    if func.name == method_name and func.class_name == caller.class_name:
-                        return func
-            # Try the last part as function name
-            name = parts[-1]
 
         candidates = self._name_index.get(name, [])
         if not candidates:
@@ -561,6 +578,53 @@ class CallGraphBuilder:
 
         # Fallback: first candidate
         return resolved_candidates[0]
+
+    def _resolve_attribute_call(self, call: CallSite, caller: FunctionDef) -> FunctionDef | None:
+        """Resolve attribute/member calls only when the receiver type is known."""
+        method_name = call.func_name.split(".")[-1]
+        owner_parts = call.owner_parts
+        if not owner_parts:
+            return None
+
+        root = owner_parts[0]
+        if root == "self" and caller.class_name:
+            if len(owner_parts) == 1:
+                return self._resolve_method_on_class(caller.class_name, method_name, caller)
+
+            if caller.class_qname:
+                attr_name = owner_parts[1]
+                attr_type = self._class_attr_types.get(caller.class_qname, {}).get(attr_name)
+                if attr_type:
+                    return self._resolve_method_on_class(attr_type, method_name, caller)
+            return None
+
+        local_type = caller.local_types.get(root)
+        if local_type:
+            return self._resolve_method_on_class(local_type, method_name, caller)
+
+        if root[:1].isupper():
+            return self._resolve_method_on_class(root, method_name, caller)
+
+        return None
+
+    def _resolve_method_on_class(
+        self,
+        class_name: str,
+        method_name: str,
+        caller: FunctionDef,
+    ) -> FunctionDef | None:
+        """Resolve a method on a specific class name."""
+        candidates = [
+            self._functions[qname]
+            for qname in self._name_index.get(method_name, [])
+            if self._functions[qname].class_name == class_name
+        ]
+        if not candidates:
+            return None
+        preferred = self._prefer_same_module(candidates, caller)
+        if preferred:
+            return preferred
+        return candidates[0]
 
     def _classify_function(self, func: FunctionDef) -> NodeType:
         """Classify a function into a semantic node type."""
@@ -663,6 +727,73 @@ class CallGraphBuilder:
                 return func
         return None
 
+    def _extract_assignment_types(
+        self,
+        func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Infer simple local/self attribute types from constructor-style assignments."""
+        local_types: dict[str, str] = {}
+        self_attr_types: dict[str, str] = {}
+        body = getattr(func_node, "body", None)
+        if not isinstance(body, list):
+            return local_types, self_attr_types
+        for child in body:
+            self._visit_type_assignments(child, local_types, self_attr_types)
+        return local_types, self_attr_types
+
+    def _visit_type_assignments(
+        self,
+        node: ast.AST,
+        local_types: dict[str, str],
+        self_attr_types: dict[str, str],
+    ) -> None:
+        """Collect constructor-style type hints while skipping nested scopes."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            return
+
+        if isinstance(node, ast.Assign):
+            inferred_type = self._infer_assigned_type(node.value)
+            if inferred_type:
+                for target in node.targets:
+                    self._record_assignment_type(target, inferred_type, local_types, self_attr_types)
+        elif isinstance(node, ast.AnnAssign):
+            inferred_type = self._infer_assigned_type(node.value) if node.value else None
+            if inferred_type:
+                self._record_assignment_type(node.target, inferred_type, local_types, self_attr_types)
+
+        for child in ast.iter_child_nodes(node):
+            self._visit_type_assignments(child, local_types, self_attr_types)
+
+    def _record_assignment_type(
+        self,
+        target: ast.expr,
+        inferred_type: str,
+        local_types: dict[str, str],
+        self_attr_types: dict[str, str],
+    ) -> None:
+        """Store inferred types for simple locals and `self.<attr>` assignments."""
+        if isinstance(target, ast.Name):
+            local_types[target.id] = inferred_type
+            return
+
+        if (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        ):
+            self_attr_types[target.attr] = inferred_type
+
+    def _infer_assigned_type(self, value: ast.expr | None) -> str | None:
+        """Infer a class name from constructor-style calls like `Foo(...)`."""
+        if not isinstance(value, ast.Call):
+            return None
+
+        call_name, _, _ = self._get_call_target(value)
+        simple_name = call_name.split(".")[-1]
+        if simple_name[:1].isupper():
+            return simple_name
+        return None
+
     @staticmethod
     def _describe_exception(call: CallSite) -> str:
         """Describe an exception node."""
@@ -735,21 +866,36 @@ class CallGraphBuilder:
                 return True
         return False
 
-    @staticmethod
-    def _get_call_target(node: ast.Call) -> str:
-        """Extract the target name from a Call node."""
+    @classmethod
+    def _get_call_target(cls, node: ast.Call) -> tuple[str, tuple[str, ...], bool]:
+        """Extract target name plus receiver metadata from a Call node."""
         if isinstance(node.func, ast.Name):
-            return node.func.id
+            return node.func.id, (), False
         if isinstance(node.func, ast.Attribute):
-            parts = []
-            current: ast.expr = node.func
-            while isinstance(current, ast.Attribute):
-                parts.append(current.attr)
-                current = current.value
-            if isinstance(current, ast.Name):
-                parts.append(current.id)
-            return ".".join(reversed(parts))
-        return ""
+            owner_parts = cls._extract_owner_parts(node.func.value)
+            func_name = ".".join((*owner_parts, node.func.attr)) if owner_parts else node.func.attr
+            return func_name, owner_parts, True
+        return "", (), False
+
+    @classmethod
+    def _extract_owner_parts(cls, node: ast.expr) -> tuple[str, ...]:
+        """Extract the receiver path for attribute and call chains."""
+        if isinstance(node, ast.Name):
+            return (node.id,)
+        if isinstance(node, ast.Attribute):
+            parent = cls._extract_owner_parts(node.value)
+            if not parent:
+                return ()
+            return (*parent, node.attr)
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                return ()
+            if isinstance(node.func, ast.Attribute):
+                parent = cls._extract_owner_parts(node.func.value)
+                if not parent:
+                    return ()
+                return (*parent, node.func.attr)
+        return ()
 
     @staticmethod
     def _get_name(node: ast.expr | None) -> str:
