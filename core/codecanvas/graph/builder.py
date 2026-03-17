@@ -1,6 +1,6 @@
-"""Build complete FlowGraph for a given endpoint.
+"""Build complete FlowGraph for a given entry point.
 
-Combines FastAPI route extraction with call graph analysis
+Combines entry-point extraction with call graph analysis
 to produce a multi-level flow graph.
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ import os
 from codecanvas.graph.models import (
     Confidence,
     EdgeType,
-    Endpoint,
+    EntryPoint,
     Evidence,
     FlowEdge,
     FlowGraph,
@@ -19,6 +19,7 @@ from codecanvas.graph.models import (
 )
 from codecanvas.parser.call_graph import CallGraphBuilder
 from codecanvas.parser.fastapi_extractor import FastAPIExtractor
+from codecanvas.parser.entrypoint_extractor import EntryPointExtractor
 
 # Map node types to semantic layer names for Level 1 grouping
 _LAYER_MAP = {
@@ -27,6 +28,7 @@ _LAYER_MAP = {
     NodeType.REPOSITORY: "repositories",
     NodeType.MIDDLEWARE: "middleware",
     NodeType.DEPENDENCY: "dependencies",
+    NodeType.ENTRYPOINT: "entrypoints",
     NodeType.FUNCTION: "logic",
     NodeType.METHOD: "logic",
 }
@@ -38,39 +40,45 @@ class FlowGraphBuilder:
     def __init__(self, project_root: str):
         self.project_root = project_root
         self.extractor = FastAPIExtractor(project_root)
+        self.entrypoint_extractor = EntryPointExtractor(project_root, self.extractor)
         self.call_graph = CallGraphBuilder(project_root)
-        self._endpoints: list[Endpoint] | None = None
+        self._entrypoints: list[EntryPoint] | None = None
 
-    def get_endpoints(self) -> list[Endpoint]:
-        """Get all discovered FastAPI endpoints."""
-        if self._endpoints is None:
-            self._endpoints = self.extractor.analyze()
-        return self._endpoints
+    def get_entrypoints(self) -> list[EntryPoint]:
+        """Get all discovered execution entry points."""
+        if self._entrypoints is None:
+            self._entrypoints = self.entrypoint_extractor.analyze()
+        return self._entrypoints
 
-    def build_flow(self, endpoint: Endpoint) -> FlowGraph:
-        """Build a complete flow graph for a single endpoint."""
-        self.get_endpoints()
-        graph = FlowGraph(endpoint=endpoint)
+    def get_endpoints(self) -> list[EntryPoint]:
+        """Backward-compatible API-only view of discovered entry points."""
+        return [entry for entry in self.get_entrypoints() if entry.kind == "api"]
+
+    def build_flow(self, entrypoint: EntryPoint) -> FlowGraph:
+        """Build a complete flow graph for a single entry point."""
+        self.get_entrypoints()
+        graph = FlowGraph(entrypoint=entrypoint)
 
         # Level 1-2: Module/service grouping (derived from file paths)
         # Level 3: Function-level call graph — build FIRST so handler node exists
         nodes, edges = self.call_graph.build_flow_from(
-            handler_name=endpoint.handler_name,
-            handler_file=endpoint.handler_file,
+            handler_name=entrypoint.handler_name,
+            handler_file=entrypoint.handler_file,
+            line_number=entrypoint.handler_line,
         )
         for node in nodes.values():
             graph.add_node(node)
         for edge in edges:
             graph.add_edge(edge)
 
-        # Level 0: Client -> API -> handler (must come after call graph)
-        self._add_level0_nodes(graph, endpoint)
+        # Level 0: Trigger -> API/EntryPoint -> handler (must come after call graph)
+        self._add_level0_nodes(graph, entrypoint)
 
-        # Add dependency injection nodes
-        self._add_dependency_nodes(graph, endpoint)
-
-        # Add middleware chain
-        self._add_middleware_nodes(graph)
+        if entrypoint.kind == "api":
+            # Add dependency injection nodes
+            self._add_dependency_nodes(graph, entrypoint)
+            # Add middleware chain
+            self._add_middleware_nodes(graph)
 
         # Build abstraction levels
         self._build_level_hierarchy(graph)
@@ -78,56 +86,85 @@ class FlowGraphBuilder:
 
         return graph
 
-    def _add_level0_nodes(self, graph: FlowGraph, endpoint: Endpoint) -> None:
-        """Add Level 0 nodes: Client, API, DB, Cache, External."""
-        # Client node
+    def _add_level0_nodes(self, graph: FlowGraph, entrypoint: EntryPoint) -> None:
+        """Add Level 0 nodes: Trigger, entrypoint/API, DB, Cache, External."""
+        trigger_label = entrypoint.trigger or entrypoint.label or entrypoint.handler_name
         graph.add_node(FlowNode(
-            id="client",
-            node_type=NodeType.CLIENT,
-            name="Client",
-            display_name="Client",
-            description=f"{endpoint.method} {endpoint.path}",
+            id="trigger",
+            node_type=NodeType.TRIGGER,
+            name="Trigger",
+            display_name=trigger_label,
+            description=self._describe_trigger(entrypoint),
             confidence=Confidence.DEFINITE,
             level=0,
-            metadata={"method": endpoint.method, "path": endpoint.path},
+            metadata={
+                "kind": entrypoint.kind,
+                "method": entrypoint.method,
+                "path": entrypoint.path,
+                "label": entrypoint.label,
+            },
         ))
 
-        # API node
-        graph.add_node(FlowNode(
-            id="api",
-            node_type=NodeType.API,
-            name="API",
-            display_name=f"{endpoint.method} {endpoint.path}",
-            description=endpoint.description or f"Handle {endpoint.method} {endpoint.path}.",
-            confidence=Confidence.DEFINITE,
-            level=0,
-        ))
+        target_id = self._find_handler_node_id(graph, entrypoint)
+        source_id = "trigger"
 
-        # Client -> API edge
+        if entrypoint.kind == "api":
+            graph.add_node(FlowNode(
+                id="api",
+                node_type=NodeType.API,
+                name="API",
+                display_name=entrypoint.label or f"{entrypoint.method} {entrypoint.path}".strip(),
+                description=entrypoint.description or f"Handle {entrypoint.method} {entrypoint.path}.",
+                confidence=Confidence.DEFINITE,
+                level=0,
+                metadata={"kind": entrypoint.kind},
+            ))
+            graph.add_edge(FlowEdge(
+                id="e_trigger_api",
+                source_id="trigger",
+                target_id="api",
+                edge_type=EdgeType.CALLS,
+                label=entrypoint.label,
+                confidence=Confidence.DEFINITE,
+            ))
+            source_id = "api"
+        else:
+            graph.add_node(FlowNode(
+                id="entrypoint",
+                node_type=NodeType.ENTRYPOINT,
+                name=entrypoint.handler_name,
+                display_name=entrypoint.label or entrypoint.handler_name,
+                description=entrypoint.description or self._describe_non_api_entrypoint(entrypoint),
+                file_path=entrypoint.handler_file,
+                line_start=entrypoint.handler_line,
+                confidence=Confidence.DEFINITE,
+                level=0,
+                metadata={"kind": entrypoint.kind, "group": entrypoint.group},
+            ))
+            graph.add_edge(FlowEdge(
+                id="e_trigger_entrypoint",
+                source_id="trigger",
+                target_id="entrypoint",
+                edge_type=EdgeType.CALLS,
+                label=entrypoint.group,
+                confidence=Confidence.DEFINITE,
+            ))
+            source_id = "entrypoint"
+
         graph.add_edge(FlowEdge(
-            id="e_client_api",
-            source_id="client",
-            target_id="api",
-            edge_type=EdgeType.CALLS,
-            label=f"{endpoint.method} {endpoint.path}",
-            confidence=Confidence.DEFINITE,
-        ))
-
-        # API -> handler edge
-        graph.add_edge(FlowEdge(
-            id="e_api_handler",
-            source_id="api",
-            target_id=self._find_handler_node_id(graph, endpoint),
+            id="e_entry_handler",
+            source_id=source_id,
+            target_id=target_id,
             edge_type=EdgeType.CALLS,
             confidence=Confidence.DEFINITE,
         ))
 
-    def _add_dependency_nodes(self, graph: FlowGraph, endpoint: Endpoint) -> None:
+    def _add_dependency_nodes(self, graph: FlowGraph, entrypoint: EntryPoint) -> None:
         """Add Depends() injection nodes."""
         deps = self.extractor.dependencies.get(
-            FastAPIExtractor.dependency_key(endpoint.handler_name, endpoint.handler_file), [],
+            FastAPIExtractor.dependency_key(entrypoint.handler_name, entrypoint.handler_file), [],
         )
-        handler_id = self._find_handler_node_id(graph, endpoint)
+        handler_id = self._find_handler_node_id(graph, entrypoint)
         for i, dep in enumerate(deps):
             dep_id = self._dependency_node_id(dep.func_name, dep.resolved_file_path or dep.file_path)
             if dep_id not in graph.nodes:
@@ -320,15 +357,15 @@ class FlowGraphBuilder:
                     ))
 
         # --- Lift cross-level edges (L0→L3 like api→handler) ---
-        handler_id = self._find_handler_node_id(graph, graph.endpoint)
+        handler_id = self._find_handler_node_id(graph, graph.entrypoint)
         handler_node = graph.nodes.get(handler_id)
         if handler_node:
             handler_file_id = handler_node.parent_id
             if handler_file_id:
                 # api→file (L0→L2)
                 graph.add_edge(FlowEdge(
-                    id="e_api_file",
-                    source_id="api",
+                    id="e_root_file",
+                    source_id=self._root_flow_node_id(graph),
                     target_id=handler_file_id,
                     edge_type=EdgeType.CALLS,
                     confidence=Confidence.DEFINITE,
@@ -337,8 +374,8 @@ class FlowGraphBuilder:
                 if handler_layer_id:
                     # api→layer (L0→L1)
                     graph.add_edge(FlowEdge(
-                        id="e_api_layer",
-                        source_id="api",
+                        id="e_root_layer",
+                        source_id=self._root_flow_node_id(graph),
                         target_id=handler_layer_id,
                         edge_type=EdgeType.CALLS,
                         confidence=Confidence.DEFINITE,
@@ -350,7 +387,7 @@ class FlowGraphBuilder:
                    if n.node_type == NodeType.MIDDLEWARE and n.level == 1]
         router_layer = "layer.routers"
         if mw_ids and router_layer in graph.nodes:
-            prev_id = "api"
+            prev_id = self._root_flow_node_id(graph)
             for mw_id in mw_ids:
                 graph.add_edge(FlowEdge(
                     id=f"e_mw_{prev_id}_{mw_id}",
@@ -399,7 +436,7 @@ class FlowGraphBuilder:
             ))
             graph.add_edge(FlowEdge(
                 id="e_api_db",
-                source_id="api",
+                source_id=self._root_flow_node_id(graph),
                 target_id="database",
                 edge_type=EdgeType.QUERIES,
                 confidence=Confidence.INFERRED,
@@ -416,7 +453,7 @@ class FlowGraphBuilder:
             ))
             graph.add_edge(FlowEdge(
                 id="e_api_ext",
-                source_id="api",
+                source_id=self._root_flow_node_id(graph),
                 target_id="external",
                 edge_type=EdgeType.REQUESTS,
                 confidence=Confidence.INFERRED,
@@ -436,6 +473,8 @@ class FlowGraphBuilder:
             fp = file_path.lower()
             if any(p in fp for p in ("dependenc", "deps", "inject")):
                 return "dependencies"
+            if any(p in fp for p in ("script", "cli", "command")) or fp.endswith("main.py"):
+                return "entrypoints"
             if any(p in fp for p in ("middleware",)):
                 return "middleware"
             if any(p in fp for p in ("route", "router", "endpoint", "view", "controller")):
@@ -457,14 +496,14 @@ class FlowGraphBuilder:
             return "logic"
         return max(type_counts, key=type_counts.get)  # type: ignore
 
-    def _find_handler_node_id(self, graph: FlowGraph, endpoint: Endpoint) -> str:
-        """Find the node ID for the endpoint handler function."""
+    def _find_handler_node_id(self, graph: FlowGraph, entrypoint: EntryPoint) -> str:
+        """Find the node ID for the entrypoint handler function."""
         # Look for exact match by name
         for nid, node in graph.nodes.items():
-            if (node.name == endpoint.handler_name
-                    and node.file_path == endpoint.handler_file):
+            if (node.name == entrypoint.handler_name
+                    and node.file_path == entrypoint.handler_file):
                 return nid
-        return endpoint.handler_name
+        return entrypoint.handler_name
 
     @staticmethod
     def _dependency_node_id(func_name: str, file_path: str | None) -> str:
@@ -525,8 +564,12 @@ class FlowGraphBuilder:
                 node.description = self._describe_file_node(graph, node.display_name, node.children)
             elif node.node_type == NodeType.MODULE:
                 node.description = self._describe_layer_node(graph, node.name, node.children)
+            elif node.node_type == NodeType.TRIGGER:
+                node.description = self._describe_trigger(graph.entrypoint)
+            elif node.node_type == NodeType.ENTRYPOINT:
+                node.description = graph.entrypoint.description or self._describe_non_api_entrypoint(graph.entrypoint)
             elif node.node_type == NodeType.API:
-                node.description = graph.endpoint.description or f"Handle {graph.endpoint.method} {graph.endpoint.path}."
+                node.description = graph.entrypoint.description or f"Handle {graph.entrypoint.method} {graph.entrypoint.path}."
             elif node.node_type == NodeType.DATABASE:
                 node.description = "Database touched by this request flow."
             elif node.node_type == NodeType.EXTERNAL_API:
@@ -567,6 +610,7 @@ class FlowGraphBuilder:
     ) -> str:
         """Describe a Level 1 semantic layer node."""
         role_map = {
+            "entrypoints": "Scripts and commands that start execution.",
             "routers": "Route handlers that receive HTTP requests.",
             "services": "Business logic executed after routing.",
             "repositories": "Persistence and database access operations.",
@@ -629,3 +673,32 @@ class FlowGraphBuilder:
         if remaining > 0:
             summary += f" and {remaining} more"
         return summary
+
+    @staticmethod
+    def _root_flow_node_id(graph: FlowGraph) -> str:
+        """Return the L0 node that represents the main flow surface."""
+        if "api" in graph.nodes:
+            return "api"
+        if "entrypoint" in graph.nodes:
+            return "entrypoint"
+        return "trigger"
+
+    @staticmethod
+    def _describe_trigger(entrypoint: EntryPoint) -> str:
+        """Describe the execution trigger at Level 0."""
+        if entrypoint.kind == "api":
+            return f"Incoming HTTP request for {entrypoint.method} {entrypoint.path}."
+        if entrypoint.kind == "script":
+            return f"Run the script entrypoint `{entrypoint.label}`."
+        if entrypoint.kind == "function":
+            return f"Start tracing from `{entrypoint.handler_name}()`."
+        return f"Start tracing from `{entrypoint.label or entrypoint.handler_name}`."
+
+    @staticmethod
+    def _describe_non_api_entrypoint(entrypoint: EntryPoint) -> str:
+        """Describe a non-HTTP entrypoint node."""
+        if entrypoint.kind == "script":
+            return entrypoint.description or f"Execute script entrypoint `{entrypoint.label}`."
+        if entrypoint.kind == "function":
+            return entrypoint.description or f"Trace the function `{entrypoint.handler_name}()`."
+        return entrypoint.description or f"Execute `{entrypoint.label or entrypoint.handler_name}`."

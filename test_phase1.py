@@ -4,10 +4,10 @@ import sys
 sys.path.insert(0, "core")
 
 from codecanvas.parser.fastapi_extractor import FastAPIExtractor
-from codecanvas.parser.call_graph import CallGraphBuilder
 from codecanvas.graph.builder import FlowGraphBuilder
 
 SAMPLE_PROJECT = "./sample-fastapi"
+SAMPLE_SCRIPT_PROJECT = "./sample-script"
 
 print("=" * 60)
 print("Phase 1 Test: Static Endpoint Map")
@@ -26,11 +26,19 @@ print(f"\n  Total endpoints: {len(endpoints)}")
 print(f"  Middlewares: {[m.class_name for m in extractor.middlewares]}")
 print(f"  Exception handlers: {[h.exception_class for h in extractor.exception_handlers]}")
 
+# 1b. Extract generic entry points
+print("\n--- Generic Entry Point Extraction (sample-fastapi) ---")
+builder = FlowGraphBuilder(SAMPLE_PROJECT)
+entrypoints = builder.get_entrypoints()
+for entry in entrypoints:
+    print(
+        f"  [{entry.kind:8s}] {entry.label:35s} -> "
+        f"{entry.handler_name} ({entry.handler_file}:{entry.handler_line})"
+    )
+print(f"\n  Total entry points: {len(entrypoints)}")
+
 # 2. Build flow for POST /login
 print("\n--- Flow Graph for POST /api/v1/auth/login ---")
-builder = FlowGraphBuilder(SAMPLE_PROJECT)
-builder.get_endpoints()
-
 target = None
 for ep in builder.get_endpoints():
     if "login" in ep.handler_name:
@@ -79,3 +87,44 @@ missing_desc = [node.id for node in me_flow.nodes.values() if not node.descripti
 print(f"  nodes missing descriptions: {len(missing_desc)}")
 if missing_desc:
     raise AssertionError(f"Nodes still missing descriptions: {missing_desc}")
+
+# 4. Verify API-free script entrypoints are discoverable
+print("\n--- Script Entry Point Extraction (sample-script) ---")
+script_builder = FlowGraphBuilder(SAMPLE_SCRIPT_PROJECT)
+script_entrypoints = script_builder.get_entrypoints()
+for entry in script_entrypoints:
+    print(
+        f"  [{entry.kind:8s}] {entry.label:35s} -> "
+        f"{entry.handler_name} ({entry.handler_file}:{entry.handler_line})"
+    )
+
+script_target = next((entry for entry in script_entrypoints if entry.kind == "script"), None)
+if not script_target:
+    raise AssertionError("script entrypoint not found in sample-script")
+
+script_flow = script_builder.build_flow(script_target)
+print(f"  Script nodes: {len(script_flow.nodes)}")
+print(f"  Script edges: {len(script_flow.edges)}")
+print(f"  Trigger node present: {'trigger' in script_flow.nodes}")
+print(f"  Entrypoint node present: {'entrypoint' in script_flow.nodes}")
+has_load_items = any(node.name == "load_items" for node in script_flow.nodes.values())
+has_normalize_item = any(node.name == "normalize_item" for node in script_flow.nodes.values())
+has_batch_report = any(node.name == "BatchReport" for node in script_flow.nodes.values())
+low_signal_unresolved = [
+    node.id for node in script_flow.nodes.values()
+    if node.id.startswith("unresolved.") and any(
+        noise in node.id for noise in ("append", "strip", "upper")
+    )
+]
+print(f"  load_items in flow: {has_load_items}")
+print(f"  normalize_item in flow: {has_normalize_item}")
+print(f"  BatchReport in flow: {has_batch_report}")
+print(f"  low-signal unresolved nodes: {low_signal_unresolved}")
+if not has_load_items:
+    raise AssertionError("script flow did not include load_items()")
+if not has_normalize_item:
+    raise AssertionError("nested normalize_item() was not resolved in script flow")
+if not has_batch_report:
+    raise AssertionError("BatchReport constructor was not resolved in script flow")
+if low_signal_unresolved:
+    raise AssertionError(f"low-signal calls should be collapsed: {low_signal_unresolved}")

@@ -116,6 +116,7 @@ class FastAPIExtractor:
 
         # Resolve router includes (app.include_router)
         self._resolve_router_includes()
+        self._sync_api_entrypoints()
 
         return self.endpoints
 
@@ -464,6 +465,13 @@ class FastAPIExtractor:
                     if ep.handler_file == matched_router.file_path:
                         if not ep.path.startswith(include_prefix):
                             ep.path = include_prefix + ep.path
+
+    def _sync_api_entrypoints(self) -> None:
+        """Refresh derived labels after path prefixes have been resolved."""
+        for ep in self.endpoints:
+            ep.label = f"{ep.method} {ep.path}".strip()
+            ep.trigger = f"HTTP {ep.method} {ep.path}".strip()
+            ep.id = f"api:{ep.method}:{ep.path}"
 
     def _resolve_symbol_definition(
         self, symbol_name: str, from_file: str,

@@ -10,12 +10,16 @@ export class FlowPanelProvider {
     ) {}
 
     showFlow(flowData: any) {
+        const entry = flowData.entrypoint || flowData.endpoint;
+        const title = entry?.kind === 'api'
+            ? `Flow: ${entry.method} ${entry.path}`
+            : `Flow: ${entry?.label || entry?.handler_name || 'Entrypoint'}`;
         if (this.panel) {
             this.panel.reveal(vscode.ViewColumn.Two);
         } else {
             this.panel = vscode.window.createWebviewPanel(
                 'codecanvas.flow',
-                `Flow: ${flowData.endpoint.method} ${flowData.endpoint.path}`,
+                title,
                 vscode.ViewColumn.Two,
                 {
                     enableScripts: true,
@@ -50,7 +54,7 @@ export class FlowPanelProvider {
             });
         }
 
-        this.panel.title = `Flow: ${flowData.endpoint.method} ${flowData.endpoint.path}`;
+        this.panel.title = title;
         this.panel.webview.html = this.getWebviewHtml(flowData);
     }
 
@@ -86,11 +90,17 @@ export class FlowPanelProvider {
         .topbar label { font-size: 12px; opacity: 0.7; }
         .topbar input[type=range] { flex: 1; max-width: 300px; }
         .level-label { font-size: 12px; font-weight: bold; min-width: 180px; }
-        .endpoint-badge { font-size: 13px; font-weight: bold; margin-left: auto; }
+        .endpoint-badge { font-size: 13px; font-weight: bold; margin-left: auto; display: flex; align-items: center; gap: 8px; }
         .method-GET { color: #61affe; }
         .method-POST { color: #49cc90; }
         .method-PUT { color: #fca130; }
         .method-DELETE { color: #f93e3e; }
+        .kind-badge {
+            font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+            padding: 2px 6px; border-radius: 999px;
+            background: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+        }
 
         .main { display: flex; flex: 1; overflow: hidden; }
         .canvas-container { flex: 1; overflow: auto; padding: 24px; }
@@ -134,8 +144,10 @@ export class FlowPanelProvider {
         .confidence-inferred { border-left: 3px solid #fca130; border-left-style: dashed; }
         .confidence-runtime { border-left: 3px solid #9b59b6; border-left-style: dotted; }
 
+        .type-trigger { border-top: 3px solid #34495e; }
         .type-client { border-top: 3px solid #61affe; }
         .type-api { border-top: 3px solid #49cc90; }
+        .type-entrypoint { border-top: 3px solid #16a085; }
         .type-router { border-top: 3px solid #49cc90; }
         .type-service { border-top: 3px solid #fca130; }
         .type-repository { border-top: 3px solid #9b59b6; }
@@ -188,6 +200,7 @@ export class FlowPanelProvider {
     <script nonce="${nonce}">
         var vscodeApi = acquireVsCodeApi();
         var flowData = JSON.parse(atob("${encodedData}"));
+        var entrypoint = flowData.entrypoint || flowData.endpoint;
 
         var LEVEL_NAMES = {
             0: 'Level 0: System Overview',
@@ -213,11 +226,19 @@ export class FlowPanelProvider {
 
         // Set endpoint badge
         var badge = document.getElementById('endpointBadge');
-        var methodSpan = document.createElement('span');
-        methodSpan.className = 'method-' + flowData.endpoint.method;
-        methodSpan.textContent = flowData.endpoint.method + ' ';
-        badge.appendChild(methodSpan);
-        badge.appendChild(document.createTextNode(flowData.endpoint.path));
+        if (entrypoint.kind === 'api') {
+            var methodSpan = document.createElement('span');
+            methodSpan.className = 'method-' + entrypoint.method;
+            methodSpan.textContent = entrypoint.method + ' ';
+            badge.appendChild(methodSpan);
+            badge.appendChild(document.createTextNode(entrypoint.path));
+        } else {
+            var kindSpan = document.createElement('span');
+            kindSpan.className = 'kind-badge';
+            kindSpan.textContent = entrypoint.kind;
+            badge.appendChild(kindSpan);
+            badge.appendChild(document.createTextNode(entrypoint.label || entrypoint.handler_name));
+        }
 
         renderFlow(currentLevel);
 

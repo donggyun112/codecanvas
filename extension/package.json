@@ -1,7 +1,7 @@
 {
   "name": "codecanvas",
   "displayName": "CodeCanvas",
-  "description": "Python request flow explainer - visualize how FastAPI requests flow through your code",
+  "description": "Python code flow explainer - visualize API, script, and function entrypoints through your code",
   "version": "0.1.0",
   "publisher": "codecanvas",
   "engines": {
@@ -18,7 +18,7 @@
       },
       {
         "command": "codecanvas.showFlow",
-        "title": "CodeCanvas: Show Request Flow"
+        "title": "CodeCanvas: Show Flow"
       }
     ],
     "viewsContainers": {
@@ -35,7 +35,7 @@
         {
           "type": "webview",
           "id": "codecanvas.sidebar",
-          "name": "Endpoints"
+          "name": "Entry Points"
         }
       ]
     }

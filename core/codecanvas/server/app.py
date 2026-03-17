@@ -2,8 +2,7 @@
 
 Provides endpoints:
 - POST /analyze: Analyze a project directory
-- GET /endpoints: List discovered FastAPI endpoints
-- POST /flow: Build flow graph for a specific endpoint
+- POST /flow: Build flow graph for a specific entrypoint
 """
 from __future__ import annotations
 
@@ -35,11 +34,15 @@ class AnalyzeRequest(BaseModel):
 
 class FlowRequest(BaseModel):
     project_path: str
-    method: str
-    path: str
+    entry_id: str
 
 
-class EndpointResponse(BaseModel):
+class EntryPointResponse(BaseModel):
+    id: str
+    kind: str
+    group: str
+    label: str
+    trigger: str
     method: str
     path: str
     handler_name: str
@@ -52,30 +55,55 @@ class EndpointResponse(BaseModel):
 
 @app.post("/analyze")
 async def analyze_project(req: AnalyzeRequest):
-    """Analyze a project and return discovered endpoints."""
+    """Analyze a project and return discovered entrypoints."""
     project_path = req.project_path
     if not Path(project_path).is_dir():
         raise HTTPException(404, f"Directory not found: {project_path}")
 
     builder = FlowGraphBuilder(project_path)
-    endpoints = builder.get_endpoints()
+    entrypoints = builder.get_entrypoints()
     _builders[project_path] = builder
 
     return {
         "project_path": project_path,
-        "endpoint_count": len(endpoints),
-        "endpoints": [
-            EndpointResponse(
-                method=ep.method,
-                path=ep.path,
-                handler_name=ep.handler_name,
-                handler_file=ep.handler_file,
-                handler_line=ep.handler_line,
-                dependencies=ep.dependencies,
-                tags=ep.tags,
-                description=ep.description,
+        "entrypoint_count": len(entrypoints),
+        "endpoint_count": len([entry for entry in entrypoints if entry.kind == "api"]),
+        "entrypoints": [
+            EntryPointResponse(
+                id=entry.id,
+                kind=entry.kind,
+                group=entry.group,
+                label=entry.label,
+                trigger=entry.trigger,
+                method=entry.method,
+                path=entry.path,
+                handler_name=entry.handler_name,
+                handler_file=entry.handler_file,
+                handler_line=entry.handler_line,
+                dependencies=entry.dependencies,
+                tags=entry.tags,
+                description=entry.description,
             ).model_dump()
-            for ep in endpoints
+            for entry in entrypoints
+        ],
+        "endpoints": [
+            EntryPointResponse(
+                id=entry.id,
+                kind=entry.kind,
+                group=entry.group,
+                label=entry.label,
+                trigger=entry.trigger,
+                method=entry.method,
+                path=entry.path,
+                handler_name=entry.handler_name,
+                handler_file=entry.handler_file,
+                handler_line=entry.handler_line,
+                dependencies=entry.dependencies,
+                tags=entry.tags,
+                description=entry.description,
+            ).model_dump()
+            for entry in entrypoints
+            if entry.kind == "api"
         ],
         "middlewares": [
             {"class_name": m.class_name, "file": m.file_path, "line": m.line}
@@ -91,27 +119,27 @@ async def analyze_project(req: AnalyzeRequest):
 
 @app.post("/flow")
 async def build_flow(req: FlowRequest):
-    """Build flow graph for a specific endpoint."""
+    """Build flow graph for a specific entrypoint."""
     builder = _builders.get(req.project_path)
     if builder is None:
         # Auto-analyze if not cached
         builder = FlowGraphBuilder(req.project_path)
-        builder.get_endpoints()
+        builder.get_entrypoints()
         _builders[req.project_path] = builder
 
-    # Find matching endpoint
-    endpoints = builder.get_endpoints()
+    # Find matching entrypoint
+    entrypoints = builder.get_entrypoints()
     target = None
-    for ep in endpoints:
-        if ep.method == req.method.upper() and ep.path == req.path:
-            target = ep
+    for entry in entrypoints:
+        if entry.id == req.entry_id:
+            target = entry
             break
 
     if target is None:
         raise HTTPException(
             404,
-            f"Endpoint not found: {req.method.upper()} {req.path}. "
-            f"Available: {[(e.method, e.path) for e in endpoints]}"
+            f"Entrypoint not found: {req.entry_id}. "
+            f"Available: {[entry.id for entry in entrypoints]}"
         )
 
     flow_graph = builder.build_flow(target)

@@ -23,45 +23,44 @@ export function activate(context: vscode.ExtensionContext) {
             await server.ensureRunning();
             const result = await server.analyze(workspaceFolder.uri.fsPath);
             if (result) {
-                sidebarProvider.updateEndpoints(result.endpoints);
+                const entrypoints = result.entrypoints || result.endpoints || [];
+                sidebarProvider.updateEntryPoints(entrypoints);
                 vscode.window.showInformationMessage(
-                    `CodeCanvas: Found ${result.endpoint_count} endpoints`
+                    `CodeCanvas: Found ${result.entrypoint_count ?? entrypoints.length} entry points`
                 );
             }
         }),
 
-        vscode.commands.registerCommand('codecanvas.showFlow', async (method?: string, path?: string) => {
+        vscode.commands.registerCommand('codecanvas.showFlow', async (entryId?: string) => {
             const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
             if (!workspaceFolder) return;
 
-            if (!method || !path) {
+            if (!entryId) {
                 // Show quick pick if not provided
                 await server.ensureRunning();
                 const result = await server.analyze(workspaceFolder.uri.fsPath);
-                if (!result || !result.endpoints.length) {
-                    vscode.window.showWarningMessage('No endpoints found');
+                const entrypoints = result?.entrypoints || result?.endpoints || [];
+                if (!result || !entrypoints.length) {
+                    vscode.window.showWarningMessage('No entry points found');
                     return;
                 }
-                interface EndpointItem extends vscode.QuickPickItem {
-                    method: string;
-                    endpointPath: string;
+                interface EntryPointItem extends vscode.QuickPickItem {
+                    entryId: string;
                 }
-                const items: EndpointItem[] = result.endpoints.map((ep: any) => ({
-                    label: `${ep.method} ${ep.path}`,
-                    description: ep.handler_name,
-                    detail: ep.description,
-                    method: ep.method,
-                    endpointPath: ep.path,
+                const items: EntryPointItem[] = entrypoints.map((entry: any) => ({
+                    label: entry.label,
+                    description: `${entry.group} -> ${entry.handler_name}`,
+                    detail: entry.description,
+                    entryId: entry.id,
                 }));
                 const picked = await vscode.window.showQuickPick(items, {
-                    placeHolder: 'Select endpoint to visualize',
+                    placeHolder: 'Select entry point to visualize',
                 });
                 if (!picked) return;
-                method = picked.method;
-                path = picked.endpointPath;
+                entryId = picked.entryId;
             }
 
-            const flow = await server.getFlow(workspaceFolder.uri.fsPath, method!, path!);
+            const flow = await server.getFlow(workspaceFolder.uri.fsPath, entryId!);
             if (flow) {
                 flowPanel.showFlow(flow);
             }

@@ -13,8 +13,10 @@ from typing import Any
 class NodeType(enum.Enum):
     """Types of nodes in the flow graph."""
     # Level 0
+    TRIGGER = "trigger"
     CLIENT = "client"
     API = "api"
+    ENTRYPOINT = "entrypoint"
     DATABASE = "database"
     CACHE = "cache"
     EXTERNAL_API = "external_api"
@@ -113,23 +115,69 @@ class FlowEdge:
 
 
 @dataclass
-class Endpoint:
-    """A FastAPI endpoint extracted from the codebase."""
-    method: str                        # GET, POST, PUT, DELETE, etc.
-    path: str                          # /api/v1/login
-    handler_name: str                  # Function name
-    handler_file: str                  # File path
-    handler_line: int                  # Line number
+class EntryPoint:
+    """An execution entry point extracted from the codebase."""
+    kind: str = "api"                  # api, script, function, job, worker
+    id: str = ""
+    group: str = ""
+    label: str = ""
+    trigger: str = ""
+    method: str = ""                   # GET, POST, PUT, DELETE for API
+    path: str = ""                     # /api/v1/login or logical path/label
+    handler_name: str = ""             # Function name
+    handler_file: str = ""             # File path
+    handler_line: int = 0              # Line number
     dependencies: list[str] = field(default_factory=list)  # Depends() refs
     tags: list[str] = field(default_factory=list)
     response_model: str | None = None
     description: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.group:
+            self.group = {
+                "api": "API",
+                "script": "Scripts",
+                "function": "Functions",
+                "job": "Jobs",
+                "worker": "Workers",
+            }.get(self.kind, "Entrypoints")
+
+        if not self.label:
+            if self.kind == "api":
+                self.label = f"{self.method} {self.path}".strip()
+            elif self.path:
+                self.label = self.path
+            else:
+                self.label = self.handler_name
+
+        if not self.trigger:
+            if self.kind == "api":
+                self.trigger = f"HTTP {self.method} {self.path}".strip()
+            elif self.kind == "script":
+                self.trigger = f"Script: {self.label}"
+            elif self.kind == "function":
+                self.trigger = f"Function: {self.label}"
+            else:
+                self.trigger = self.label
+
+        if not self.id:
+            if self.kind == "api":
+                self.id = f"api:{self.method}:{self.path}"
+            else:
+                self.id = f"{self.kind}:{self.handler_file}:{self.handler_name}:{self.handler_line}"
+
+        if self.description:
+            self.description = " ".join(self.description.split())
+
+
+Endpoint = EntryPoint
 
 
 @dataclass
 class FlowGraph:
     """Complete flow graph for a single request path."""
-    endpoint: Endpoint
+    entrypoint: EntryPoint
     nodes: dict[str, FlowNode] = field(default_factory=dict)
     edges: list[FlowEdge] = field(default_factory=list)
 
@@ -149,20 +197,33 @@ class FlowGraph:
         return [e for e in self.edges
                 if e.source_id in visible_ids and e.target_id in visible_ids]
 
+    @property
+    def endpoint(self) -> EntryPoint:
+        """Backward-compatible alias for older API-centric callers."""
+        return self.entrypoint
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for JSON transport to VS Code webview."""
+        entrypoint_payload = {
+            "id": self.entrypoint.id,
+            "kind": self.entrypoint.kind,
+            "group": self.entrypoint.group,
+            "label": self.entrypoint.label,
+            "trigger": self.entrypoint.trigger,
+            "method": self.entrypoint.method,
+            "path": self.entrypoint.path,
+            "handler_name": self.entrypoint.handler_name,
+            "handler_file": self.entrypoint.handler_file,
+            "handler_line": self.entrypoint.handler_line,
+            "dependencies": self.entrypoint.dependencies,
+            "tags": self.entrypoint.tags,
+            "response_model": self.entrypoint.response_model,
+            "description": self.entrypoint.description,
+            "metadata": self.entrypoint.metadata,
+        }
         return {
-            "endpoint": {
-                "method": self.endpoint.method,
-                "path": self.endpoint.path,
-                "handler_name": self.endpoint.handler_name,
-                "handler_file": self.endpoint.handler_file,
-                "handler_line": self.endpoint.handler_line,
-                "dependencies": self.endpoint.dependencies,
-                "tags": self.endpoint.tags,
-                "response_model": self.endpoint.response_model,
-                "description": self.endpoint.description,
-            },
+            "entrypoint": entrypoint_payload,
+            "endpoint": entrypoint_payload,
             "nodes": {
                 nid: {
                     "id": n.id,

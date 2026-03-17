@@ -37,6 +37,7 @@ class FunctionDef:
     docstring: str = ""
     params: list[str] = field(default_factory=list)
     return_annotation: str | None = None
+    definition_type: str = "function"  # function | class
 
 
 @dataclass
@@ -67,6 +68,11 @@ HTTP_PATTERNS = {
     "request", "fetch", "send",
 }
 HTTP_OBJECT_HINTS = {"client", "http", "httpx", "requests", "aiohttp", "session"}
+LOW_SIGNAL_METHODS = {
+    "append", "extend", "insert", "isoformat", "get",
+    "items", "keys", "values", "split", "strip",
+    "lower", "upper", "startswith", "endswith",
+}
 
 # Calls to filter out (framework internals, builtins, noise)
 IGNORE_CALLS = {
@@ -160,9 +166,36 @@ class CallGraphBuilder:
                 )
                 self._functions[qname] = func_def
                 self._name_index.setdefault(node.name, []).append(qname)
+                # Index nested functions inside this function scope as lexical children.
+                self._visit_definitions(node, qname, file_path, class_name)
 
             elif isinstance(node, ast.ClassDef):
                 class_qname = f"{namespace}.{node.name}"
+                init_node = next(
+                    (
+                        child for child in node.body
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and child.name == "__init__"
+                    ),
+                    None,
+                )
+                class_def = FunctionDef(
+                    name=node.name,
+                    qualified_name=class_qname,
+                    file_path=file_path,
+                    line_start=node.lineno,
+                    line_end=node.end_lineno or node.lineno,
+                    is_async=False,
+                    class_name=None,
+                    decorators=[self._decorator_name(d) for d in node.decorator_list],
+                    calls=self._extract_calls(init_node) if init_node else [],
+                    docstring=ast.get_docstring(node) or "",
+                    params=[a.arg for a in init_node.args.args if a.arg != "self"] if init_node else [],
+                    return_annotation=node.name,
+                    definition_type="class",
+                )
+                self._functions[class_qname] = class_def
+                self._name_index.setdefault(node.name, []).append(class_qname)
                 self._visit_definitions(node, class_qname, file_path, node.name)
 
     def _extract_calls(self, func_node: ast.AST) -> list[CallSite]:
@@ -172,7 +205,12 @@ class CallGraphBuilder:
         instead of ast.walk() which flattens the tree.
         """
         calls: list[CallSite] = []
-        self._visit_calls(func_node, calls, branch_ctx=None)
+        body = getattr(func_node, "body", None)
+        if isinstance(body, list):
+            for child in body:
+                self._visit_calls(child, calls, branch_ctx=None)
+        else:
+            self._visit_calls(func_node, calls, branch_ctx=None)
         return calls
 
     def _visit_calls(
@@ -182,6 +220,10 @@ class CallGraphBuilder:
         branch_ctx: tuple[str, str | None] | None,
     ) -> None:
         """Recursively visit AST nodes, tracking branch context with proper push/pop."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            # Nested scopes are indexed separately; do not flatten them into the parent flow.
+            return
+
         # Determine branch context for children of control-flow nodes
         if isinstance(node, ast.If):
             cond = ast.unparse(node.test) if hasattr(ast, "unparse") else ""
@@ -226,9 +268,9 @@ class CallGraphBuilder:
         # Extract calls from this node
         if isinstance(node, ast.Call):
             func_name = self._get_call_target(node)
-            if func_name and not self._should_ignore_call(func_name):
-                is_db = self._is_db_call(node)
-                is_http = self._is_http_call(node)
+            is_db = self._is_db_call(node)
+            is_http = self._is_http_call(node)
+            if func_name and not self._should_ignore_call(func_name) and not self._is_low_signal_call(node, is_db, is_http):
                 calls.append(CallSite(
                     func_name=func_name,
                     line=node.lineno,
@@ -496,20 +538,35 @@ class CallGraphBuilder:
         candidates = self._name_index.get(name, [])
         if not candidates:
             return None
+        resolved_candidates = [self._functions[qname] for qname in candidates]
+
+        local_nested = [
+            func for func in resolved_candidates
+            if func.file_path == caller.file_path
+            and func.qualified_name.startswith(caller.qualified_name + ".")
+        ]
+        if local_nested:
+            return min(local_nested, key=lambda func: abs(func.line_start - call.line))
+
+        if name[:1].isupper():
+            class_candidates = [func for func in resolved_candidates if func.definition_type == "class"]
+            preferred_class = self._prefer_same_module(class_candidates, caller)
+            if preferred_class:
+                return preferred_class
 
         # Prefer same module
-        caller_module = self._module_map.get(caller.file_path, "")
-        for qname in candidates:
-            func = self._functions[qname]
-            func_module = self._module_map.get(func.file_path, "")
-            if func_module == caller_module:
-                return func
+        preferred = self._prefer_same_module(resolved_candidates, caller)
+        if preferred:
+            return preferred
 
         # Fallback: first candidate
-        return self._functions[candidates[0]]
+        return resolved_candidates[0]
 
     def _classify_function(self, func: FunctionDef) -> NodeType:
         """Classify a function into a semantic node type."""
+        if func.definition_type == "class":
+            return NodeType.CLASS
+
         name_lower = func.name.lower()
         path_lower = func.file_path.lower()
         class_lower = (func.class_name or "").lower()
@@ -547,6 +604,10 @@ class CallGraphBuilder:
         docstring = self._normalize_text(func.docstring)
         if docstring:
             return docstring
+
+        if func.definition_type == "class":
+            human_name = self._humanize_identifier(func.name)
+            return f"Construct {human_name}."
 
         simple_name = func.name.lstrip("_")
         special_cases = {
@@ -589,6 +650,19 @@ class CallGraphBuilder:
             return f"Instantiate or invoke {human_name}; definition could not be resolved statically."
         return f"Call {human_name}; definition could not be resolved statically."
 
+    def _prefer_same_module(
+        self,
+        candidates: list[FunctionDef],
+        caller: FunctionDef,
+    ) -> FunctionDef | None:
+        """Prefer candidates that live in the same module as the caller."""
+        caller_module = self._module_map.get(caller.file_path, "")
+        for func in candidates:
+            func_module = self._module_map.get(func.file_path, "")
+            if func_module == caller_module:
+                return func
+        return None
+
     @staticmethod
     def _describe_exception(call: CallSite) -> str:
         """Describe an exception node."""
@@ -626,6 +700,20 @@ class CallGraphBuilder:
             if func_name.startswith(prefix):
                 return True
         return False
+
+    @staticmethod
+    def _is_low_signal_call(node: ast.Call, is_db: bool, is_http: bool) -> bool:
+        """Collapse low-signal value/object helper calls out of the main flow."""
+        if is_db or is_http:
+            return False
+        if not isinstance(node.func, ast.Attribute):
+            return False
+        if node.func.attr not in LOW_SIGNAL_METHODS:
+            return False
+        base = node.func.value
+        if isinstance(base, ast.Name) and base.id == "self":
+            return False
+        return True
 
     @staticmethod
     def _is_db_call(node: ast.Call) -> bool:

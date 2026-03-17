@@ -231,7 +231,7 @@ export class AnalysisServer {
         }
     }
 
-    async getFlow(projectPath: string, method: string, endpointPath: string): Promise<any> {
+    async getFlow(projectPath: string, entryId: string): Promise<any> {
         if (!this.ready) {
             vscode.window.showErrorMessage('CodeCanvas server is not running.');
             return null;
@@ -240,7 +240,7 @@ export class AnalysisServer {
             const res = await fetch(`${BASE_URL}/flow`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ project_path: projectPath, method, path: endpointPath }),
+                body: JSON.stringify({ project_path: projectPath, entry_id: entryId }),
             });
             if (!res.ok) {
                 const body = await res.text();
