@@ -92,6 +92,8 @@ class FlowNode:
     def __post_init__(self):
         if not self.display_name:
             self.display_name = self.name
+        if self.description:
+            self.description = " ".join(self.description.split())
 
 
 @dataclass

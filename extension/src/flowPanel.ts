@@ -124,7 +124,10 @@ export class FlowPanelProvider {
         .flow-node.selected { border-color: var(--vscode-focusBorder); background: var(--vscode-list-activeSelectionBackground); }
         .flow-node .node-type { font-size: 10px; text-transform: uppercase; opacity: 0.5; margin-bottom: 2px; }
         .flow-node .node-name { font-weight: bold; font-size: 14px; }
-        .flow-node .node-desc { font-size: 11px; opacity: 0.6; margin-top: 4px; max-width: 300px; }
+        .flow-node .node-desc {
+            font-size: 12px; opacity: 0.78; margin-top: 6px; max-width: 320px;
+            line-height: 1.35;
+        }
         .flow-node .node-file { font-size: 10px; opacity: 0.4; margin-top: 4px; }
         .confidence-definite { border-left: 3px solid #49cc90; }
         .confidence-high { border-left: 3px solid #61affe; }
@@ -281,8 +284,8 @@ export class FlowPanelProvider {
             if (node.description) {
                 var descEl = document.createElement('div');
                 descEl.className = 'node-desc';
-                descEl.textContent = node.description.length > 80
-                    ? node.description.slice(0, 80) + '...'
+                descEl.textContent = node.description.length > 140
+                    ? node.description.slice(0, 140) + '...'
                     : node.description;
                 el.appendChild(descEl);
             }

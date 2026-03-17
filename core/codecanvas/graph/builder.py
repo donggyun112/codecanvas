@@ -74,6 +74,7 @@ class FlowGraphBuilder:
 
         # Build abstraction levels
         self._build_level_hierarchy(graph)
+        self._fill_missing_descriptions(graph)
 
         return graph
 
@@ -97,6 +98,7 @@ class FlowGraphBuilder:
             node_type=NodeType.API,
             name="API",
             display_name=f"{endpoint.method} {endpoint.path}",
+            description=endpoint.description or f"Handle {endpoint.method} {endpoint.path}.",
             confidence=Confidence.DEFINITE,
             level=0,
         ))
@@ -134,6 +136,7 @@ class FlowGraphBuilder:
                     node_type=NodeType.DEPENDENCY,
                     name=dep.func_name,
                     display_name=f"Depends({dep.func_name})",
+                    description=f"Resolve dependency `{dep.func_name}` before the route handler runs.",
                     file_path=dep.file_path,
                     line_start=dep.line,
                     confidence=Confidence.DEFINITE,
@@ -172,6 +175,11 @@ class FlowGraphBuilder:
                 dep.resolved_line,
             )
             if dep_root_id and dep_root_id in graph.nodes:
+                root_desc = graph.nodes[dep_root_id].description
+                if root_desc:
+                    graph.nodes[dep_id].description = (
+                        f"Resolve dependency `{dep.func_name}` before the route runs. {root_desc}"
+                    )
                 graph.add_edge(FlowEdge(
                     id=self._unique_edge_id(graph, f"e_dep_root_{i}"),
                     source_id=dep_id,
@@ -196,6 +204,7 @@ class FlowGraphBuilder:
                 node_type=NodeType.MIDDLEWARE,
                 name=mw.class_name,
                 display_name=mw.class_name,
+                description=f"Run {mw.class_name} before passing control to the route layer.",
                 file_path=mw.file_path,
                 line_start=mw.line,
                 confidence=Confidence.DEFINITE,
@@ -224,6 +233,7 @@ class FlowGraphBuilder:
                 node_type=NodeType.FILE,
                 name=basename,
                 display_name=basename,
+                description=self._describe_file_node(graph, basename, node_ids),
                 file_path=file_path,
                 confidence=Confidence.DEFINITE,
                 level=2,
@@ -256,6 +266,7 @@ class FlowGraphBuilder:
                 node_type=NodeType.MODULE,
                 name=layer_name,
                 display_name=display,
+                description=self._describe_layer_node(graph, layer_name, file_node_ids),
                 confidence=Confidence.DEFINITE,
                 level=1,
                 children=file_node_ids,
@@ -382,6 +393,7 @@ class FlowGraphBuilder:
                 node_type=NodeType.DATABASE,
                 name="Database",
                 display_name="Database",
+                description="Database touched by this request flow.",
                 confidence=Confidence.DEFINITE,
                 level=0,
             ))
@@ -398,6 +410,7 @@ class FlowGraphBuilder:
                 node_type=NodeType.EXTERNAL_API,
                 name="External API",
                 display_name="External API",
+                description="External HTTP dependency touched by this request flow.",
                 confidence=Confidence.INFERRED,
                 level=0,
             ))
@@ -497,3 +510,122 @@ class FlowGraphBuilder:
         while f"{preferred_id}_{suffix}" in existing:
             suffix += 1
         return f"{preferred_id}_{suffix}"
+
+    def _fill_missing_descriptions(self, graph: FlowGraph) -> None:
+        """Populate descriptions for synthetic nodes after the graph is assembled."""
+        for node in graph.nodes.values():
+            if node.description:
+                continue
+
+            if node.node_type == NodeType.DEPENDENCY:
+                node.description = self._describe_dependency_node(graph, node)
+            elif node.node_type == NodeType.MIDDLEWARE:
+                node.description = f"Run {node.display_name} before the route handler."
+            elif node.node_type == NodeType.FILE:
+                node.description = self._describe_file_node(graph, node.display_name, node.children)
+            elif node.node_type == NodeType.MODULE:
+                node.description = self._describe_layer_node(graph, node.name, node.children)
+            elif node.node_type == NodeType.API:
+                node.description = graph.endpoint.description or f"Handle {graph.endpoint.method} {graph.endpoint.path}."
+            elif node.node_type == NodeType.DATABASE:
+                node.description = "Database touched by this request flow."
+            elif node.node_type == NodeType.EXTERNAL_API:
+                node.description = "External HTTP dependency touched by this request flow."
+
+    def _describe_dependency_node(self, graph: FlowGraph, node: FlowNode) -> str:
+        """Describe a Level 1 dependency injection node."""
+        targets = [
+            graph.nodes[edge.target_id]
+            for edge in graph.edges
+            if edge.source_id == node.id and edge.edge_type == EdgeType.DEPENDS_ON
+            and edge.target_id in graph.nodes
+        ]
+        if targets:
+            target = targets[0]
+            return f"Resolve dependency `{node.name}` before the route runs. {target.description}"
+        return f"Resolve dependency `{node.name}` before the route runs."
+
+    def _describe_file_node(
+        self,
+        graph: FlowGraph,
+        basename: str,
+        child_ids: list[str],
+    ) -> str:
+        """Describe a file-level abstraction node."""
+        child_names = self._child_summary(
+            graph, child_ids, allowed_levels={3}, prefer_description=False,
+        )
+        if child_names:
+            return f"File `{basename}` containing {child_names}."
+        return f"Flow extracted from file `{basename}`."
+
+    def _describe_layer_node(
+        self,
+        graph: FlowGraph,
+        layer_name: str,
+        file_node_ids: list[str],
+    ) -> str:
+        """Describe a Level 1 semantic layer node."""
+        role_map = {
+            "routers": "Route handlers that receive HTTP requests.",
+            "services": "Business logic executed after routing.",
+            "repositories": "Persistence and database access operations.",
+            "dependencies": "Dependency injection and request-scoped setup.",
+            "middleware": "Cross-cutting request middleware.",
+            "logic": "Shared helper logic.",
+        }
+        file_summary = self._child_summary(
+            graph, file_node_ids, allowed_levels={2}, prefer_description=False,
+        )
+        role_text = role_map.get(layer_name, "Grouped request-flow layer.")
+        if file_summary:
+            return f"{role_text} Includes {file_summary}."
+        return role_text
+
+    @staticmethod
+    def _child_summary(
+        graph: FlowGraph,
+        child_ids: list[str],
+        allowed_levels: set[int],
+        prefer_description: bool = False,
+        limit: int = 3,
+    ) -> str:
+        """Summarize child nodes for file/layer descriptions."""
+        candidates: list[FlowNode] = []
+        priority = {
+            NodeType.ROUTER: 0,
+            NodeType.DEPENDENCY: 1,
+            NodeType.SERVICE: 2,
+            NodeType.REPOSITORY: 3,
+            NodeType.FUNCTION: 4,
+            NodeType.METHOD: 5,
+            NodeType.EXCEPTION: 6,
+        }
+        for child_id in child_ids:
+            child = graph.nodes.get(child_id)
+            if child and child.level in allowed_levels:
+                candidates.append(child)
+
+        candidates.sort(key=lambda child: (
+            priority.get(child.node_type, 99),
+            child.line_start or 0,
+            child.display_name,
+        ))
+
+        labels = [
+            child.description if prefer_description and child.description else child.display_name
+            for child in candidates
+        ]
+        if not labels:
+            return ""
+
+        unique_labels: list[str] = []
+        for label in labels:
+            if label not in unique_labels:
+                unique_labels.append(label)
+
+        summary = ", ".join(f"`{label}`" for label in unique_labels[:limit])
+        remaining = len(unique_labels) - limit
+        if remaining > 0:
+            summary += f" and {remaining} more"
+        return summary

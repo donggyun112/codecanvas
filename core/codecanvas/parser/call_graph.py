@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -293,7 +294,7 @@ class CallGraphBuilder:
                 node_type=self._classify_function(func),
                 name=func.name,
                 display_name=func.name,
-                description=func.docstring,
+                description=self._describe_function(func),
                 file_path=func.file_path,
                 line_start=func.line_start,
                 line_end=func.line_end,
@@ -327,7 +328,7 @@ class CallGraphBuilder:
                         node_type=NodeType.EXCEPTION,
                         name=call.func_name,
                         display_name=display,
-                        description=f"HTTP {status}" if status else f"raise {call.func_name}",
+                        description=self._describe_exception(call),
                         file_path=func.file_path,
                         line_start=call.line,
                         confidence=Confidence.DEFINITE,
@@ -398,6 +399,7 @@ class CallGraphBuilder:
                             id=stub_id,
                             node_type=stub_type,
                             name=call.func_name,
+                            description=self._describe_unresolved_call(call),
                             confidence=Confidence.INFERRED,
                             evidence=[Evidence(
                                 source="static_analysis",
@@ -539,6 +541,76 @@ class CallGraphBuilder:
         if func.class_name:
             return NodeType.METHOD
         return NodeType.FUNCTION
+
+    def _describe_function(self, func: FunctionDef) -> str:
+        """Build a human-readable description for a function node."""
+        docstring = self._normalize_text(func.docstring)
+        if docstring:
+            return docstring
+
+        simple_name = func.name.lstrip("_")
+        special_cases = {
+            "__init__": f"Initialize {func.class_name or 'the object'}.",
+            "execute": "Execute a database command.",
+            "fetchone": "Fetch one row from the database result.",
+            "fetchall": "Fetch all rows from the database result.",
+            "commit": "Commit the current database transaction.",
+            "close": "Close the active database or network resource.",
+            "check_password": "Check whether the provided password is valid.",
+            "create_jwt": "Create a JWT token payload for the response.",
+            "decode_jwt": "Decode a JWT token and extract its payload.",
+        }
+        if simple_name in special_cases:
+            return special_cases[simple_name]
+
+        human_name = self._humanize_identifier(func.name)
+        node_type = self._classify_function(func)
+        prefix_map = {
+            NodeType.ROUTER: "Handle request",
+            NodeType.DEPENDENCY: "Resolve dependency",
+            NodeType.SERVICE: "Run service step",
+            NodeType.REPOSITORY: "Run repository step",
+            NodeType.METHOD: "Run method",
+            NodeType.FUNCTION: "Run function",
+        }
+        prefix = prefix_map.get(node_type, "Run step")
+        return f"{prefix}: {human_name}."
+
+    def _describe_unresolved_call(self, call: CallSite) -> str:
+        """Describe a call target we could not resolve statically."""
+        human_name = self._humanize_identifier(call.func_name)
+        simple_name = call.func_name.split(".")[-1]
+
+        if call.is_db_call:
+            return f"Possible database operation: {human_name}."
+        if call.is_http_call:
+            return f"Possible external HTTP call: {human_name}."
+        if simple_name[:1].isupper():
+            return f"Instantiate or invoke {human_name}; definition could not be resolved statically."
+        return f"Call {human_name}; definition could not be resolved statically."
+
+    @staticmethod
+    def _describe_exception(call: CallSite) -> str:
+        """Describe an exception node."""
+        if call.raise_status:
+            return f"Raise an HTTP {call.raise_status} error response."
+        return f"Raise {call.func_name}."
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        """Collapse docstring whitespace into a single readable line."""
+        return " ".join(text.split())
+
+    @staticmethod
+    def _humanize_identifier(name: str) -> str:
+        """Convert code identifiers like get_current_user into readable text."""
+        simple_name = name.split(".")[-1]
+        spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", simple_name)
+        spaced = spaced.replace("_", " ")
+        spaced = re.sub(r"\s+", " ", spaced).strip()
+        if not spaced:
+            return simple_name
+        return spaced[0].upper() + spaced[1:]
 
     @staticmethod
     def _should_ignore_call(func_name: str) -> bool:

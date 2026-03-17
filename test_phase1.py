@@ -42,7 +42,8 @@ if target:
     print(f"  Nodes: {len(flow.nodes)}")
     for nid, node in flow.nodes.items():
         conf = node.confidence.value
-        print(f"    [{node.level}] {node.node_type.value:12s} {node.display_name:30s} ({conf})")
+        desc = f" - {node.description}" if node.description else ""
+        print(f"    [{node.level}] {node.node_type.value:12s} {node.display_name:30s} ({conf}){desc}")
     print(f"\n  Edges: {len(flow.edges)}")
     for edge in flow.edges:
         label = f" [{edge.condition}]" if edge.condition else ""
@@ -73,3 +74,8 @@ print(f"  verify_token in flow: {has_verify_token}")
 print(f"  dependency 401 path: {has_auth_401}")
 if not has_verify_token or not has_auth_401:
     raise AssertionError("Dependency execution path was not merged into GET /users/me flow")
+
+missing_desc = [node.id for node in me_flow.nodes.values() if not node.description]
+print(f"  nodes missing descriptions: {len(missing_desc)}")
+if missing_desc:
+    raise AssertionError(f"Nodes still missing descriptions: {missing_desc}")
