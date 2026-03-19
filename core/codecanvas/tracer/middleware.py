@@ -61,14 +61,17 @@ class _TracingState:
         """Arm tracing for the next incoming request.
 
         Returns False if a previous trace is still in progress (e.g.
-        a background task is still running).  The caller should wait
-        or retry.
+        a background task is still running).  Uses atomic lock check
+        to avoid TOCTOU race.
         """
-        if self._slot_lock.locked():
+        if not self._slot_lock.acquire(blocking=False):
             return False
+        # Slot acquired — set state then release immediately.
+        # The slot will be re-acquired in dispatch() via _acquire().
         self._project_root = project_root
         self._enabled = True
         self.last_result = None
+        self._slot_lock.release()
         return True
 
     def disable(self) -> None:

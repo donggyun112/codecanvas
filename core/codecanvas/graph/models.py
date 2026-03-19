@@ -64,6 +64,7 @@ class EdgeType(enum.Enum):
     CALLS = "calls"
     RETURNS = "returns"
     DEPENDS_ON = "depends_on"
+    BINDS = "binds"
     RAISES = "raises"
     QUERIES = "queries"        # DB query
     REQUESTS = "requests"      # External HTTP

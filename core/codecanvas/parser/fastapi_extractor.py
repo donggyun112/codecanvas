@@ -396,6 +396,14 @@ class FastAPIExtractor:
             return type_name
         return None
 
+    def extract_depends(
+        self,
+        func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+        file_path: str,
+    ) -> list[DependencyCall]:
+        """Public API to extract Depends() calls from a function node."""
+        return self._extract_depends(func_node, file_path)
+
     def _extract_depends(
         self,
         func_node: ast.FunctionDef | ast.AsyncFunctionDef,

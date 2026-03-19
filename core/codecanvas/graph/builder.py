@@ -18,7 +18,7 @@ from codecanvas.graph.models import (
     FlowNode,
     NodeType,
 )
-from codecanvas.parser.call_graph import CallGraphBuilder
+from codecanvas.parser.call_graph import CallGraphBuilder, FunctionDef
 from codecanvas.parser.fastapi_extractor import ExceptionHandlerInfo, FastAPIExtractor
 from codecanvas.parser.entrypoint_extractor import EntryPointExtractor
 
@@ -379,6 +379,13 @@ class FlowGraphBuilder:
                         "declared_type": effective_type,
                     },
                 ))
+                self._connect_dependency_binding(
+                    graph,
+                    dependency_node_id=dep_id,
+                    dependency_root_id=dep_root_id,
+                    contract_type=effective_type,
+                    from_file=dep_file,
+                )
 
             # Recurse into nested sub-dependencies of this dependency function.
             if dep_id not in seen_dep_ids:
@@ -403,10 +410,10 @@ class FlowGraphBuilder:
             dep.func_name, dep_file, dep.resolved_line,
         )
         if func_id:
-            ast_node = self.call_graph._ast_nodes.get(func_id)
-            func_def = self.call_graph._functions.get(func_id)
+            ast_node = self.call_graph.get_ast_node(func_id)
+            func_def = self.call_graph.get_function(func_id)
             if ast_node and func_def:
-                return self.extractor._extract_depends(ast_node, func_def.file_path)
+                return self.extractor.extract_depends(ast_node, func_def.file_path)
         return []
 
     def _infer_dep_return_type(self, dep) -> str | None:
@@ -418,10 +425,130 @@ class FlowGraphBuilder:
         )
         if not func_id:
             return None
-        func_def = self.call_graph._functions.get(func_id)
+        func_def = self.call_graph.get_function(func_id)
         if func_def and func_def.return_annotation:
             return func_def.return_annotation
         return None
+
+    def _connect_dependency_binding(
+        self,
+        graph: FlowGraph,
+        *,
+        dependency_node_id: str,
+        dependency_root_id: str,
+        contract_type: str | None,
+        from_file: str | None,
+    ) -> None:
+        """Attach contract -> implementation binding edges for DIP-style providers."""
+        if not contract_type:
+            return
+
+        provider_func = self.call_graph.get_function(dependency_root_id)
+        contract_def = self.call_graph.resolve_type_definition(contract_type, from_file=from_file)
+        impl_def = self.call_graph.resolve_bound_implementation(
+            contract_type,
+            provider_func,
+            from_file=from_file,
+        )
+        if not contract_def or not impl_def:
+            return
+        if contract_def.qualified_name == impl_def.qualified_name:
+            return
+
+        dep_node = graph.nodes.get(dependency_node_id)
+        if dep_node:
+            dep_node.metadata["contract_type"] = contract_def.name
+            dep_node.metadata["bound_implementation"] = impl_def.name
+            if contract_def.is_protocol:
+                dep_node.metadata["contract_kind"] = "protocol"
+            elif contract_def.is_abstract:
+                dep_node.metadata["contract_kind"] = "abstract"
+
+        contract_node_id = self._ensure_function_like_node(graph, contract_def)
+        impl_node_id = self._ensure_function_like_node(graph, impl_def)
+
+        self._upsert_edge(
+            graph,
+            preferred_id=f"e_bind_{contract_node_id}_{impl_node_id}",
+            source_id=contract_node_id,
+            target_id=impl_node_id,
+            edge_type=EdgeType.BINDS,
+            label="bound to",
+            confidence=Confidence.HIGH,
+            metadata={"binding": True},
+        )
+
+        self._connect_method_bindings(graph, contract_def, impl_def, from_file=from_file)
+
+    def _connect_method_bindings(
+        self,
+        graph: FlowGraph,
+        contract_def: FunctionDef,
+        impl_def: FunctionDef,
+        *,
+        from_file: str | None,
+    ) -> None:
+        """Bind contract methods already present in the graph to implementation methods."""
+        prefix = contract_def.qualified_name + "."
+        contract_method_ids = [
+            node_id for node_id in graph.nodes
+            if node_id.startswith(prefix)
+        ]
+        for contract_method_id in contract_method_ids:
+            contract_method = self.call_graph.get_function(contract_method_id)
+            if contract_method is None:
+                continue
+            impl_method = self.call_graph.resolve_method_on_type_name(
+                impl_def.name,
+                contract_method.name,
+                from_file=from_file,
+            )
+            if impl_method is None:
+                continue
+            impl_method_id = self._ensure_function_like_node(graph, impl_method)
+            self._upsert_edge(
+                graph,
+                preferred_id=f"e_bind_{contract_method_id}_{impl_method_id}",
+                source_id=contract_method_id,
+                target_id=impl_method_id,
+                edge_type=EdgeType.BINDS,
+                label="implemented by",
+                confidence=Confidence.HIGH,
+                metadata={"binding": True, "method_binding": True},
+            )
+
+    def _ensure_function_like_node(self, graph: FlowGraph, func: FunctionDef) -> str:
+        """Materialize a function/class definition as an L3 node if absent."""
+        if func.qualified_name in graph.nodes:
+            return func.qualified_name
+        graph.add_node(FlowNode(
+            id=func.qualified_name,
+            node_type=self.call_graph.classify_function(func),
+            name=func.name,
+            display_name=func.name,
+            description=self.call_graph.describe_function(func),
+            file_path=func.file_path,
+            line_start=func.line_start,
+            line_end=func.line_end,
+            confidence=Confidence.DEFINITE,
+            evidence=[Evidence(
+                source="static_analysis",
+                file_path=func.file_path,
+                line_number=func.line_start,
+                detail=f"Function definition at line {func.line_start}",
+            )],
+            level=3,
+            metadata={
+                "is_async": func.is_async,
+                "params": func.params,
+                "return_type": func.return_annotation,
+                "class": func.class_name,
+                "bases": func.bases,
+                "is_protocol": func.is_protocol,
+                "is_abstract": func.is_abstract,
+            },
+        ))
+        return func.qualified_name
 
     def _add_middleware_nodes(self, graph: FlowGraph) -> None:
         """Add middleware chain nodes."""

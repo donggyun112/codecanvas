@@ -27,8 +27,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global state: active project builder
+# Global state: active project builders (LRU, max 3 projects)
+_MAX_BUILDERS = 3
 _builders: dict[str, FlowGraphBuilder] = {}
+
+
+def _get_or_create_builder(project_path: str) -> FlowGraphBuilder:
+    """Get or create a FlowGraphBuilder with LRU eviction."""
+    if project_path in _builders:
+        # Move to end (most recently used)
+        builder = _builders.pop(project_path)
+        _builders[project_path] = builder
+        return builder
+
+    builder = FlowGraphBuilder(project_path)
+    _builders[project_path] = builder
+
+    # Evict oldest if over limit
+    while len(_builders) > _MAX_BUILDERS:
+        oldest = next(iter(_builders))
+        del _builders[oldest]
+
+    return builder
 
 
 class AnalyzeRequest(BaseModel):
@@ -75,9 +95,8 @@ async def analyze_project(req: AnalyzeRequest):
     if not Path(project_path).is_dir():
         raise HTTPException(404, f"Directory not found: {project_path}")
 
-    builder = FlowGraphBuilder(project_path)
+    builder = _get_or_create_builder(project_path)
     entrypoints = builder.get_entrypoints()
-    _builders[project_path] = builder
 
     return {
         "project_path": project_path,
@@ -135,12 +154,8 @@ async def analyze_project(req: AnalyzeRequest):
 @app.post("/flow")
 async def build_flow(req: FlowRequest):
     """Build flow graph for a specific entrypoint."""
-    builder = _builders.get(req.project_path)
-    if builder is None:
-        # Auto-analyze if not cached
-        builder = FlowGraphBuilder(req.project_path)
-        builder.get_entrypoints()
-        _builders[req.project_path] = builder
+    builder = _get_or_create_builder(req.project_path)
+    builder.get_entrypoints()
 
     # Find matching entrypoint
     entrypoints = builder.get_entrypoints()

@@ -42,6 +42,9 @@ class FunctionDef:
     class_qname: str | None = None
     local_types: dict[str, str] = field(default_factory=dict)
     logic_steps: list[LogicStep] = field(default_factory=list)
+    bases: list[str] = field(default_factory=list)
+    is_protocol: bool = False
+    is_abstract: bool = False
 
 
 @dataclass
@@ -98,6 +101,49 @@ class LogicStep:
 
 
 # Heuristic patterns for detecting DB and external API calls
+def _chain_root_name(node: ast.expr) -> str | None:
+    """Walk a method chain to find the root variable name.
+
+    ``self.client.get(...)`` → ``self``
+    ``db.query(User).filter_by(...)`` → ``db``
+    ``some_call().get(...)`` → None (dynamic root)
+    """
+    current = node
+    while True:
+        if isinstance(current, ast.Name):
+            return current.id
+        if isinstance(current, ast.Attribute):
+            current = current.value
+            continue
+        if isinstance(current, ast.Call):
+            if isinstance(current.func, (ast.Name, ast.Attribute)):
+                current = current.func
+                continue
+        return None
+
+
+def _chain_has_any(node: ast.expr, hints: set[str]) -> bool:
+    """Check if any attribute in a method chain matches the hint set."""
+    current = node
+    while True:
+        if isinstance(current, ast.Attribute):
+            if current.attr in hints:
+                return True
+            current = current.value
+            continue
+        if isinstance(current, ast.Call):
+            current = current.func
+            continue
+        return False
+
+
+# Methods that strongly indicate a DB call even without a DB root variable.
+_DB_CHAIN_HINTS = {
+    "table", "query", "select", "insert", "update", "delete",
+    "filter", "filter_by", "where", "join", "outerjoin",
+    "scalar", "scalars", "from_", "values",
+}
+
 DB_PATTERNS = {
     "execute", "query", "fetch", "fetchone", "fetchall", "fetchmany",
     "commit", "rollback", "add", "delete", "merge", "flush", "refresh",
@@ -169,6 +215,22 @@ class CallGraphBuilder:
                     self._analyze_file(fpath)
         self._enrich_logic_step_calls()
         self._analyzed = True
+
+    def get_function(self, qualified_name: str) -> FunctionDef | None:
+        """Public accessor for a function definition by qualified name."""
+        return self._functions.get(qualified_name)
+
+    def get_ast_node(self, qualified_name: str) -> ast.AST | None:
+        """Public accessor for a function's AST node."""
+        return self._ast_nodes.get(qualified_name)
+
+    def classify_function(self, func: FunctionDef) -> NodeType:
+        """Public accessor for function type classification."""
+        return self._classify_function(func)
+
+    def describe_function(self, func: FunctionDef) -> str:
+        """Public accessor for function description."""
+        return self._describe_function(func)
 
     def _analyze_file(self, file_path: str) -> None:
         """Parse one file and extract all function definitions."""
@@ -264,6 +326,9 @@ class CallGraphBuilder:
                     return_annotation=node.name,
                     definition_type="schema" if is_schema else "class",
                     class_qname=class_qname,
+                    bases=[self._annotation_str(base) or self._get_name(base) for base in node.bases],
+                    is_protocol=self._is_protocol_class(node),
+                    is_abstract=self._is_abstract_class(node),
                 )
                 self._functions[class_qname] = class_def
                 self._name_index.setdefault(node.name, []).append(class_qname)
@@ -556,6 +621,9 @@ class CallGraphBuilder:
                     "params": func.params,
                     "return_type": func.return_annotation,
                     "class": func.class_name,
+                    "bases": func.bases,
+                    "is_protocol": func.is_protocol,
+                    "is_abstract": func.is_abstract,
                 },
             )
             nodes[node.id] = node
@@ -1112,6 +1180,135 @@ class CallGraphBuilder:
             return preferred
         return candidates[0]
 
+    def resolve_type_definition(self, type_name: str, from_file: str | None = None) -> FunctionDef | None:
+        """Resolve a class / protocol / abstract type name to its definition."""
+        self.analyze_project()
+        simple_name = self._normalize_type_name(type_name)
+        if not simple_name:
+            return None
+
+        candidates = [
+            self._functions[qname]
+            for qname in self._name_index.get(simple_name, [])
+            if self._functions[qname].definition_type in {"class", "schema"}
+        ]
+        if not candidates:
+            return None
+        if from_file:
+            same_file = [func for func in candidates if func.file_path == from_file]
+            if same_file:
+                return same_file[0]
+        return candidates[0]
+
+    def resolve_bound_implementation(
+        self,
+        contract_type: str,
+        provider_func: FunctionDef | None,
+        from_file: str | None = None,
+    ) -> FunctionDef | None:
+        """Resolve the concrete implementation bound to a contract/provider pair."""
+        self.analyze_project()
+
+        inferred = self._infer_provider_return_type(provider_func)
+        if inferred:
+            resolved = self.resolve_type_definition(inferred, from_file=from_file)
+            if resolved and self._normalize_type_name(resolved.name) != self._normalize_type_name(contract_type):
+                return resolved
+
+        contract_name = self._normalize_type_name(contract_type)
+        if not contract_name:
+            return None
+
+        implementations = self.find_implementations(contract_name, from_file=from_file)
+        if len(implementations) == 1:
+            return implementations[0]
+        return None
+
+    def find_implementations(
+        self,
+        contract_type: str,
+        from_file: str | None = None,
+    ) -> list[FunctionDef]:
+        """Return classes that explicitly inherit from the given contract."""
+        self.analyze_project()
+        contract_name = self._normalize_type_name(contract_type)
+        if not contract_name:
+            return []
+
+        implementations = [
+            func for func in self._functions.values()
+            if func.definition_type == "class"
+            and self._normalize_type_name(func.name) != contract_name
+            and any(self._normalize_type_name(base) == contract_name for base in func.bases)
+        ]
+        if from_file:
+            same_file = [func for func in implementations if func.file_path == from_file]
+            if same_file:
+                return same_file
+        return implementations
+
+    def resolve_method_on_type_name(
+        self,
+        type_name: str,
+        method_name: str,
+        from_file: str | None = None,
+    ) -> FunctionDef | None:
+        """Resolve a method on an explicit type name without a caller context."""
+        self.analyze_project()
+        normalized = self._normalize_type_name(type_name)
+        if not normalized:
+            return None
+        candidates = [
+            self._functions[qname]
+            for qname in self._name_index.get(method_name, [])
+            if self._normalize_type_name(self._functions[qname].class_name or "") == normalized
+        ]
+        if not candidates:
+            return None
+        if from_file:
+            same_file = [func for func in candidates if func.file_path == from_file]
+            if same_file:
+                return same_file[0]
+        return candidates[0]
+
+    @staticmethod
+    def _normalize_type_name(type_name: str | None) -> str:
+        """Reduce annotations like Optional[RepoPort] to RepoPort."""
+        if not type_name:
+            return ""
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", type_name):
+            if token and token[0].isupper() and token not in {"Optional", "Annotated", "Union"}:
+                return token
+        return type_name.split(".")[-1]
+
+    def _infer_provider_return_type(self, provider_func: FunctionDef | None) -> str | None:
+        """Infer a concrete class returned by a dependency/provider function."""
+        if provider_func is None:
+            return None
+        node = self._ast_nodes.get(provider_func.qualified_name)
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return None
+
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Return) or child.value is None:
+                continue
+            value = child.value
+            if isinstance(value, ast.Name):
+                inferred = provider_func.local_types.get(value.id)
+                if inferred:
+                    return inferred
+            if isinstance(value, ast.Call):
+                func_name, _, _ = self._get_call_target(value)
+                if not func_name:
+                    continue
+                resolved = self.resolve_type_definition(func_name, from_file=provider_func.file_path)
+                if resolved and resolved.definition_type in {"class", "schema"}:
+                    return resolved.name
+                normalized = self._normalize_type_name(func_name)
+                if normalized and normalized[:1].isupper():
+                    return normalized
+        return None
+
     def _extract_logic_steps(
         self,
         func_node: ast.FunctionDef | ast.AsyncFunctionDef,
@@ -1361,6 +1558,33 @@ class CallGraphBuilder:
             )
 
         return None
+
+    @staticmethod
+    def _is_protocol_class(node: ast.ClassDef) -> bool:
+        base_names = {
+            ast.unparse(base) if hasattr(ast, "unparse") else getattr(base, "id", "")
+            for base in node.bases
+        }
+        return any(name.endswith("Protocol") or name == "Protocol" for name in base_names)
+
+    @staticmethod
+    def _is_abstract_class(node: ast.ClassDef) -> bool:
+        base_names = {
+            ast.unparse(base) if hasattr(ast, "unparse") else getattr(base, "id", "")
+            for base in node.bases
+        }
+        if any(name.endswith("ABC") or name == "ABC" for name in base_names):
+            return True
+        for item in node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorator_names = {
+                ast.unparse(dec) if hasattr(ast, "unparse") else getattr(dec, "id", "")
+                for dec in item.decorator_list
+            }
+            if any(name == "abstractmethod" or name.endswith(".abstractmethod") for name in decorator_names):
+                return True
+        return False
 
     def _classify_function(self, func: FunctionDef) -> NodeType:
         """Classify a function into a semantic node type."""
@@ -1775,9 +1999,13 @@ class CallGraphBuilder:
         """Heuristic: is this call likely a database operation?"""
         if isinstance(node.func, ast.Attribute):
             if node.func.attr in DB_PATTERNS:
-                if isinstance(node.func.value, ast.Name):
-                    return node.func.value.id.lower() in DB_OBJECT_HINTS
-                return True
+                root = _chain_root_name(node.func.value)
+                if root is not None and root.lower() in DB_OBJECT_HINTS:
+                    return True
+                # Chain calls like client.table().insert().execute():
+                # if intermediate methods are DB-specific, it's a DB call.
+                if _chain_has_any(node.func.value, _DB_CHAIN_HINTS):
+                    return True
         return False
 
     @staticmethod
@@ -1785,9 +2013,9 @@ class CallGraphBuilder:
         """Heuristic: is this call likely an external HTTP request?"""
         if isinstance(node.func, ast.Attribute):
             if node.func.attr in HTTP_PATTERNS:
-                if isinstance(node.func.value, ast.Name):
-                    return node.func.value.id.lower() in HTTP_OBJECT_HINTS
-                return True
+                root = _chain_root_name(node.func.value)
+                if root is not None and root.lower() in HTTP_OBJECT_HINTS:
+                    return True
         return False
 
     @staticmethod

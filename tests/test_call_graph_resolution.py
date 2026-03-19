@@ -260,6 +260,64 @@ def test_dependency_flow_surfaces_injected_user_type_and_constructor_calls(tmp_p
     assert dependency_edge.metadata.get("dependency_type") == "User"
 
 
+def test_dependency_binding_surfaces_contract_and_implementation(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        {
+            "app.py": """
+                from typing import Protocol
+                from fastapi import Depends, FastAPI
+
+                app = FastAPI()
+
+
+                class SessionRepoPort(Protocol):
+                    async def delete_session_async(self, session_id: str) -> None: ...
+
+
+                class SqlSessionRepo(SessionRepoPort):
+                    async def delete_session_async(self, session_id: str) -> None:
+                        return None
+
+
+                async def get_session_repo() -> SessionRepoPort:
+                    return SqlSessionRepo()
+
+
+                @app.delete("/sessions/{session_id}")
+                async def delete_session(
+                    session_id: str,
+                    repo: SessionRepoPort = Depends(get_session_repo),
+                ):
+                    await repo.delete_session_async(session_id)
+                    return {"ok": True}
+            """,
+        },
+    )
+
+    flow = _build_flow(tmp_path, "DELETE", "/sessions/{session_id}")
+
+    dep_node = next(
+        node for node in flow.nodes.values()
+        if node.node_type == NodeType.DEPENDENCY and node.name == "get_session_repo"
+    )
+    assert dep_node.metadata.get("contract_type") == "SessionRepoPort"
+    assert dep_node.metadata.get("bound_implementation") == "SqlSessionRepo"
+
+    assert any(
+        edge.edge_type == EdgeType.BINDS
+        and edge.source_id == "app.SessionRepoPort"
+        and edge.target_id == "app.SqlSessionRepo"
+        for edge in flow.edges
+    )
+    assert any(
+        edge.edge_type == EdgeType.BINDS
+        and edge.source_id == "app.SessionRepoPort.delete_session_async"
+        and edge.target_id == "app.SqlSessionRepo.delete_session_async"
+        for edge in flow.edges
+    )
+
+
 def test_raise_inside_branch_routes_from_branch_node() -> None:
     flow = _build_flow(ROOT / "sample-fastapi", "POST", "/api/v1/auth/login")
 

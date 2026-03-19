@@ -445,7 +445,7 @@ body {
     };
     var EDGE_COLORS = {
         calls:null, returns:'#27ae60', raises:'#e74c3c', queries:'#9b59b6',
-        requests:'#e67e22', middleware_chain:'#1abc9c', injects:'#3498db', depends_on:'#3498db'
+        requests:'#e67e22', middleware_chain:'#1abc9c', injects:'#3498db', depends_on:'#3498db', binds:'#8e44ad'
     };
     var LEVEL_NAMES = {0:'Overview',1:'Pipeline',2:'Functions',3:'Logic'};
     var currentLevel = 1;
@@ -968,6 +968,7 @@ body {
                         path.setAttribute('stroke-dasharray', '5,3');
                     }
                     if (origEdge.isErrorPath || origEdge.type === 'raises') { edgeColor = '#e74c3c'; markerId = 'arrowErr'; }
+                    else if (origEdge.type === 'binds') { path.setAttribute('stroke-dasharray', '6,4'); }
                     else if (origEdge.type === 'queries') markerId = 'arrowQ';
                     else if (origEdge.type === 'injects') { markerId = 'arrowInj'; path.setAttribute('stroke-dasharray','6,3'); }
                     else if (origEdge.type === 'middleware_chain') markerId = 'arrowMw';
@@ -1315,6 +1316,21 @@ body {
                 injects += ': ' + String(node.metadata.declared_type);
             }
             addSec(panel, 'Injects', injects);
+        }
+        if (node.metadata && node.metadata.contract_type) {
+            var contractText = String(node.metadata.contract_type);
+            if (node.metadata.contract_kind) {
+                contractText += ' (' + String(node.metadata.contract_kind) + ')';
+            }
+            addSec(panel, 'Contract', contractText);
+        }
+        if (node.metadata && node.metadata.bound_implementation) {
+            addSec(panel, 'Bound To', String(node.metadata.bound_implementation));
+        }
+        if (node.metadata && node.metadata.is_protocol) {
+            addSec(panel, 'Contract Role', 'Protocol');
+        } else if (node.metadata && node.metadata.is_abstract) {
+            addSec(panel, 'Contract Role', 'Abstract');
         }
         if (node.confidence === 'inferred') {
             addSec(panel, 'Resolution', 'Call site was found, but the target definition could not be resolved statically');
