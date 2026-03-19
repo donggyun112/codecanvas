@@ -312,8 +312,19 @@ def _invalidate_project_modules(project_path: str) -> None:
 
 
 def main():
+    import socket
     import uvicorn
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 9120
+
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+
+    if port == 0:
+        # Let the OS assign a free port.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+    # Print the chosen port so the extension can read it from stdout.
+    print(f"CODECANVAS_PORT={port}", flush=True)
     uvicorn.run(app, host="127.0.0.1", port=port)
 
 

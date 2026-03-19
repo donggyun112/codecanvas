@@ -3,8 +3,6 @@ import { ChildProcess, spawn, execFile } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 
-const SERVER_PORT = 9120;
-const BASE_URL = `http://127.0.0.1:${SERVER_PORT}`;
 const CORE_DEPS = ['fastapi', 'uvicorn', 'libcst>=1.0.0', 'httpx>=0.24.0'];
 
 export class AnalysisServer {
@@ -13,23 +11,19 @@ export class AnalysisServer {
     private startupError: string | null = null;
     private envReady = false;
     private resolvedPython: string | null = null;
+    private serverPort: number | null = null;
 
     constructor(
         private extensionPath: string,
         private storagePath: string,
     ) {}
 
-    async ensureRunning(): Promise<void> {
-        if (this.ready) return;
+    private get baseUrl(): string {
+        return `http://127.0.0.1:${this.serverPort}`;
+    }
 
-        // Try to connect to existing server
-        try {
-            const res = await fetch(`${BASE_URL}/docs`);
-            if (res.ok) {
-                this.ready = true;
-                return;
-            }
-        } catch {}
+    async ensureRunning(): Promise<void> {
+        if (this.ready && this.serverPort) return;
 
         // Ensure Python environment is ready (venv + deps)
         if (!this.envReady) {
@@ -149,9 +143,11 @@ export class AnalysisServer {
         const stderrChunks: string[] = [];
 
         return new Promise<void>((resolve, reject) => {
+            // Pass port=0 so the Python server picks a free port
+            // and prints CODECANVAS_PORT=<port> on stdout.
             this.process = spawn(
                 pythonPath,
-                ['-m', 'codecanvas.server.app', String(SERVER_PORT)],
+                ['-m', 'codecanvas.server.app', '0'],
                 {
                     cwd: corePath,
                     env: {
@@ -173,13 +169,33 @@ export class AnalysisServer {
                 }
             }, 15000);
 
+            // Read the dynamically assigned port from stdout.
+            this.process.stdout?.on('data', (data: Buffer) => {
+                const msg = data.toString();
+                const match = msg.match(/CODECANVAS_PORT=(\d+)/);
+                if (match) {
+                    this.serverPort = parseInt(match[1], 10);
+                }
+            });
+
             this.process.stderr?.on('data', (data: Buffer) => {
                 const msg = data.toString();
                 stderrChunks.push(msg);
                 if (msg.includes('Uvicorn running') || msg.includes('Application startup complete')) {
-                    this.ready = true;
-                    clearTimeout(timeout);
-                    resolve();
+                    if (this.serverPort) {
+                        this.ready = true;
+                        clearTimeout(timeout);
+                        resolve();
+                    } else {
+                        // Port not yet received — wait briefly for stdout flush
+                        setTimeout(() => {
+                            if (this.serverPort) {
+                                this.ready = true;
+                                clearTimeout(timeout);
+                                resolve();
+                            }
+                        }, 200);
+                    }
                 }
             });
 
@@ -200,6 +216,7 @@ export class AnalysisServer {
                 clearTimeout(timeout);
                 this.ready = false;
                 this.process = null;
+                this.serverPort = null;
                 if (code && code !== 0 && !this.startupError) {
                     const errMsg = stderrChunks.join('').trim();
                     vscode.window.showErrorMessage(
@@ -216,7 +233,7 @@ export class AnalysisServer {
             return null;
         }
         try {
-            const res = await fetch(`${BASE_URL}/analyze`, {
+            const res = await fetch(`${this.baseUrl}/analyze`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ project_path: projectPath }),
@@ -239,7 +256,7 @@ export class AnalysisServer {
             return null;
         }
         try {
-            const res = await fetch(`${BASE_URL}/flow`, {
+            const res = await fetch(`${this.baseUrl}/flow`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ project_path: projectPath, entry_id: entryId }),
@@ -262,7 +279,7 @@ export class AnalysisServer {
             return null;
         }
         try {
-            const res = await fetch(`${BASE_URL}/flow/from-location`, {
+            const res = await fetch(`${this.baseUrl}/flow/from-location`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -293,7 +310,7 @@ export class AnalysisServer {
             return null;
         }
         try {
-            const res = await fetch(`${BASE_URL}/trace`, {
+            const res = await fetch(`${this.baseUrl}/trace`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -318,5 +335,6 @@ export class AnalysisServer {
         this.process?.kill();
         this.process = null;
         this.ready = false;
+        this.serverPort = null;
     }
 }
