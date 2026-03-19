@@ -220,6 +220,9 @@ async def trace_request(req: TraceRequest):
     # 4. Discover and prepare the target app
     target_app = _discover_target_app(req.project_path)
 
+    # 4b. Enrich static analysis with OpenAPI spec (if available)
+    _enrich_from_openapi(target_app, builder)
+
     # 5. Enable tracing and send request through ASGITransport
     if not tracing_state.enable(req.project_path):
         return {"error": "A previous trace is still in progress. Please wait and retry."}
@@ -271,6 +274,26 @@ async def trace_request(req: TraceRequest):
         })
 
     return merged.to_dict()
+
+
+def _enrich_from_openapi(target_app: Any, builder: FlowGraphBuilder) -> None:
+    """Supplement static analysis with the live app's OpenAPI spec."""
+    try:
+        from codecanvas.parser.openapi_enricher import (
+            apply_enrichments,
+            enrich_endpoints,
+            extract_openapi_spec,
+        )
+    except ImportError:
+        return
+
+    spec = extract_openapi_spec(target_app)
+    if not spec:
+        return
+
+    endpoints = builder.get_endpoints()
+    enrichments = enrich_endpoints(endpoints, spec)
+    apply_enrichments(endpoints, enrichments)
 
 
 def _discover_target_app(project_path: str) -> Any:

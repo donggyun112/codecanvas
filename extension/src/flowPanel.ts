@@ -3,13 +3,17 @@ import { AnalysisServer } from './server';
 
 export class FlowPanelProvider {
     private panel: vscode.WebviewPanel | null = null;
+    private flowHistory: any[] = [];
+    private historyIndex = -1;
 
     constructor(
         private context: vscode.ExtensionContext,
         private server: AnalysisServer,
     ) {}
 
-    showFlow(flowData: any) {
+    showFlow(flowData: any, options?: { historyMode?: 'reset' | 'push' | 'restore' }) {
+        const historyMode = options?.historyMode || 'reset';
+        this.updateHistory(flowData, historyMode);
         const entry = flowData.entrypoint || flowData.endpoint;
         const title = entry?.kind === 'api'
             ? `Flow: ${entry.method} ${entry.path}`
@@ -35,15 +39,7 @@ export class FlowPanelProvider {
             });
 
             this.panel.webview.onDidReceiveMessage(async (msg) => {
-                if (msg.type === 'navigateToCode') {
-                    const uri = vscode.Uri.file(msg.filePath);
-                    const doc = await vscode.workspace.openTextDocument(uri);
-                    const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
-                    const line = Math.max(0, (msg.line || 1) - 1);
-                    const range = new vscode.Range(line, 0, line, 0);
-                    editor.selection = new vscode.Selection(range.start, range.end);
-                    editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
-                }
+                await this.handleWebviewMessage(msg);
             });
         }
 
@@ -55,11 +51,179 @@ export class FlowPanelProvider {
             flowData,
             elkUri.toString(),
             this.panel.webview.cspSource,
+            this.historyIndex > 0,
+            this.flowHistory.slice(0, this.historyIndex + 1).map((item, index) => ({
+                index,
+                label: this.historyLabel(item),
+            })),
         );
     }
 
-    private getWebviewHtml(flowData: any, elkSrc: string, cspSource: string): string {
+    private updateHistory(flowData: any, historyMode: 'reset' | 'push' | 'restore'): void {
+        if (historyMode === 'restore') {
+            return;
+        }
+        if (historyMode === 'push') {
+            this.flowHistory = this.flowHistory.slice(0, this.historyIndex + 1);
+            this.flowHistory.push(flowData);
+            this.historyIndex = this.flowHistory.length - 1;
+            return;
+        }
+        this.flowHistory = [flowData];
+        this.historyIndex = 0;
+    }
+
+    private historyLabel(flowData: any): string {
+        const entry = flowData?.entrypoint || flowData?.endpoint;
+        if (!entry) return 'Flow';
+        if (entry.kind === 'api') {
+            return `${entry.method} ${entry.path}`.trim();
+        }
+        return entry.label || entry.handler_name || 'Function';
+    }
+
+    private async handleWebviewMessage(msg: any): Promise<void> {
+        if (!msg) return;
+
+        if (msg.type === 'navigateToCode') {
+            const uri = vscode.Uri.file(msg.filePath);
+            const doc = await vscode.workspace.openTextDocument(uri);
+            const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+            const line = Math.max(0, (msg.line || 1) - 1);
+            const range = new vscode.Range(line, 0, line, 0);
+            editor.selection = new vscode.Selection(range.start, range.end);
+            editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+            return;
+        }
+
+        if (msg.type === 'loadCodePreview' && this.panel) {
+            const payload = await this.loadCodePreview(msg);
+            if (!this.panel) return;
+            await this.panel.webview.postMessage({
+                type: 'codePreview',
+                requestId: msg.requestId,
+                cacheKey: msg.cacheKey,
+                nodeId: msg.nodeId,
+                ...payload,
+            });
+            return;
+        }
+
+        if (msg.type === 'openFunctionFlow') {
+            const filePath = typeof msg.filePath === 'string' ? msg.filePath : '';
+            const line = Number(msg.line || 0);
+            if (!filePath || !Number.isFinite(line) || line < 1) return;
+
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))
+                || vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showWarningMessage('The current file is not inside an open workspace');
+                return;
+            }
+
+            await this.server.ensureRunning();
+            const flow = await this.server.getFunctionFlow(
+                workspaceFolder.uri.fsPath,
+                filePath,
+                line,
+            );
+            if (flow) {
+                this.showFlow(flow, { historyMode: 'push' });
+            }
+            return;
+        }
+
+        if (msg.type === 'navigateHistory') {
+            let nextIndex = this.historyIndex;
+            if (typeof msg.targetIndex === 'number' && Number.isFinite(msg.targetIndex)) {
+                nextIndex = msg.targetIndex;
+            } else if (msg.direction === 'back') {
+                nextIndex = this.historyIndex - 1;
+            }
+            if (nextIndex < 0 || nextIndex >= this.flowHistory.length || nextIndex === this.historyIndex) {
+                return;
+            }
+            this.historyIndex = nextIndex;
+            this.showFlow(this.flowHistory[this.historyIndex], { historyMode: 'restore' });
+        }
+    }
+
+    private async loadCodePreview(msg: any): Promise<Record<string, unknown>> {
+        const filePath = typeof msg.filePath === 'string' ? msg.filePath : '';
+        const locationKind = msg.locationKind === 'callsite' ? 'callsite' : 'definition';
+        const rawStart = Number(msg.lineStart || 0);
+        const rawEnd = Number(msg.lineEnd || rawStart);
+
+        if (!filePath || !Number.isFinite(rawStart) || rawStart < 1) {
+            return {
+                error: 'No source location available for this node.',
+                kind: locationKind,
+            };
+        }
+
+        try {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+            if (doc.lineCount === 0) {
+                return {
+                    preview: '',
+                    startLine: rawStart,
+                    endLine: rawStart,
+                    truncated: false,
+                    kind: locationKind,
+                };
+            }
+
+            const anchorLine = Math.max(1, Math.min(doc.lineCount, rawStart));
+            let startLine = anchorLine;
+            let endLine = Math.max(anchorLine, Math.min(doc.lineCount, rawEnd || anchorLine));
+            let truncated = false;
+
+            if (locationKind === 'callsite') {
+                startLine = Math.max(1, anchorLine - 2);
+                endLine = Math.min(doc.lineCount, anchorLine + 2);
+            } else if (endLine <= anchorLine) {
+                endLine = Math.min(doc.lineCount, anchorLine + 11);
+                truncated = endLine < doc.lineCount;
+            } else if (endLine - startLine + 1 > 24) {
+                endLine = startLine + 23;
+                truncated = true;
+            } else if (rawEnd > endLine) {
+                truncated = true;
+            }
+
+            const width = String(endLine).length;
+            const lines: string[] = [];
+            for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
+                const marker = lineNo === anchorLine ? '>' : ' ';
+                lines.push(
+                    `${marker}${String(lineNo).padStart(width, ' ')} | ${doc.lineAt(lineNo - 1).text}`,
+                );
+            }
+
+            return {
+                preview: lines.join('\n'),
+                startLine,
+                endLine,
+                truncated,
+                kind: locationKind,
+            };
+        } catch (error) {
+            return {
+                error: error instanceof Error ? error.message : String(error),
+                kind: locationKind,
+            };
+        }
+    }
+
+    private getWebviewHtml(
+        flowData: any,
+        elkSrc: string,
+        cspSource: string,
+        canGoBack: boolean,
+        historyTrail: Array<{ index: number; label: string }>,
+    ): string {
         const encodedData = Buffer.from(JSON.stringify(flowData)).toString('base64');
+        const encodedHistory = Buffer.from(JSON.stringify(historyTrail)).toString('base64');
         const nonce = getNonce();
 
         return /* html */ `<!DOCTYPE html>
@@ -87,7 +251,41 @@ body {
 .topbar label { font-size: 12px; opacity: 0.7; }
 .topbar input[type=range] { flex: 0 1 200px; }
 .level-label { font-size: 12px; font-weight: bold; min-width: 160px; }
-.endpoint-badge { font-size: 13px; font-weight: bold; margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.topbar-main { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.topbar-meta { display: flex; align-items: center; gap: 12px; margin-left: auto; flex-wrap: wrap; }
+.back-btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 10px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    cursor: pointer;
+}
+.back-btn:hover { filter: brightness(1.08); }
+.breadcrumb { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.breadcrumb-item {
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    cursor: pointer;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.breadcrumb-item.current {
+    background: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+    border-color: transparent;
+    cursor: default;
+}
+.breadcrumb-sep { opacity: 0.4; font-size: 11px; }
+.endpoint-badge { font-size: 13px; font-weight: bold; display: flex; align-items: center; gap: 8px; }
 .method-GET { color: #61affe; } .method-POST { color: #49cc90; }
 .method-PUT { color: #fca130; } .method-DELETE { color: #f93e3e; }
 .kind-badge {
@@ -128,20 +326,66 @@ body {
     background: var(--vscode-textBlockQuote-background); border-radius: 4px; margin-top: 4px;
 }
 .nav-link { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; font-size: 12px; }
+.code-preview-meta { font-size: 11px; opacity: 0.65; margin-bottom: 6px; }
+.code-preview {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 12px;
+    line-height: 1.5;
+    background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    overflow: auto;
+    white-space: pre;
+}
+.inline-actions { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.action-btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 10px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.action-btn.primary {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+}
+.action-btn.secondary {
+    background: var(--vscode-button-secondaryBackground, transparent);
+    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+    border-color: var(--vscode-panel-border);
+}
+.action-btn:hover {
+    filter: brightness(1.08);
+}
+.action-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    opacity: 0.6;
+    margin-bottom: 6px;
+}
 </style>
 </head>
 <body>
 <div id="app">
     <div class="topbar">
-        <label>Level:</label>
-        <input type="range" id="levelSlider" min="0" max="3" value="1" step="1" />
-        <span class="level-label" id="levelLabel">Pipeline</span>
-        <span class="view-toggle" id="viewToggle" style="display:none;">
-            <button id="btnAll" class="active">All</button>
-            <button id="btnRuntime">Runtime</button>
-            <button id="btnStatic">Static</button>
-        </span>
-        <span class="endpoint-badge" id="endpointBadge"></span>
+        <div class="topbar-main">
+            <button id="backBtn" class="back-btn" style="display:${canGoBack ? 'inline-flex' : 'none'};">← Back</button>
+            <div class="breadcrumb" id="breadcrumb"></div>
+        </div>
+        <div class="topbar-meta">
+            <label>Level:</label>
+            <input type="range" id="levelSlider" min="0" max="3" value="1" step="1" />
+            <span class="level-label" id="levelLabel">Pipeline</span>
+            <span class="view-toggle" id="viewToggle" style="display:none;">
+                <button id="btnAll" class="active">All</button>
+                <button id="btnRuntime">Runtime</button>
+                <button id="btnStatic">Static</button>
+            </span>
+            <span class="endpoint-badge" id="endpointBadge"></span>
+        </div>
     </div>
     <div class="main">
         <div class="canvas-wrap" id="canvasWrap"></div>
@@ -188,6 +432,7 @@ body {
 
     try {
     var flowData = decodeFlowData("${encodedData}");
+    var historyTrail = decodeFlowData("${encodedHistory}");
     var entrypoint = flowData.entrypoint || flowData.endpoint;
     var TYPE_COLORS = {
         trigger:'#34495e',client:'#61affe',api:'#49cc90',entrypoint:'#16a085',
@@ -207,6 +452,9 @@ body {
     var viewMode = 'all';
     var selectedNodeId = null;
     var renderVersion = 0;
+    var codePreviewCache = {};
+    var codePreviewRequestSeq = 0;
+    var nodeDrillState = {};
     var hasTrace = !!(entrypoint && entrypoint.metadata && entrypoint.metadata.trace && entrypoint.metadata.trace.hitNodes);
     var isFunctionContext = !!(
         entrypoint
@@ -223,8 +471,38 @@ body {
             selectedNodeId = node.id;
         }
     });
+    window.addEventListener('message', function(event) {
+        var msg = event.data || {};
+        if (msg.type !== 'codePreview' || !msg.cacheKey) return;
+        codePreviewCache[msg.cacheKey] = msg;
+        if (selectedNodeId && msg.nodeId === selectedNodeId && flowData.nodes[selectedNodeId]) {
+            showDetail(flowData.nodes[selectedNodeId]);
+        }
+    });
 
     // Badge
+    var breadcrumbEl = document.getElementById('breadcrumb');
+    (historyTrail || []).forEach(function(item, index) {
+        if (index > 0) {
+            var sep = document.createElement('span');
+            sep.className = 'breadcrumb-sep';
+            sep.textContent = '›';
+            breadcrumbEl.appendChild(sep);
+        }
+        var crumb = document.createElement('button');
+        crumb.className = 'breadcrumb-item' + (index === historyTrail.length - 1 ? ' current' : '');
+        crumb.textContent = item.label;
+        if (index !== historyTrail.length - 1) {
+            crumb.addEventListener('click', function(){
+                if (!vscodeApi) return;
+                vscodeApi.postMessage({ type: 'navigateHistory', targetIndex: item.index });
+            });
+        } else {
+            crumb.disabled = true;
+        }
+        breadcrumbEl.appendChild(crumb);
+    });
+
     var badgeEl = document.getElementById('endpointBadge');
     if (entrypoint.kind === 'api') {
         var ms = document.createElement('span');
@@ -252,6 +530,13 @@ body {
             renderFlow(currentLevel);
         });
     });
+    var backBtn = document.getElementById('backBtn');
+    if (backBtn) {
+        backBtn.addEventListener('click', function(){
+            if (!vscodeApi) return;
+            vscodeApi.postMessage({ type: 'navigateHistory', direction: 'back' });
+        });
+    }
 
     document.getElementById('levelSlider').addEventListener('input', function(e){
         currentLevel = parseInt(e.target.value);
@@ -338,6 +623,19 @@ body {
             if (hasTrace && viewMode === 'static' && (n.metadata && n.metadata.runtime_hit)) return;
 
             nodes.push(n); nodeMap[n.id] = n;
+        });
+
+        Object.values(flowData.nodes).forEach(function(n){
+            if (n.level !== 4) return;
+            if (!(n.metadata && n.metadata.function_id)) return;
+            if (!nodeMap[n.metadata.function_id]) return;
+            if (!shouldShowLocalLogic(n.metadata.function_id)) return;
+            if (hasTrace && viewMode === 'runtime' && !(n.metadata && n.metadata.runtime_hit)) return;
+            if (hasTrace && viewMode === 'static' && (n.metadata && n.metadata.runtime_hit)) return;
+            if (!nodeMap[n.id]) {
+                nodes.push(n);
+                nodeMap[n.id] = n;
+            }
         });
 
         var ids = new Set(nodes.map(function(n){return n.id;}));
@@ -891,10 +1189,12 @@ body {
     }
 
     function selectNode(nodeId, vis) {
+        var node = flowData.nodes[nodeId];
         var changed = selectedNodeId !== nodeId;
         selectedNodeId = nodeId;
-        if (changed) renderFlow(currentLevel);
-        showDetail(flowData.nodes[nodeId]);
+        var drillChanged = advanceNodeDrill(node, changed);
+        if (changed || drillChanged) renderFlow(currentLevel);
+        showDetail(node);
     }
 
     function showDetail(node) {
@@ -906,6 +1206,65 @@ body {
         var h3 = document.createElement('h3');
         h3.textContent = node.displayName || node.name;
         panel.appendChild(h3);
+
+        var drillMax = maxDrillDepth(node);
+        if (drillMax > 0) {
+            var actionLabel = document.createElement('div');
+            actionLabel.className = 'action-label';
+            actionLabel.textContent = 'Actions';
+            panel.appendChild(actionLabel);
+
+            var actions = document.createElement('div');
+            actions.className = 'inline-actions';
+
+            var cycleBtn = document.createElement('button');
+            cycleBtn.className = 'action-btn primary';
+            cycleBtn.textContent = 'Expand Logic';
+            cycleBtn.addEventListener('click', function(){
+                if (advanceNodeDrill(node, false)) {
+                    renderFlow(currentLevel);
+                    showDetail(node);
+                }
+            });
+            actions.appendChild(cycleBtn);
+
+            var collapseBtn = document.createElement('button');
+            collapseBtn.className = 'action-btn secondary';
+            collapseBtn.textContent = 'Collapse Logic';
+            collapseBtn.addEventListener('click', function(){
+                if (setNodeDrill(node.id, 0)) {
+                    renderFlow(currentLevel);
+                    showDetail(node);
+                }
+            });
+            actions.appendChild(collapseBtn);
+
+            panel.appendChild(actions);
+        }
+
+        var functionFlowTarget = getFunctionFlowTarget(node);
+        if (functionFlowTarget) {
+            if (drillMax <= 0) {
+                var flowActionLabel = document.createElement('div');
+                flowActionLabel.className = 'action-label';
+                flowActionLabel.textContent = 'Actions';
+                panel.appendChild(flowActionLabel);
+            }
+            var flowActions = document.createElement('div');
+            flowActions.className = 'inline-actions';
+            var openBtn = document.createElement('button');
+            openBtn.className = 'action-btn primary';
+            openBtn.textContent = 'Open Function Flow';
+            openBtn.addEventListener('click', function(){
+                vscodeApi.postMessage({
+                    type: 'openFunctionFlow',
+                    filePath: functionFlowTarget.filePath,
+                    line: functionFlowTarget.line,
+                });
+            });
+            flowActions.appendChild(openBtn);
+            panel.appendChild(flowActions);
+        }
 
         addSec(panel, 'Type', node.type);
         addSec(panel, 'Abstraction', 'L' + String(node.level));
@@ -936,6 +1295,9 @@ body {
             addSec(panel, 'Resolution', 'Call site was found, but the target definition could not be resolved statically');
         }
         if (node.description) addSec(panel, 'Description', node.description);
+        if (drillMax > 0) {
+            addSec(panel, 'Layer', String(nodeDrillState[node.id] || 0) + ' / ' + String(drillMax));
+        }
 
         if (hasTrace && node.metadata) {
             if (node.metadata.runtime_hit) {
@@ -968,6 +1330,10 @@ body {
             });
             locSec.appendChild(link);
             panel.appendChild(locSec);
+        }
+
+        if (shouldShowCodePreview(node)) {
+            renderCodePreview(panel, node, primaryLocation);
         }
 
         var extraLocations = getExtraLocations(node);
@@ -1072,6 +1438,157 @@ body {
         v.textContent = String(value);
         s.appendChild(v);
         parent.appendChild(s);
+    }
+
+    function renderCodePreview(panel, node, primaryLocation) {
+        if (!primaryLocation || !primaryLocation.filePath || !primaryLocation.line || !vscodeApi) {
+            return;
+        }
+
+        var cacheKey = previewCacheKey(node, primaryLocation);
+        var cached = codePreviewCache[cacheKey];
+
+        if (!cached) {
+            codePreviewRequestSeq += 1;
+            codePreviewCache[cacheKey] = { loading: true, nodeId: node.id };
+            vscodeApi.postMessage({
+                type: 'loadCodePreview',
+                requestId: codePreviewRequestSeq,
+                cacheKey: cacheKey,
+                nodeId: node.id,
+                filePath: primaryLocation.filePath,
+                lineStart: primaryLocation.line,
+                lineEnd: primaryLocation.kind === 'definition'
+                    ? (node.lineEnd || node.lineStart || primaryLocation.line)
+                    : primaryLocation.line,
+                locationKind: primaryLocation.kind,
+            });
+            cached = codePreviewCache[cacheKey];
+        }
+
+        var codeSec = document.createElement('div');
+        codeSec.className = 'detail-section';
+        var codeTitle = document.createElement('div');
+        codeTitle.className = 'detail-section-title';
+        codeTitle.textContent = 'Code';
+        codeSec.appendChild(codeTitle);
+
+        if (cached.error) {
+            var err = document.createElement('div');
+            err.className = 'detail-section-value';
+            err.textContent = 'Could not load code preview: ' + cached.error;
+            codeSec.appendChild(err);
+            panel.appendChild(codeSec);
+            return;
+        }
+
+        if (cached.loading || !cached.preview) {
+            var loading = document.createElement('div');
+            loading.className = 'detail-section-value';
+            loading.textContent = 'Loading code preview...';
+            codeSec.appendChild(loading);
+            panel.appendChild(codeSec);
+            return;
+        }
+
+        var meta = document.createElement('div');
+        meta.className = 'code-preview-meta';
+        meta.textContent = (
+            cached.kind === 'callsite' ? 'Call-site preview' : 'Definition preview'
+        ) + ' · lines ' + String(cached.startLine) + '-' + String(cached.endLine)
+            + (cached.truncated ? ' (clipped)' : '');
+        codeSec.appendChild(meta);
+
+        var pre = document.createElement('pre');
+        pre.className = 'code-preview';
+        pre.textContent = String(cached.preview);
+        codeSec.appendChild(pre);
+        panel.appendChild(codeSec);
+    }
+
+    function previewCacheKey(node, primaryLocation) {
+        var endLine = primaryLocation.kind === 'definition'
+            ? (node.lineEnd || node.lineStart || primaryLocation.line)
+            : primaryLocation.line;
+        return [
+            node.id,
+            primaryLocation.kind,
+            primaryLocation.filePath,
+            primaryLocation.line,
+            endLine,
+        ].join('|');
+    }
+
+    function directLogicChildren(nodeId) {
+        return Object.values(flowData.nodes).filter(function(n){
+            return n.level === 4 && n.metadata && n.metadata.function_id === nodeId;
+        });
+    }
+
+    function maxDrillDepth(node) {
+        if (!node) return 0;
+        return directLogicChildren(node.id).length > 0 ? 1 : 0;
+    }
+
+    function advanceNodeDrill(node, isNewSelection) {
+        if (!node) return false;
+        var maxDepth = maxDrillDepth(node);
+        if (maxDepth <= 0) return false;
+        var current = Number(nodeDrillState[node.id] || 0);
+        var next = isNewSelection ? Math.max(current, 1) : ((current + 1) % (maxDepth + 1));
+        if (next === current) return false;
+        nodeDrillState[node.id] = next;
+        return true;
+    }
+
+    function setNodeDrill(nodeId, depth) {
+        var current = Number(nodeDrillState[nodeId] || 0);
+        if (current === depth) return false;
+        nodeDrillState[nodeId] = depth;
+        return true;
+    }
+
+    function shouldShowLocalLogic(nodeId) {
+        return Number(nodeDrillState[nodeId] || 0) >= 1;
+    }
+
+    function shouldShowCodePreview(node) {
+        if (!node) return false;
+        return !!getPrimaryLocation(node);
+    }
+
+    function getFunctionFlowTarget(node) {
+        if (!node || !vscodeApi) return null;
+
+        if (
+            node.filePath
+            && node.lineStart
+            && (
+                node.level >= 3
+                || node.type === 'middleware'
+                || node.type === 'dependency'
+            )
+        ) {
+            return { filePath: node.filePath, line: node.lineStart };
+        }
+
+        if (node.type === 'dependency') {
+            var resolved = null;
+            flowData.edges.some(function(edge){
+                if (edge.sourceId !== node.id || edge.type !== 'depends_on') return false;
+                var target = flowData.nodes[edge.targetId];
+                if (!target || !target.filePath || !target.lineStart) return false;
+                resolved = { filePath: target.filePath, line: target.lineStart };
+                return true;
+            });
+            if (resolved) return resolved;
+
+            if (node.level >= 3 && node.filePath && node.lineStart) {
+                return { filePath: node.filePath, line: node.lineStart };
+            }
+        }
+
+        return null;
     }
 
     function summarizeConnections(node) {

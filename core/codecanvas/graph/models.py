@@ -38,6 +38,9 @@ class NodeType(enum.Enum):
     CLASS = "class"
 
     ERROR_RESPONSE = "error_response"
+    SCHEMA = "schema"              # Pydantic request/response model
+    VALIDATION = "validation"      # Body parsing / validation step
+    SERIALIZATION = "serialization"  # Response serialization step
 
     # Level 4
     BRANCH = "branch"
@@ -135,6 +138,8 @@ class EntryPoint:
     dependencies: list[str] = field(default_factory=list)  # Depends() refs
     tags: list[str] = field(default_factory=list)
     response_model: str | None = None
+    request_body: str | None = None    # Pydantic model for request body
+    return_type: str | None = None     # Handler return annotation
     description: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 

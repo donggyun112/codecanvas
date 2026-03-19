@@ -61,6 +61,8 @@ class MiddlewareInfo:
     class_name: str
     file_path: str = ""
     line: int = 0
+    resolved_file_path: str | None = None
+    resolved_line: int | None = None
     args: dict[str, Any] = field(default_factory=dict)
 
 
@@ -339,6 +341,9 @@ class FastAPIExtractor:
             path = router.prefix + path
             tags = tags or router.tags
 
+        request_body = self._extract_body_param(func_node)
+        return_type = self._expr_text(func_node.returns) if func_node.returns else None
+
         return Endpoint(
             method=method,
             path=path,
@@ -346,9 +351,50 @@ class FastAPIExtractor:
             handler_file=file_path,
             handler_line=func_node.lineno,
             tags=tags,
-            response_model=response_model,
+            response_model=response_model or return_type,
+            request_body=request_body,
+            return_type=return_type,
             description=description or ast.get_docstring(func_node) or "",
         )
+
+    # Parameter names that FastAPI injects from the request context,
+    # not from the body.
+    _NON_BODY_PARAMS = {"request", "response", "background_tasks", "websocket"}
+
+    def _extract_body_param(
+        self,
+        func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> str | None:
+        """Find the Pydantic body parameter in a route handler.
+
+        A body param is a parameter with a type annotation that starts
+        with an uppercase letter (class name) and has no Depends/Security
+        default — i.e. it's not a path/query param primitive.
+        """
+        for arg in func_node.args.args:
+            if arg.arg in ("self", "cls") or arg.arg in self._NON_BODY_PARAMS:
+                continue
+            if not arg.annotation:
+                continue
+
+            type_name = self._declared_type(arg.annotation)
+            if not type_name or not type_name[0].isupper():
+                continue
+
+            # Skip if it has a Depends/Security default
+            idx = func_node.args.args.index(arg)
+            n_defaults = len(func_node.args.defaults)
+            n_args = len(func_node.args.args)
+            default_idx = idx - (n_args - n_defaults)
+            if 0 <= default_idx < n_defaults:
+                default = func_node.args.defaults[default_idx]
+                if isinstance(default, ast.Call):
+                    call_name = self._get_call_name(default)
+                    if call_name in self._DEPENDENCY_MARKERS:
+                        continue
+
+            return type_name
+        return None
 
     def _extract_depends(
         self,
@@ -515,11 +561,49 @@ class FastAPIExtractor:
 
             middleware_class = self._get_name(call.args[0])
             if middleware_class:
+                resolved_file_path, resolved_line = self._resolve_middleware_callable(
+                    middleware_class, file_path,
+                )
                 self.middlewares.append(MiddlewareInfo(
                     class_name=middleware_class,
                     file_path=file_path,
                     line=node.lineno,
+                    resolved_file_path=resolved_file_path,
+                    resolved_line=resolved_line,
                 ))
+
+    def _resolve_middleware_callable(
+        self,
+        middleware_class: str,
+        from_file: str,
+    ) -> tuple[str | None, int | None]:
+        """Resolve middleware class to the method users will want to inspect.
+
+        Prefer ``dispatch`` or ``__call__`` on the resolved class so
+        function-flow navigation lands on executable middleware code instead of
+        the ``app.add_middleware(...)`` registration site.
+        """
+        resolved_file_path, resolved_line = self._resolve_symbol_definition(middleware_class, from_file)
+        if not resolved_file_path or not resolved_line:
+            return None, None
+
+        tree = self._file_asts.get(resolved_file_path)
+        if tree is None:
+            return resolved_file_path, resolved_line
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if node.name != middleware_class or node.lineno != resolved_line:
+                continue
+            for item in node.body:
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if item.name in {"dispatch", "__call__"}:
+                    return resolved_file_path, item.lineno
+            return resolved_file_path, resolved_line
+
+        return resolved_file_path, resolved_line
 
     def _extract_exception_handlers(self, tree: ast.Module, file_path: str) -> None:
         """Extract @app.exception_handler() decorators."""

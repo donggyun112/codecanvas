@@ -103,6 +103,10 @@ class FlowGraphBuilder:
             # Add middleware chain
             self._add_middleware_nodes(graph)
 
+        # Schema nodes (request body / response model)
+        if entrypoint.kind == "api":
+            self._add_schema_nodes(graph, entrypoint)
+
         # Build abstraction levels
         self._build_level_hierarchy(graph)
         self._rewrite_execution_pipeline(graph)
@@ -111,6 +115,63 @@ class FlowGraphBuilder:
         self._fill_missing_descriptions(graph)
 
         return graph
+
+    def _add_schema_nodes(self, graph: FlowGraph, entrypoint: EntryPoint) -> None:
+        """Add request body and response schema nodes to the flow."""
+        handler_id = self._find_handler_node_id(graph, entrypoint)
+
+        if entrypoint.request_body:
+            body_id = f"schema.request.{entrypoint.request_body}"
+            if body_id not in graph.nodes:
+                graph.add_node(FlowNode(
+                    id=body_id,
+                    node_type=NodeType.SCHEMA,
+                    name=entrypoint.request_body,
+                    display_name=f"Body: {entrypoint.request_body}",
+                    description=f"Request body validated as `{entrypoint.request_body}` (Pydantic model).",
+                    confidence=Confidence.DEFINITE,
+                    level=0,
+                    metadata={
+                        "schema_direction": "request",
+                        "schema_type": entrypoint.request_body,
+                    },
+                ))
+            graph.add_edge(FlowEdge(
+                id=self._unique_edge_id(graph, "e_schema_req"),
+                source_id=body_id,
+                target_id=handler_id,
+                edge_type=EdgeType.CALLS,
+                label=f"body: {entrypoint.request_body}",
+                confidence=Confidence.DEFINITE,
+                metadata={"schema_edge": True, "direction": "request"},
+            ))
+
+        response_model = entrypoint.response_model
+        if response_model:
+            resp_id = f"schema.response.{response_model}"
+            if resp_id not in graph.nodes:
+                graph.add_node(FlowNode(
+                    id=resp_id,
+                    node_type=NodeType.SCHEMA,
+                    name=response_model,
+                    display_name=f"Response: {response_model}",
+                    description=f"Response serialized as `{response_model}`.",
+                    confidence=Confidence.DEFINITE,
+                    level=0,
+                    metadata={
+                        "schema_direction": "response",
+                        "schema_type": response_model,
+                    },
+                ))
+            graph.add_edge(FlowEdge(
+                id=self._unique_edge_id(graph, "e_schema_resp"),
+                source_id=handler_id,
+                target_id=resp_id,
+                edge_type=EdgeType.RETURNS,
+                label=f"→ {response_model}",
+                confidence=Confidence.DEFINITE,
+                metadata={"schema_edge": True, "direction": "response"},
+            ))
 
     def _add_level0_nodes(self, graph: FlowGraph, entrypoint: EntryPoint) -> None:
         """Add Level 0 nodes: Trigger, entrypoint/API, DB, Cache, External."""
@@ -372,10 +433,14 @@ class FlowGraphBuilder:
                 name=mw.class_name,
                 display_name=mw.class_name,
                 description=f"Run {mw.class_name} before passing control to the route layer.",
-                file_path=mw.file_path,
-                line_start=mw.line,
+                file_path=mw.resolved_file_path or mw.file_path,
+                line_start=mw.resolved_line or mw.line,
                 confidence=Confidence.DEFINITE,
                 level=1,
+                metadata={
+                    "middleware_registration_file": mw.file_path,
+                    "middleware_registration_line": mw.line,
+                },
             ))
 
     def _build_level_hierarchy(self, graph: FlowGraph) -> None:
@@ -887,6 +952,7 @@ class FlowGraphBuilder:
                             "structural_lift": True,
                         },
                     )
+            self._add_validation_serialization_nodes(graph, handler_id)
             return
 
         self._upsert_edge(
@@ -898,6 +964,7 @@ class FlowGraphBuilder:
             confidence=Confidence.DEFINITE,
             metadata={"pipeline_edge": True, "pipeline_phase": "handler"},
         )
+        self._add_validation_serialization_nodes(graph, handler_id)
         if handler_layer_id:
             self._upsert_edge(
                 graph,
@@ -925,6 +992,106 @@ class FlowGraphBuilder:
                     "pipeline_phase": "handler",
                     "structural_lift": True,
                 },
+            )
+
+    def _add_validation_serialization_nodes(
+        self, graph: FlowGraph, handler_id: str,
+    ) -> None:
+        """Add Body Validation (→422) and Response Serialization pipeline steps."""
+        ep = graph.entrypoint
+
+        # Body Validation: if the endpoint accepts a request body,
+        # FastAPI validates it against the Pydantic model BEFORE the handler.
+        if ep.request_body:
+            validation_id = "pipeline.body_validation"
+            graph.add_node(FlowNode(
+                id=validation_id,
+                node_type=NodeType.VALIDATION,
+                name="Body Validation",
+                display_name=f"Validate {ep.request_body}",
+                description=(
+                    f"Parse and validate the request body against `{ep.request_body}`. "
+                    f"Returns HTTP 422 if validation fails."
+                ),
+                confidence=Confidence.DEFINITE,
+                level=1,
+                metadata={
+                    "pipeline_phase": "validation",
+                    "schema_type": ep.request_body,
+                },
+            ))
+
+            # Validation → handler
+            self._upsert_edge(
+                graph,
+                preferred_id="e_validation_handler",
+                source_id=validation_id,
+                target_id=handler_id,
+                edge_type=EdgeType.CALLS,
+                label=f"valid {ep.request_body}",
+                confidence=Confidence.DEFINITE,
+                metadata={"pipeline_edge": True, "pipeline_phase": "validation"},
+            )
+
+            # Validation → 422 error
+            error_422_id = "error.validation_422"
+            if error_422_id not in graph.nodes:
+                graph.add_node(FlowNode(
+                    id=error_422_id,
+                    node_type=NodeType.EXCEPTION,
+                    name="ValidationError",
+                    display_name="422 Validation Error",
+                    description="Request body failed Pydantic validation.",
+                    confidence=Confidence.DEFINITE,
+                    level=4,
+                    metadata={"status_code": 422},
+                ))
+            self._upsert_edge(
+                graph,
+                preferred_id="e_validation_error",
+                source_id=validation_id,
+                target_id=error_422_id,
+                edge_type=EdgeType.RAISES,
+                label="invalid body → 422",
+                confidence=Confidence.DEFINITE,
+                metadata={
+                    "pipeline_edge": True,
+                    "error_path": True,
+                    "pipeline_phase": "validation",
+                },
+            )
+
+        # Response Serialization: if response_model is set,
+        # FastAPI validates/filters the return value.
+        if ep.response_model:
+            serialization_id = "pipeline.response_serialization"
+            graph.add_node(FlowNode(
+                id=serialization_id,
+                node_type=NodeType.SERIALIZATION,
+                name="Response Serialization",
+                display_name=f"Serialize → {ep.response_model}",
+                description=(
+                    f"Validate and serialize the handler return value "
+                    f"against `{ep.response_model}`."
+                ),
+                confidence=Confidence.DEFINITE,
+                level=1,
+                metadata={
+                    "pipeline_phase": "serialization",
+                    "schema_type": ep.response_model,
+                },
+            ))
+
+            # Handler → serialization
+            self._upsert_edge(
+                graph,
+                preferred_id="e_handler_serialize",
+                source_id=handler_id,
+                target_id=serialization_id,
+                edge_type=EdgeType.RETURNS,
+                label=f"→ {ep.response_model}",
+                confidence=Confidence.DEFINITE,
+                metadata={"pipeline_edge": True, "pipeline_phase": "serialization"},
             )
 
     def _connect_error_paths(self, graph: FlowGraph) -> None:
