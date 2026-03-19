@@ -168,6 +168,14 @@ export function activate(context: vscode.ExtensionContext) {
         }),
     );
 
+    context.subscriptions.push(
+        vscode.commands.registerCommand('codecanvas.showFlowData', (flow: any) => {
+            if (flow) {
+                flowPanel.showFlow(flow);
+            }
+        }),
+    );
+
     // Auto-analyze on startup if workspace has Python files
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (workspaceFolder) {

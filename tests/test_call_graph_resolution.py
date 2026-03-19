@@ -120,6 +120,46 @@ def test_level4_logic_steps_include_loop_and_return_for_script_entrypoint() -> N
     )
 
 
+def test_level4_logic_steps_capture_followable_call_targets(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        {
+            "app.py": """
+                from fastapi import FastAPI
+
+                app = FastAPI()
+
+
+                class ChatMemory:
+                    async def get_messages_async(self, session_id: str):
+                        return [session_id]
+
+
+                @app.get("/detail")
+                async def get_session_detail(memory: ChatMemory):
+                    messages = await memory.get_messages_async("abc")
+                    return {"messages": messages}
+            """,
+        },
+    )
+
+    flow = _build_flow(tmp_path, "GET", "/detail")
+
+    assignment = next(
+        node for node in flow.nodes.values()
+        if node.level == 4
+        and node.node_type == NodeType.ASSIGNMENT
+        and "get_messages_async" in node.display_name
+    )
+    call_targets = assignment.metadata.get("call_targets", [])
+
+    assert any(
+        target.get("qualified_name") == "app.ChatMemory.get_messages_async"
+        and target.get("label") == "memory.get_messages_async"
+        for target in call_targets
+    )
+
+
 def test_async_for_stream_source_is_marked_on_edges_and_loop_steps(tmp_path: Path) -> None:
     _write_files(
         tmp_path,

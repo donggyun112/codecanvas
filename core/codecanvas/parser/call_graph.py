@@ -167,6 +167,7 @@ class CallGraphBuilder:
                 if f.endswith(".py"):
                     fpath = os.path.join(root, f)
                     self._analyze_file(fpath)
+        self._enrich_logic_step_calls()
         self._analyzed = True
 
     def _analyze_file(self, file_path: str) -> None:
@@ -1120,6 +1121,44 @@ class CallGraphBuilder:
         for stmt in func_node.body:
             steps.extend(self._flatten_stmt(stmt))
         return steps
+
+    def _enrich_logic_step_calls(self) -> None:
+        """Attach resolved call targets to each summarized logic step."""
+        for func in self._functions.values():
+            if not func.logic_steps or not func.calls:
+                continue
+            for step in func.logic_steps:
+                targets = self._logic_step_call_targets(func, step)
+                if targets:
+                    step.metadata["call_targets"] = targets
+
+    def _logic_step_call_targets(self, func: FunctionDef, step: LogicStep) -> list[dict[str, Any]]:
+        """Return resolved project call targets that belong to one logic step."""
+        step_start = step.line
+        step_end = step.line_end or step.line
+        targets: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for call in func.calls:
+            if call.line < step_start or call.line > step_end:
+                continue
+            target = self._resolve_call(call, func)
+            if target is None or target.definition_type == "class":
+                continue
+            if target.qualified_name in seen:
+                continue
+            seen.add(target.qualified_name)
+            targets.append({
+                "label": call.func_name,
+                "qualified_name": target.qualified_name,
+                "file_path": target.file_path,
+                "line_start": target.line_start,
+                "node_type": self._classify_function(target).value,
+                "call_kind": self._call_edge_metadata(call, target).get("call_kind"),
+                "is_await": call.is_await,
+            })
+
+        return targets
 
     def _flatten_stmt(self, stmt: ast.stmt) -> list[LogicStep]:
         """Return LogicStep(s) for a statement.

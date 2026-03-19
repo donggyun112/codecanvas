@@ -1266,6 +1266,31 @@ body {
             panel.appendChild(flowActions);
         }
 
+        var nestedCallTargets = getNestedCallTargets(node);
+        if (nestedCallTargets.length) {
+            var nestedLabel = document.createElement('div');
+            nestedLabel.className = 'action-label';
+            nestedLabel.textContent = 'Follow Calls';
+            panel.appendChild(nestedLabel);
+
+            var nestedActions = document.createElement('div');
+            nestedActions.className = 'inline-actions';
+            nestedCallTargets.forEach(function(target){
+                var targetBtn = document.createElement('button');
+                targetBtn.className = 'action-btn primary';
+                targetBtn.textContent = target.label;
+                targetBtn.addEventListener('click', function(){
+                    vscodeApi.postMessage({
+                        type: 'openFunctionFlow',
+                        filePath: target.filePath,
+                        line: target.line,
+                    });
+                });
+                nestedActions.appendChild(targetBtn);
+            });
+            panel.appendChild(nestedActions);
+        }
+
         addSec(panel, 'Type', node.type);
         addSec(panel, 'Abstraction', 'L' + String(node.level));
         addSec(panel, 'Confidence', node.confidence);
@@ -1589,6 +1614,22 @@ body {
         }
 
         return null;
+    }
+
+    function getNestedCallTargets(node) {
+        if (!node || !node.metadata || !Array.isArray(node.metadata.call_targets)) return [];
+        return node.metadata.call_targets
+            .filter(function(target){
+                return target && target.file_path && target.line_start;
+            })
+            .map(function(target){
+                return {
+                    label: target.label || target.qualified_name || 'Open Call',
+                    filePath: target.file_path,
+                    line: target.line_start,
+                    nodeType: target.node_type || '',
+                };
+            });
     }
 
     function summarizeConnections(node) {
