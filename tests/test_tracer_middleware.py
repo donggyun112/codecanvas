@@ -24,9 +24,11 @@ SAMPLE_ROOT = str(ROOT / "sample-fastapi")
 def _reset_tracing_state():
     """Reset shared state between tests."""
     tracing_state.disable()
+    tracing_state._release()  # ensure slot lock is free
     tracing_state.last_result = None
     yield
     tracing_state.disable()
+    tracing_state._release()
     tracing_state.last_result = None
 
 

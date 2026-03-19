@@ -43,7 +43,7 @@ class RouterInstance:
 
 @dataclass
 class DependencyCall:
-    """A Depends() call found in a route handler."""
+    """A Depends() or Security() call found in a route handler."""
     func_name: str
     param_name: str = ""
     declared_type: str | None = None
@@ -52,6 +52,7 @@ class DependencyCall:
     is_class: bool = False
     resolved_file_path: str | None = None
     resolved_line: int | None = None
+    scopes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -86,40 +87,84 @@ class FastAPIExtractor:
         self._file_asts: dict[str, ast.Module] = {}
         self._router_vars: dict[str, RouterInstance] = {}   # var_name -> router (may conflict)
         self._router_by_file: dict[str, RouterInstance] = {}  # file_path -> router
+        self._routes_scanned = False
+        self._deps_extracted = False
+        self._fully_analyzed = False
 
     @staticmethod
     def dependency_key(handler_name: str, file_path: str) -> str:
         """Stable key for route handler dependency lookup."""
         return f"{file_path}:{handler_name}"
 
-    def analyze(self) -> list[Endpoint]:
-        """Run full analysis on the project. Returns discovered endpoints."""
+    # Keywords that indicate a file might contain FastAPI routing.
+    _FASTAPI_MARKERS = {b"FastAPI", b"APIRouter", b"app.get", b"app.post",
+                        b"router.get", b"router.post", b"router.put",
+                        b"router.delete", b"router.patch", b"include_router"}
+
+    def scan_routes(self) -> list[Endpoint]:
+        """Lightweight scan: only routes, routers, imports.
+
+        Skips middleware, exception handlers, and dependency extraction.
+        Only parses files that contain FastAPI-related keywords (fast
+        byte-level pre-filter) to avoid AST-parsing the entire project.
+        """
+        if self._routes_scanned:
+            return self.endpoints
+
         python_files = self._find_python_files()
-
-        # Pass 1: Parse all files, collect imports and router instances
-        for fpath in python_files:
+        relevant = self._prefilter_fastapi_files(python_files)
+        for fpath in relevant:
             self._parse_file(fpath)
-
-        # Pass 2: Extract routes, dependencies, middleware
-        for fpath in python_files:
+        for fpath in relevant:
             tree = self._file_asts.get(fpath)
             if tree is None:
                 continue
             self._extract_routers(tree, fpath)
-
-        # Pass 3: Now that we know all routers, extract routes
-        for fpath in python_files:
+        for fpath in relevant:
             tree = self._file_asts.get(fpath)
             if tree is None:
                 continue
             self._extract_routes(tree, fpath)
+
+        self._resolve_router_includes()
+        self._sync_api_entrypoints()
+        self._routes_scanned = True
+        return self.endpoints
+
+    def _prefilter_fastapi_files(self, python_files: list[str]) -> list[str]:
+        """Fast byte-level scan: keep only files containing FastAPI keywords."""
+        result: list[str] = []
+        for fpath in python_files:
+            try:
+                with open(fpath, "rb") as f:
+                    content = f.read()
+                if any(marker in content for marker in self._FASTAPI_MARKERS):
+                    result.append(fpath)
+            except OSError:
+                continue
+        return result
+
+    def analyze(self) -> list[Endpoint]:
+        """Full analysis: routes + middleware + dependencies + exception handlers.
+
+        Called lazily when a specific flow is built, not on sidebar load.
+        """
+        if self._fully_analyzed:
+            return self.endpoints
+
+        self.scan_routes()
+        self._extract_all_dependencies()
+
+        # Full parse: middleware and exception handlers can live in any file.
+        for fpath in self._find_python_files():
+            self._parse_file(fpath)  # no-op for already parsed files
+        for fpath, tree in self._file_asts.items():
+            if tree is None:
+                continue
             self._extract_middleware(tree, fpath)
             self._extract_exception_handlers(tree, fpath)
 
-        # Resolve router includes (app.include_router)
-        self._resolve_router_includes()
-        self._sync_api_entrypoints()
-
+        self._fully_analyzed = True
         return self.endpoints
 
     def _find_python_files(self) -> list[str]:
@@ -209,7 +254,11 @@ class FastAPIExtractor:
                     self._router_by_file[file_path] = router
 
     def _extract_routes(self, tree: ast.Module, file_path: str) -> None:
-        """Extract route decorators like @app.get('/path')."""
+        """Extract route decorators like @app.get('/path').
+
+        Dependency extraction is deferred to ``_extract_all_dependencies``
+        so ``scan_routes()`` stays lightweight.
+        """
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -217,11 +266,28 @@ class FastAPIExtractor:
             for decorator in node.decorator_list:
                 endpoint = self._parse_route_decorator(decorator, node, file_path)
                 if endpoint:
-                    # Extract Depends() from function parameters
-                    deps = self._extract_depends(node, file_path)
-                    endpoint.dependencies = [d.func_name for d in deps]
-                    self.dependencies[self.dependency_key(endpoint.handler_name, endpoint.handler_file)] = deps
                     self.endpoints.append(endpoint)
+
+    def _extract_all_dependencies(self) -> None:
+        """Extract Depends()/Security() from all discovered route handlers.
+
+        Called lazily during ``analyze()``, not during ``scan_routes()``.
+        """
+        if self._deps_extracted:
+            return
+        for ep in self.endpoints:
+            tree = self._file_asts.get(ep.handler_file)
+            if tree is None:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if node.name == ep.handler_name and node.lineno == ep.handler_line:
+                    deps = self._extract_depends(node, ep.handler_file)
+                    ep.dependencies = [d.func_name for d in deps]
+                    self.dependencies[self.dependency_key(ep.handler_name, ep.handler_file)] = deps
+                    break
+        self._deps_extracted = True
 
     def _parse_route_decorator(
         self,
@@ -363,6 +429,8 @@ class FastAPIExtractor:
                 return dep
         return None
 
+    _DEPENDENCY_MARKERS = {"Depends", "Security"}
+
     def _parse_depends_call(
         self,
         node: ast.expr,
@@ -370,11 +438,11 @@ class FastAPIExtractor:
         param_name: str = "",
         declared_type: str | None = None,
     ) -> DependencyCall | None:
-        """Parse a Depends(func) call."""
+        """Parse a Depends(func) or Security(func) call."""
         if not isinstance(node, ast.Call):
             return None
         call_name = self._get_call_name(node)
-        if call_name != "Depends":
+        if call_name not in self._DEPENDENCY_MARKERS:
             return None
         if not node.args:
             return None
@@ -384,7 +452,15 @@ class FastAPIExtractor:
             func_name = self._get_name(func_ref.func)
         if func_name:
             resolved_file_path, resolved_line = self._resolve_symbol_definition(func_name, file_path)
-            return DependencyCall(
+            scopes: list[str] = []
+            if call_name == "Security":
+                for kw in node.keywords:
+                    if kw.arg == "scopes" and isinstance(kw.value, ast.List):
+                        scopes = [
+                            elt.value for elt in kw.value.elts
+                            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                        ]
+            dep = DependencyCall(
                 func_name=func_name,
                 param_name=param_name,
                 declared_type=declared_type,
@@ -394,6 +470,9 @@ class FastAPIExtractor:
                 resolved_file_path=resolved_file_path,
                 resolved_line=resolved_line,
             )
+            if scopes:
+                dep.scopes = scopes
+            return dep
         return None
 
     def _declared_type(self, annotation: ast.expr | None) -> str | None:

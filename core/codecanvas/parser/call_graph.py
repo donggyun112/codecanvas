@@ -54,6 +54,8 @@ class CallSite:
     branch_condition: str | None = None
     is_db_call: bool = False
     is_http_call: bool = False
+    db_detail: dict[str, Any] | None = None     # model, operation, chain
+    http_detail: dict[str, Any] | None = None   # method, url, etc.
     is_raise: bool = False          # raise SomeException(...)
     raise_status: int | None = None # HTTP status code if HTTPException
     owner_parts: tuple[str, ...] = ()
@@ -150,6 +152,7 @@ class CallGraphBuilder:
         self._module_map: dict[str, str] = {}          # file_path -> module name
         self._class_attr_types: dict[str, dict[str, str]] = {}
         self._caller_index: dict[str, list[CallerReference]] | None = None
+        self._ast_nodes: dict[str, ast.AST] = {}  # qualified_name -> AST node
         self._analyzed = False
 
     def analyze_project(self) -> None:
@@ -214,6 +217,7 @@ class CallGraphBuilder:
                     logic_steps=self._extract_logic_steps(node),
                 )
                 self._functions[qname] = func_def
+                self._ast_nodes[qname] = node
                 self._name_index.setdefault(node.name, []).append(qname)
                 if node.name == "__init__" and class_qname and self_attr_types:
                     self._class_attr_types.setdefault(class_qname, {}).update(self_attr_types)
@@ -383,6 +387,8 @@ class CallGraphBuilder:
                     branch_condition=branch_ctx[1] if branch_ctx else None,
                     is_db_call=is_db,
                     is_http_call=is_http,
+                    db_detail=self._extract_db_detail(node) if is_db else None,
+                    http_detail=self._extract_http_detail(node) if is_http else None,
                     owner_parts=owner_parts,
                     is_attribute_call=is_attribute_call,
                 ))
@@ -662,11 +668,16 @@ class CallGraphBuilder:
                     stub_type = NodeType.DATABASE if call.is_db_call \
                         else NodeType.EXTERNAL_API
 
+                    detail = call.db_detail or call.http_detail or {}
+                    stub_display = self._stub_display_name(call)
+                    stub_label = self._stub_edge_label(call)
+
                     if stub_id not in nodes:
                         nodes[stub_id] = FlowNode(
                             id=stub_id,
                             node_type=stub_type,
                             name=call.func_name,
+                            display_name=stub_display,
                             description=self._describe_unresolved_call(call),
                             confidence=Confidence.INFERRED,
                             evidence=[Evidence(
@@ -676,6 +687,7 @@ class CallGraphBuilder:
                                 detail=f"Unresolved call to {call.func_name}",
                             )],
                             level=3,
+                            metadata=detail,
                         )
                     edge_counter += 1
                     edges.append(FlowEdge(
@@ -686,7 +698,7 @@ class CallGraphBuilder:
                             EdgeType.QUERIES if call.is_db_call
                             else EdgeType.REQUESTS
                         ),
-                        label=self._call_edge_label(call),
+                        label=stub_label,
                         confidence=Confidence.INFERRED,
                         evidence=[Evidence(
                             source="static_analysis",
@@ -694,7 +706,7 @@ class CallGraphBuilder:
                             line_number=call.line,
                             detail=f"Unresolved: {call.func_name}",
                         )],
-                        metadata=self._call_edge_metadata(call),
+                        metadata={**self._call_edge_metadata(call), **detail},
                         condition=call.branch_condition,
                         is_error_path=call.in_branch in ("except",),
                     ))
@@ -1478,6 +1490,45 @@ class CallGraphBuilder:
         }
         return mapping.get(type(operator), "?")
 
+    @staticmethod
+    def _stub_display_name(call: CallSite) -> str:
+        """Readable display name for a DB/HTTP stub node."""
+        if call.db_detail:
+            model = call.db_detail.get("model", "")
+            op = call.db_detail.get("operation", "")
+            table = call.db_detail.get("table", "")
+            if model and op:
+                return f"{op}({model})"
+            if table:
+                return f"{op}(\"{table}\")" if op else table
+            if op:
+                return op
+        if call.http_detail:
+            method = call.http_detail.get("method", "")
+            url = call.http_detail.get("url", call.http_detail.get("url_var", ""))
+            if method and url:
+                return f"{method} {url}"
+            if method:
+                return method
+        return call.func_name.split(".")[-1]
+
+    @staticmethod
+    def _stub_edge_label(call: CallSite) -> str:
+        """Short label for a DB/HTTP edge."""
+        if call.db_detail:
+            model = call.db_detail.get("model")
+            op = call.db_detail.get("operation", "")
+            if model:
+                return f"{op} {model}"
+            return op
+        if call.http_detail:
+            method = call.http_detail.get("method", "")
+            url = call.http_detail.get("url", "")
+            if method and url:
+                return f"{method} {url}"
+            return method
+        return ""
+
     def _describe_unresolved_call(self, call: CallSite) -> str:
         """Describe a call target we could not resolve statically."""
         human_name = self._humanize_identifier(call.func_name)
@@ -1486,9 +1537,24 @@ class CallGraphBuilder:
         if call.iteration_kind == "async_for":
             return f"Consume async stream from {human_name}; definition could not be resolved statically."
         if call.is_db_call:
-            return f"Possible database operation: {human_name}."
+            d = call.db_detail or {}
+            model = d.get("model", "")
+            op = d.get("operation", simple_name)
+            table = d.get("table", "")
+            if model:
+                return f"Database {op} on {model}."
+            if table:
+                return f"Database {op} on table \"{table}\"."
+            return f"Database operation: {op}."
         if call.is_http_call:
-            return f"Possible external HTTP call: {human_name}."
+            d = call.http_detail or {}
+            method = d.get("method", "")
+            url = d.get("url", d.get("url_var", ""))
+            if method and url:
+                return f"External HTTP {method} request to {url}."
+            if method:
+                return f"External HTTP {method} request."
+            return f"External HTTP call: {human_name}."
         if simple_name[:1].isupper():
             return f"Instantiate or invoke {human_name}; definition could not be resolved statically."
         return f"Call {human_name}; definition could not be resolved statically."
@@ -1684,6 +1750,97 @@ class CallGraphBuilder:
                     return node.func.value.id.lower() in HTTP_OBJECT_HINTS
                 return True
         return False
+
+    @staticmethod
+    def _extract_db_detail(node: ast.Call) -> dict[str, Any]:
+        """Extract model name, operation, and chain from a DB call.
+
+        Patterns:
+        - session.query(User).filter_by(...).first()  → model=User, op=first
+        - select(User).where(...)                     → model=User, op=select
+        - db.add(user)                                → op=add
+        - session.execute(stmt)                        → op=execute
+        """
+        detail: dict[str, Any] = {}
+        if not isinstance(node.func, ast.Attribute):
+            return detail
+
+        detail["operation"] = node.func.attr
+
+        # Walk the method chain to find model refs and build chain
+        chain: list[str] = [node.func.attr]
+        current: ast.expr = node.func.value
+        while isinstance(current, ast.Call):
+            if isinstance(current.func, ast.Attribute):
+                chain.append(current.func.attr)
+                # Look for model in first positional arg: query(User), select(User)
+                if current.func.attr in ("query", "select") and current.args:
+                    arg = current.args[0]
+                    if isinstance(arg, ast.Name):
+                        detail["model"] = arg.id
+                current = current.func.value
+            elif isinstance(current.func, ast.Name):
+                chain.append(current.func.id)
+                if current.func.id in ("select", "insert", "update", "delete") and current.args:
+                    arg = current.args[0]
+                    if isinstance(arg, ast.Name):
+                        detail["model"] = arg.id
+                break
+            else:
+                break
+
+        # Also check direct args: session.add(user_obj), table("users")
+        if node.args and node.func.attr in ("add", "delete", "merge", "refresh"):
+            arg = node.args[0]
+            if isinstance(arg, ast.Name):
+                detail["target_var"] = arg.id
+        if node.args and node.func.attr == "table":
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                detail["table"] = arg.value
+
+        detail["chain"] = list(reversed(chain))
+        return detail
+
+    @staticmethod
+    def _extract_http_detail(node: ast.Call) -> dict[str, Any]:
+        """Extract HTTP method, URL, and key kwargs from an HTTP call.
+
+        Patterns:
+        - client.get("/api/users")          → method=GET, url="/api/users"
+        - httpx.post(url, json=payload)     → method=POST, url=<variable>
+        - requests.request("GET", url)      → method=GET
+        """
+        detail: dict[str, Any] = {}
+        if not isinstance(node.func, ast.Attribute):
+            return detail
+
+        method = node.func.attr.upper()
+        if method == "REQUEST" and node.args:
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                method = arg.value.upper()
+        if method in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+            detail["method"] = method
+
+        # URL from first positional arg
+        url_arg = node.args[0] if node.args else None
+        if method == "REQUEST" and len(node.args) > 1:
+            url_arg = node.args[1]
+        if url_arg:
+            if isinstance(url_arg, ast.Constant) and isinstance(url_arg.value, str):
+                detail["url"] = url_arg.value
+            elif isinstance(url_arg, ast.JoinedStr):
+                detail["url"] = "<f-string>"
+            elif isinstance(url_arg, ast.Name):
+                detail["url_var"] = url_arg.id
+
+        # Key kwargs
+        for kw in node.keywords:
+            if kw.arg in ("json", "data", "params", "headers", "timeout"):
+                detail[f"has_{kw.arg}"] = True
+
+        return detail
 
     @classmethod
     def _get_call_target(cls, node: ast.Call) -> tuple[str, tuple[str, ...], bool]:

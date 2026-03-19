@@ -37,6 +37,8 @@ class NodeType(enum.Enum):
     METHOD = "method"
     CLASS = "class"
 
+    ERROR_RESPONSE = "error_response"
+
     # Level 4
     BRANCH = "branch"
     EXCEPTION = "exception"
@@ -64,6 +66,7 @@ class EdgeType(enum.Enum):
     REQUESTS = "requests"      # External HTTP
     MIDDLEWARE_CHAIN = "middleware_chain"
     INJECTS = "injects"        # FastAPI Depends()
+    HANDLES = "handles"        # Exception handler catches error
 
 
 @dataclass

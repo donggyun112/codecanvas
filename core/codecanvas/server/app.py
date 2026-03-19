@@ -221,7 +221,8 @@ async def trace_request(req: TraceRequest):
     target_app = _discover_target_app(req.project_path)
 
     # 5. Enable tracing and send request through ASGITransport
-    tracing_state.enable(req.project_path)
+    if not tracing_state.enable(req.project_path):
+        return {"error": "A previous trace is still in progress. Please wait and retry."}
     user_req = req.request
     method = user_req.get("method", "GET").upper()
     path = user_req.get("path", target.path or "/")

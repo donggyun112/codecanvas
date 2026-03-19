@@ -5,6 +5,7 @@ to produce a multi-level flow graph.
 """
 from __future__ import annotations
 
+import ast
 import os
 
 from codecanvas.graph.models import (
@@ -18,7 +19,7 @@ from codecanvas.graph.models import (
     NodeType,
 )
 from codecanvas.parser.call_graph import CallGraphBuilder
-from codecanvas.parser.fastapi_extractor import FastAPIExtractor
+from codecanvas.parser.fastapi_extractor import ExceptionHandlerInfo, FastAPIExtractor
 from codecanvas.parser.entrypoint_extractor import EntryPointExtractor
 
 # Map node types to semantic layer names for Level 1 grouping
@@ -43,20 +44,35 @@ class FlowGraphBuilder:
         self.entrypoint_extractor = EntryPointExtractor(project_root, self.extractor)
         self.call_graph = CallGraphBuilder(project_root)
         self._entrypoints: list[EntryPoint] | None = None
+        self._endpoints: list[EntryPoint] | None = None
 
     def get_entrypoints(self) -> list[EntryPoint]:
-        """Get all discovered execution entry points."""
+        """Full entrypoint scan: APIs + scripts + function fallbacks.
+
+        Triggers full project analysis. Use get_endpoints() for the
+        lightweight sidebar listing.
+        """
         if self._entrypoints is None:
             self._entrypoints = self.entrypoint_extractor.analyze()
         return self._entrypoints
 
     def get_endpoints(self) -> list[EntryPoint]:
-        """Backward-compatible API-only view of discovered entry points."""
-        return [entry for entry in self.get_entrypoints() if entry.kind == "api"]
+        """Lightweight API-only listing for the sidebar.
+
+        Only parses route decorators — skips call graph, middleware,
+        dependency resolution, and function/script entrypoint scanning.
+        """
+        if self._endpoints is None:
+            self._endpoints = list(self.extractor.scan_routes())
+        return self._endpoints
 
     def build_flow(self, entrypoint: EntryPoint) -> FlowGraph:
-        """Build a complete flow graph for a single entry point."""
-        self.get_entrypoints()
+        """Build a complete flow graph for a single entry point.
+
+        Triggers full analysis lazily (call graph, middleware, dependencies)
+        only on first flow build — not during sidebar listing.
+        """
+        self.extractor.analyze()  # middleware + exception handlers (lazy, skips if done)
         graph = FlowGraph(entrypoint=entrypoint)
         caller_depth = 0
         if entrypoint.kind == "function":
@@ -90,6 +106,7 @@ class FlowGraphBuilder:
         # Build abstraction levels
         self._build_level_hierarchy(graph)
         self._rewrite_execution_pipeline(graph)
+        self._connect_error_paths(graph)
         self._annotate_pipeline_phases(graph)
         self._fill_missing_descriptions(graph)
 
@@ -183,20 +200,44 @@ class FlowGraphBuilder:
             ))
 
     def _add_dependency_nodes(self, graph: FlowGraph, entrypoint: EntryPoint) -> None:
-        """Add Depends() injection nodes."""
+        """Add Depends() / Security() injection nodes with nested chain support."""
         deps = self.extractor.dependencies.get(
             FastAPIExtractor.dependency_key(entrypoint.handler_name, entrypoint.handler_file), [],
         )
         handler_id = self._find_handler_node_id(graph, entrypoint)
+        seen_dep_ids: set[str] = set()
+        self._process_dependency_list(
+            graph, deps, handler_id, seen_dep_ids, edge_prefix="dep",
+        )
+
+    def _process_dependency_list(
+        self,
+        graph: FlowGraph,
+        deps: list,
+        target_id: str,
+        seen_dep_ids: set[str],
+        edge_prefix: str,
+    ) -> None:
+        """Process a list of DependencyCall, recursing into sub-dependencies."""
         for i, dep in enumerate(deps):
             dep_id = self._dependency_node_id(dep.func_name, dep.resolved_file_path or dep.file_path)
-            inject_label = self._dependency_injection_label(dep.param_name, dep.declared_type)
+
+            # Infer declared_type from the dependency function's return annotation
+            # when the handler parameter has no explicit type annotation.
+            effective_type = dep.declared_type
+            if not effective_type:
+                effective_type = self._infer_dep_return_type(dep)
+
+            inject_label = self._dependency_injection_label(dep.param_name, effective_type)
+            scopes_label = f" scopes={dep.scopes}" if dep.scopes else ""
+            marker = "Security" if dep.scopes else "Depends"
+
             if dep_id not in graph.nodes:
                 graph.add_node(FlowNode(
                     id=dep_id,
                     node_type=NodeType.DEPENDENCY,
                     name=dep.func_name,
-                    display_name=f"Depends({dep.func_name})",
+                    display_name=f"{marker}({dep.func_name})",
                     description=(
                         f"Resolve dependency `{dep.func_name}` for `{inject_label}` before the route handler runs."
                         if inject_label else
@@ -209,29 +250,33 @@ class FlowGraphBuilder:
                         source="decorator",
                         file_path=dep.file_path,
                         line_number=dep.line,
-                        detail=f"Depends({dep.func_name})",
+                        detail=f"{marker}({dep.func_name}){scopes_label}",
                     )],
                     level=1,
                     metadata={
                         "dependency_param": dep.param_name,
-                        "declared_type": dep.declared_type,
+                        "declared_type": effective_type,
+                        "scopes": dep.scopes or [],
+                        "pipeline_phase": "dependency",
                     },
                 ))
             else:
                 graph.nodes[dep_id].metadata.setdefault("dependency_param", dep.param_name)
-                graph.nodes[dep_id].metadata.setdefault("declared_type", dep.declared_type)
+                if effective_type:
+                    graph.nodes[dep_id].metadata.setdefault("declared_type", effective_type)
 
             graph.add_edge(FlowEdge(
-                id=f"e_dep_{i}",
+                id=self._unique_edge_id(graph, f"e_{edge_prefix}_{i}"),
                 source_id=dep_id,
-                target_id=handler_id,
+                target_id=target_id,
                 edge_type=EdgeType.INJECTS,
-                label=inject_label or f"Depends({dep.func_name})",
+                label=inject_label or f"{marker}({dep.func_name})",
                 confidence=Confidence.DEFINITE,
                 metadata={
                     "dependency_param": dep.param_name,
-                    "declared_type": dep.declared_type,
+                    "declared_type": effective_type,
                     "call_kind": "dependency",
+                    "scopes": dep.scopes or [],
                 },
             ))
 
@@ -244,12 +289,10 @@ class FlowGraphBuilder:
                 handler_file=dep_file,
                 line_number=dep.resolved_line,
             )
-            self._merge_subgraph(graph, dep_nodes, dep_edges, edge_prefix=f"dep{i}")
+            self._merge_subgraph(graph, dep_nodes, dep_edges, edge_prefix=f"{edge_prefix}{i}")
 
             dep_root_id = self.call_graph.resolve_function_id(
-                dep.func_name,
-                dep_file,
-                dep.resolved_line,
+                dep.func_name, dep_file, dep.resolved_line,
             )
             if dep_root_id and dep_root_id in graph.nodes:
                 root_desc = graph.nodes[dep_root_id].description
@@ -257,12 +300,8 @@ class FlowGraphBuilder:
                     graph.nodes[dep_id].description = (
                         f"Resolve dependency `{dep.func_name}` before the route runs. {root_desc}"
                     )
-                if dep.param_name:
-                    graph.nodes[dep_id].metadata["dependency_param"] = dep.param_name
-                if dep.declared_type:
-                    graph.nodes[dep_id].metadata["declared_type"] = dep.declared_type
                 graph.add_edge(FlowEdge(
-                    id=self._unique_edge_id(graph, f"e_dep_root_{i}"),
+                    id=self._unique_edge_id(graph, f"e_{edge_prefix}_root_{i}"),
                     source_id=dep_id,
                     target_id=dep_root_id,
                     edge_type=EdgeType.DEPENDS_ON,
@@ -272,13 +311,56 @@ class FlowGraphBuilder:
                         source="decorator",
                         file_path=dep.file_path,
                         line_number=dep.line,
-                        detail=f"Depends({dep.func_name}) resolves to {dep_root_id}",
+                        detail=f"{marker}({dep.func_name}) resolves to {dep_root_id}",
                     )],
                     metadata={
                         "dependency_param": dep.param_name,
-                        "declared_type": dep.declared_type,
+                        "declared_type": effective_type,
                     },
                 ))
+
+            # Recurse into nested sub-dependencies of this dependency function.
+            if dep_id not in seen_dep_ids:
+                seen_dep_ids.add(dep_id)
+                sub_deps = self._extract_sub_dependencies(dep)
+                if sub_deps:
+                    self._process_dependency_list(
+                        graph, sub_deps, dep_id, seen_dep_ids,
+                        edge_prefix=f"{edge_prefix}{i}s",
+                    )
+
+    def _extract_sub_dependencies(self, dep) -> list:
+        """Extract Depends() from a dependency function's own parameters.
+
+        Uses the call_graph's cached AST node index — no ast.walk().
+        """
+        dep_file = dep.resolved_file_path or dep.file_path
+        if not dep_file:
+            return []
+
+        func_id = self.call_graph.resolve_function_id(
+            dep.func_name, dep_file, dep.resolved_line,
+        )
+        if func_id:
+            ast_node = self.call_graph._ast_nodes.get(func_id)
+            func_def = self.call_graph._functions.get(func_id)
+            if ast_node and func_def:
+                return self.extractor._extract_depends(ast_node, func_def.file_path)
+        return []
+
+    def _infer_dep_return_type(self, dep) -> str | None:
+        """Infer the return type from a dependency function's annotation."""
+        func_id = self.call_graph.resolve_function_id(
+            dep.func_name,
+            dep.resolved_file_path or dep.file_path,
+            dep.resolved_line,
+        )
+        if not func_id:
+            return None
+        func_def = self.call_graph._functions.get(func_id)
+        if func_def and func_def.return_annotation:
+            return func_def.return_annotation
+        return None
 
     def _add_middleware_nodes(self, graph: FlowGraph) -> None:
         """Add middleware chain nodes."""
@@ -843,6 +925,87 @@ class FlowGraphBuilder:
                     "pipeline_phase": "handler",
                     "structural_lift": True,
                 },
+            )
+
+    def _connect_error_paths(self, graph: FlowGraph) -> None:
+        """Route error nodes to exception handlers or a default error response.
+
+        For each RAISES edge:
+        - If a registered exception handler matches, add an edge to it.
+        - Otherwise, add a default error response node (e.g. HTTP 401 → Client).
+        """
+        if graph.entrypoint.kind != "api":
+            return
+
+        # Index exception handlers by class name
+        handler_map: dict[str, ExceptionHandlerInfo] = {}
+        for eh in self.extractor.exception_handlers:
+            handler_map[eh.exception_class] = eh
+
+        error_nodes = [
+            n for n in graph.nodes.values()
+            if n.node_type == NodeType.EXCEPTION
+        ]
+        if not error_nodes:
+            return
+
+        # Ensure a client/response node exists for dead-end errors
+        response_id = "error_response"
+        if response_id not in graph.nodes:
+            graph.add_node(FlowNode(
+                id=response_id,
+                node_type=NodeType.ERROR_RESPONSE,
+                name="Error Response",
+                display_name="Error Response",
+                description="Return an error response to the client.",
+                confidence=Confidence.DEFINITE,
+                level=0,
+            ))
+
+        for error_node in error_nodes:
+            exc_class = error_node.name
+            status_code = error_node.metadata.get("status_code")
+
+            # Check if a custom exception handler is registered
+            eh = handler_map.get(exc_class)
+            if eh:
+                eh_func_id = self.call_graph.resolve_function_id(
+                    eh.handler_name, eh.file_path, eh.line,
+                )
+                if eh_func_id:
+                    # Add the handler function to the graph if missing
+                    if eh_func_id not in graph.nodes:
+                        eh_nodes, eh_edges = self.call_graph.build_flow_from(
+                            handler_name=eh.handler_name,
+                            handler_file=eh.file_path,
+                            line_number=eh.line,
+                        )
+                        self._merge_subgraph(graph, eh_nodes, eh_edges, edge_prefix="eh")
+                    if eh_func_id in graph.nodes:
+                        graph.nodes[eh_func_id].metadata["pipeline_phase"] = "exception_handler"
+                        self._upsert_edge(
+                            graph,
+                            preferred_id=f"e_err_handler_{error_node.id}",
+                            source_id=error_node.id,
+                            target_id=eh_func_id,
+                            edge_type=EdgeType.HANDLES,
+                            confidence=Confidence.DEFINITE,
+                            label=f"caught by {eh.handler_name}",
+                            metadata={"error_path": True},
+                        )
+                        continue
+
+            # Default: HTTPException or unhandled → error response
+            label = f"HTTP {status_code}" if status_code else f"raises {exc_class}"
+            self._upsert_edge(
+                graph,
+                preferred_id=f"e_err_response_{error_node.id}",
+                source_id=error_node.id,
+                target_id=response_id,
+                edge_type=EdgeType.RAISES,
+                confidence=Confidence.DEFINITE,
+                label=label,
+                metadata={"error_path": True, "status_code": status_code},
             )
 
     def _annotate_pipeline_phases(self, graph: FlowGraph) -> None:

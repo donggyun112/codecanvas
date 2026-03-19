@@ -63,9 +63,19 @@ class _CallState:
 
 
 class TraceCollector:
-    """Collect one runtime trace for a target project root."""
+    """Collect one runtime trace for a target project root.
 
-    def __init__(self, project_root: str):
+    When ``request_context_var`` is provided, the collector only captures
+    frames that execute within the matching async context.  This prevents
+    events from unrelated concurrent coroutines leaking into the trace.
+    """
+
+    def __init__(
+        self,
+        project_root: str,
+        request_context_var: Any | None = None,
+        request_id: str | None = None,
+    ):
         self.project_root = self._normalize_path(project_root)
         self.events: list[TraceEvent] = []
         self.result: TraceResult | None = None
@@ -77,6 +87,10 @@ class TraceCollector:
         self._ended_at_ns: int | None = None
         self._previous_trace: Any = None
 
+        # Async context isolation
+        self._request_context_var = request_context_var
+        self._request_id = request_id
+
         # Coroutine tracking
         self._coroutine_frames: set[int] = set()
         self._pending_returns: dict[int, TraceEvent] = {}
@@ -84,6 +98,9 @@ class TraceCollector:
         # Exception tracking: frames that received an exception event
         # and have NOT yet had that exception caught.
         self._exception_frames: set[int] = set()
+
+        # Cleanup hooks for runtime instrumentation (SQLAlchemy, httpx, etc.)
+        self._cleanup_hooks: list[Any] = []
 
     # -- public API --
 
@@ -116,6 +133,7 @@ class TraceCollector:
         threading.settrace(None)
         self._active = False
         self._ended_at_ns = time.perf_counter_ns()
+        self._run_cleanup_hooks()
 
         # Flush deferred coroutine returns (their last return was a real finish)
         for frame_id, event in self._pending_returns.items():
@@ -205,6 +223,12 @@ class TraceCollector:
         """Global trace function — decides whether to trace a new frame."""
         if event != "call":
             return None
+
+        # Context isolation: skip frames from other async contexts.
+        if self._request_context_var is not None and self._request_id is not None:
+            current_id = self._request_context_var.get(None)
+            if current_id != self._request_id:
+                return None
 
         info = self._frame_info(frame)
         if info is None:
@@ -413,6 +437,85 @@ class TraceCollector:
         if isinstance(value, (list, tuple, set, frozenset)):
             return {"type": type(value).__name__, "length": len(value)}
         return {"type": type(value).__name__}
+
+    # -- runtime hooks for DB/HTTP instrumentation --
+
+    def install_sqlalchemy_hook(self, engine: Any) -> None:
+        """Attach SQLAlchemy event listeners to capture queries.
+
+        Call after ``start()`` and detach automatically on ``stop()``.
+        Requires ``sqlalchemy`` to be importable.
+        """
+        try:
+            from sqlalchemy import event as sa_event
+        except ImportError:
+            return
+
+        def _before_execute(conn, clauseelement, multiparams, params, execution_options):
+            stmt = str(clauseelement)
+            # Redact literal values for safety
+            self.record_event(
+                TraceEventType.DB,
+                file_path=self.project_root,
+                func_name="sqlalchemy.execute",
+                line=0,
+                detail={
+                    "query": stmt[:500],
+                    "queryLength": len(stmt),
+                    "params": "REDACTED",
+                },
+            )
+
+        sa_event.listen(engine, "before_cursor_execute", _before_execute)
+        self._cleanup_hooks.append(
+            lambda: sa_event.remove(engine, "before_cursor_execute", _before_execute)
+        )
+
+    def install_httpx_hook(self) -> None:
+        """Monkey-patch httpx transport to capture outgoing HTTP requests.
+
+        Captures method, URL, status code, and duration.
+        """
+        try:
+            import httpx
+        except ImportError:
+            return
+
+        original_send = httpx.AsyncClient.send
+
+        collector = self
+
+        async def _traced_send(self_client, request, **kwargs):
+            start_ns = time.perf_counter_ns()
+            response = await original_send(self_client, request, **kwargs)
+            duration_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+            collector.record_event(
+                TraceEventType.HTTP,
+                file_path=collector.project_root,
+                func_name="httpx.request",
+                line=0,
+                detail={
+                    "method": request.method,
+                    "url": str(request.url)[:200],
+                    "statusCode": response.status_code,
+                    "durationMs": round(duration_ms, 2),
+                },
+            )
+            return response
+
+        httpx.AsyncClient.send = _traced_send  # type: ignore[assignment]
+        self._cleanup_hooks.append(
+            lambda: setattr(httpx.AsyncClient, "send", original_send)
+        )
+
+    def _run_cleanup_hooks(self) -> None:
+        """Detach all installed runtime hooks."""
+        for hook in self._cleanup_hooks:
+            try:
+                hook()
+            except Exception:
+                pass
+        self._cleanup_hooks.clear()
 
     @staticmethod
     def _summarize_exception(exc: BaseException) -> dict[str, Any]:
