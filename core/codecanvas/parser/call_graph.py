@@ -34,6 +34,7 @@ class FunctionDef:
     class_name: str | None = None
     decorators: list[str] = field(default_factory=list)
     calls: list[CallSite] = field(default_factory=list)
+    references: list[ReferenceSite] = field(default_factory=list)
     docstring: str = ""
     params: list[str] = field(default_factory=list)
     return_annotation: str | None = None
@@ -57,6 +58,30 @@ class CallSite:
     raise_status: int | None = None # HTTP status code if HTTPException
     owner_parts: tuple[str, ...] = ()
     is_attribute_call: bool = False
+    iteration_kind: str | None = None   # "for" | "async_for"
+    loop_target: str | None = None
+    loop_iterator: str | None = None
+
+
+@dataclass
+class ReferenceSite:
+    """A function reference passed as a value (callback/registration)."""
+    func_name: str
+    line: int
+    container_name: str = ""
+    owner_parts: tuple[str, ...] = ()
+    is_attribute_ref: bool = False
+
+
+@dataclass
+class CallerReference:
+    """A resolved reverse-call relationship into a target function."""
+    caller_qualified_name: str
+    line: int
+    relation: str = "call"
+    label: str = ""
+    condition: str | None = None
+    is_error_path: bool = False
 
 
 @dataclass
@@ -124,6 +149,7 @@ class CallGraphBuilder:
         self._file_asts: dict[str, ast.Module] = {}
         self._module_map: dict[str, str] = {}          # file_path -> module name
         self._class_attr_types: dict[str, dict[str, str]] = {}
+        self._caller_index: dict[str, list[CallerReference]] | None = None
         self._analyzed = False
 
     def analyze_project(self) -> None:
@@ -179,6 +205,7 @@ class CallGraphBuilder:
                     class_name=class_name,
                     decorators=[self._decorator_name(d) for d in node.decorator_list],
                     calls=self._extract_calls(node),
+                    references=self._extract_references(node),
                     docstring=ast.get_docstring(node) or "",
                     params=[a.arg for a in node.args.args if a.arg != "self"],
                     return_annotation=self._annotation_str(node.returns),
@@ -190,7 +217,9 @@ class CallGraphBuilder:
                 self._name_index.setdefault(node.name, []).append(qname)
                 if node.name == "__init__" and class_qname and self_attr_types:
                     self._class_attr_types.setdefault(class_qname, {}).update(self_attr_types)
-                # Index nested functions inside this function scope as lexical children.
+                # Recurse into function bodies to index nested functions.
+                # They may serve as entrypoints (e.g. LangGraph node callbacks),
+                # but calls TO them from the parent are filtered in traverse().
                 self._visit_definitions(node, qname, file_path, class_name, class_qname)
 
             elif isinstance(node, ast.ClassDef):
@@ -203,6 +232,18 @@ class CallGraphBuilder:
                     ),
                     None,
                 )
+                # Detect data-object / schema classes (Pydantic, TypedDict, …)
+                # whose instantiation is not an architectural flow step.
+                _SCHEMA_BASES = {
+                    "BaseModel", "TypedDict", "BaseSettings",
+                    "NamedTuple", "Schema", "SQLModel",
+                    "pydantic.BaseModel", "pydantic.BaseSettings",
+                }
+                base_names = {
+                    ast.unparse(b) if hasattr(ast, "unparse") else getattr(b, "id", "")
+                    for b in node.bases
+                }
+                is_schema = bool(base_names & _SCHEMA_BASES)
                 class_def = FunctionDef(
                     name=node.name,
                     qualified_name=class_qname,
@@ -216,7 +257,7 @@ class CallGraphBuilder:
                     docstring=ast.get_docstring(node) or "",
                     params=[a.arg for a in init_node.args.args if a.arg != "self"] if init_node else [],
                     return_annotation=node.name,
-                    definition_type="class",
+                    definition_type="schema" if is_schema else "class",
                     class_qname=class_qname,
                 )
                 self._functions[class_qname] = class_def
@@ -237,6 +278,26 @@ class CallGraphBuilder:
         else:
             self._visit_calls(func_node, calls, branch_ctx=None)
         return calls
+
+    def _extract_references(self, func_node: ast.AST) -> list[ReferenceSite]:
+        """Extract function references passed as values within a function body."""
+        refs: list[ReferenceSite] = []
+        body = getattr(func_node, "body", None)
+        if isinstance(body, list):
+            for child in body:
+                self._visit_references(child, refs)
+        else:
+            self._visit_references(func_node, refs)
+
+        deduped: list[ReferenceSite] = []
+        seen: set[tuple[str, int, str]] = set()
+        for ref in refs:
+            key = (ref.func_name, ref.line, ref.container_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(ref)
+        return deduped
 
     def _visit_calls(
         self,
@@ -271,6 +332,24 @@ class CallGraphBuilder:
             for child in getattr(node, "orelse", []):
                 self._visit_calls(child, calls, branch_ctx)
             for child in getattr(node, "finalbody", []):
+                self._visit_calls(child, calls, branch_ctx)
+            return
+
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            iter_call = self._iterator_call_signature(node.iter)
+            self._visit_calls(node.iter, calls, branch_ctx)
+            if iter_call:
+                self._annotate_iteration_call(
+                    calls=calls,
+                    func_name=iter_call[0],
+                    line=iter_call[1],
+                    kind="async_for" if isinstance(node, ast.AsyncFor) else "for",
+                    target=ast.unparse(node.target) if hasattr(ast, "unparse") else self._get_name(node.target),
+                    iterator=self._expr_summary(node.iter),
+                )
+            for child in node.body:
+                self._visit_calls(child, calls, branch_ctx)
+            for child in getattr(node, "orelse", []):
                 self._visit_calls(child, calls, branch_ctx)
             return
 
@@ -316,6 +395,96 @@ class CallGraphBuilder:
         for child in ast.iter_child_nodes(node):
             self._visit_calls(child, calls, branch_ctx)
 
+    def _iterator_call_signature(self, expr: ast.AST) -> tuple[str, int] | None:
+        """Return the outer iterator call in a for/async-for expression."""
+        if isinstance(expr, ast.Await):
+            return self._iterator_call_signature(expr.value)
+        if isinstance(expr, ast.Call):
+            func_name, _, _ = self._get_call_target(expr)
+            if func_name:
+                return func_name, expr.lineno
+        return None
+
+    @staticmethod
+    def _annotate_iteration_call(
+        calls: list[CallSite],
+        func_name: str,
+        line: int,
+        kind: str,
+        target: str,
+        iterator: str,
+    ) -> None:
+        """Tag the iterator source call for a for/async-for loop."""
+        for call in reversed(calls):
+            if call.line != line or call.func_name != func_name:
+                continue
+            call.iteration_kind = kind
+            call.loop_target = target
+            call.loop_iterator = iterator
+            return
+
+    def _visit_references(self, node: ast.AST, refs: list[ReferenceSite]) -> None:
+        """Collect callback/reference-style function usages while skipping nested scopes."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            return
+
+        if isinstance(node, ast.Call):
+            container_name, _, _ = self._get_call_target(node)
+            for arg in node.args:
+                self._collect_reference_expr(arg, refs, node.lineno, container_name)
+            for kw in node.keywords:
+                self._collect_reference_expr(kw.value, refs, node.lineno, container_name)
+            self._visit_references(node.func, refs)
+            return
+
+        for child in ast.iter_child_nodes(node):
+            self._visit_references(child, refs)
+
+    def _collect_reference_expr(
+        self,
+        expr: ast.AST | None,
+        refs: list[ReferenceSite],
+        line: int,
+        container_name: str,
+    ) -> None:
+        """Collect bare callable references nested in an expression tree."""
+        if expr is None:
+            return
+        if isinstance(expr, ast.Name):
+            refs.append(ReferenceSite(
+                func_name=expr.id,
+                line=line,
+                container_name=container_name,
+            ))
+            return
+        if isinstance(expr, ast.Attribute):
+            owner_parts = self._extract_owner_parts(expr.value)
+            func_name = ".".join((*owner_parts, expr.attr)) if owner_parts else expr.attr
+            refs.append(ReferenceSite(
+                func_name=func_name,
+                line=line,
+                container_name=container_name,
+                owner_parts=owner_parts,
+                is_attribute_ref=True,
+            ))
+            return
+        if isinstance(expr, ast.Call):
+            for arg in expr.args:
+                self._collect_reference_expr(arg, refs, line, container_name)
+            for kw in expr.keywords:
+                self._collect_reference_expr(kw.value, refs, line, container_name)
+            return
+        if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
+            for item in expr.elts:
+                self._collect_reference_expr(item, refs, line, container_name)
+            return
+        if isinstance(expr, ast.Dict):
+            for key in expr.keys:
+                self._collect_reference_expr(key, refs, line, container_name)
+            for value in expr.values:
+                self._collect_reference_expr(value, refs, line, container_name)
+            return
+
     @staticmethod
     def _extract_status_code(call_node: ast.Call) -> int | None:
         """Extract status_code from HTTPException(status_code=401) or similar."""
@@ -337,6 +506,8 @@ class CallGraphBuilder:
         handler_file: str,
         line_number: int | None = None,
         max_depth: int = 10,
+        caller_depth: int = 0,
+        mark_context_root: bool = False,
     ) -> tuple[dict[str, FlowNode], list[FlowEdge]]:
         """Build flow nodes and edges from a handler function, following calls."""
         self.analyze_project()
@@ -351,13 +522,11 @@ class CallGraphBuilder:
         if not handler_func:
             return nodes, edges
 
-        def traverse(func: FunctionDef, depth: int, parent_id: str | None = None) -> str:
+        def ensure_function_node(func: FunctionDef) -> str:
             nonlocal edge_counter
-            if depth > max_depth or func.qualified_name in visited:
+            if func.qualified_name in nodes:
                 return func.qualified_name
-            visited.add(func.qualified_name)
 
-            # Create node for this function
             node = FlowNode(
                 id=func.qualified_name,
                 node_type=self._classify_function(func),
@@ -374,7 +543,7 @@ class CallGraphBuilder:
                     line_number=func.line_start,
                     detail=f"Function definition at line {func.line_start}",
                 )],
-                level=3,  # Function level
+                level=3,
                 metadata={
                     "is_async": func.is_async,
                     "params": func.params,
@@ -384,6 +553,18 @@ class CallGraphBuilder:
             )
             nodes[node.id] = node
             edge_counter = self._add_logic_nodes(func, node.id, nodes, edges, edge_counter)
+            return node.id
+
+        def traverse(func: FunctionDef, depth: int, parent_id: str | None = None) -> str:
+            nonlocal edge_counter
+            ensure_function_node(func)
+            if depth > max_depth or func.qualified_name in visited:
+                return func.qualified_name
+            visited.add(func.qualified_name)
+            node = nodes[func.qualified_name]
+            existing_depth = node.metadata.get("downstream_distance")
+            if existing_depth is None or depth < existing_depth:
+                node.metadata["downstream_distance"] = depth
 
             # Process each call inside this function
             for call in func.calls:
@@ -409,12 +590,15 @@ class CallGraphBuilder:
                             detail=display,
                         )],
                         level=4,
-                        metadata={"status_code": status} if status else {},
+                        metadata={
+                            "function_id": node.id,
+                            **({"status_code": status} if status else {}),
+                        },
                     )
                     edge_counter += 1
                     edges.append(FlowEdge(
                         id=f"e{edge_counter}",
-                        source_id=node.id,
+                        source_id=self._find_matching_logic_node(call, node.id, nodes) or node.id,
                         target_id=exc_id,
                         edge_type=EdgeType.RAISES,
                         label=f"HTTP {status}" if status else "raise",
@@ -433,6 +617,14 @@ class CallGraphBuilder:
                 target_func = self._resolve_call(call, func)
 
                 if target_func:
+                    # Skip schema/DTO constructors — data object assembly is not
+                    # an architectural flow step (e.g. User(...), UserIdentity(...)).
+                    if target_func.definition_type == "schema":
+                        continue
+                    # Skip nested functions of the current function — they are
+                    # closures / helpers that are implementation details.
+                    if target_func.qualified_name.startswith(func.qualified_name + "."):
+                        continue
                     # Definite connection
                     child_id = traverse(target_func, depth + 1, node.id)
                     edge_counter += 1
@@ -447,6 +639,7 @@ class CallGraphBuilder:
                         source_id=node.id,
                         target_id=child_id,
                         edge_type=edge_type,
+                        label=self._call_edge_label(call, target_func),
                         confidence=Confidence.DEFINITE,
                         evidence=[Evidence(
                             source="static_analysis",
@@ -454,17 +647,22 @@ class CallGraphBuilder:
                             line_number=call.line,
                             detail=f"Call to {call.func_name} at line {call.line}",
                         )],
+                        metadata=self._call_edge_metadata(call, target_func),
                         condition=call.branch_condition,
                         is_error_path=call.in_branch in ("except",),
                     ))
                 else:
-                    # Create stub node for unresolved call
-                    stub_id = f"unresolved.{call.func_name}"
-                    if stub_id not in nodes:
-                        stub_type = NodeType.DATABASE if call.is_db_call \
-                            else NodeType.EXTERNAL_API if call.is_http_call \
-                            else NodeType.FUNCTION
+                    # Only create stub nodes for semantically meaningful unresolved
+                    # calls (database / HTTP).  Plain external library calls like
+                    # workflow.add_node or llm.invoke produce noise without value.
+                    if not call.is_db_call and not call.is_http_call:
+                        continue
 
+                    stub_id = f"unresolved.{call.func_name}"
+                    stub_type = NodeType.DATABASE if call.is_db_call \
+                        else NodeType.EXTERNAL_API
+
+                    if stub_id not in nodes:
                         nodes[stub_id] = FlowNode(
                             id=stub_id,
                             node_type=stub_type,
@@ -486,9 +684,9 @@ class CallGraphBuilder:
                         target_id=stub_id,
                         edge_type=(
                             EdgeType.QUERIES if call.is_db_call
-                            else EdgeType.REQUESTS if call.is_http_call
-                            else EdgeType.CALLS
+                            else EdgeType.REQUESTS
                         ),
+                        label=self._call_edge_label(call),
                         confidence=Confidence.INFERRED,
                         evidence=[Evidence(
                             source="static_analysis",
@@ -496,6 +694,7 @@ class CallGraphBuilder:
                             line_number=call.line,
                             detail=f"Unresolved: {call.func_name}",
                         )],
+                        metadata=self._call_edge_metadata(call),
                         condition=call.branch_condition,
                         is_error_path=call.in_branch in ("except",),
                     ))
@@ -503,7 +702,116 @@ class CallGraphBuilder:
             return node.id
 
         traverse(handler_func, 0)
+        if mark_context_root:
+            nodes[handler_func.qualified_name].metadata["context_root"] = True
+
+        if caller_depth > 0:
+            def ensure_caller_node(func: FunctionDef) -> str:
+                """Like ensure_function_node but skips L4 logic steps.
+
+                Callers are shown as context (who calls me?) so their
+                internal logic steps are irrelevant and add visual noise.
+                """
+                if func.qualified_name in nodes:
+                    return func.qualified_name
+                ensure_function_node(func)
+                # Remove any logic nodes that were just added for this caller.
+                to_remove = [
+                    nid for nid, n in nodes.items()
+                    if n.level == 4
+                    and n.metadata.get("function_id") == func.qualified_name
+                ]
+                for nid in to_remove:
+                    del nodes[nid]
+                # Drop edges that referenced those logic nodes.
+                edges[:] = [
+                    e for e in edges
+                    if e.source_id not in to_remove and e.target_id not in to_remove
+                ]
+                return func.qualified_name
+
+            edge_counter = self._add_caller_context(
+                handler_func=handler_func,
+                remaining_depth=caller_depth,
+                nodes=nodes,
+                edges=edges,
+                edge_counter=edge_counter,
+                ensure_function_node=ensure_caller_node,
+                seen={handler_func.qualified_name},
+                distance=1,
+            )
         return nodes, edges
+
+    def _add_caller_context(
+        self,
+        handler_func: FunctionDef,
+        remaining_depth: int,
+        nodes: dict[str, FlowNode],
+        edges: list[FlowEdge],
+        edge_counter: int,
+        ensure_function_node,
+        seen: set[str],
+        distance: int,
+    ) -> int:
+        """Attach a bounded upstream caller context above a selected function."""
+        if remaining_depth <= 0:
+            return edge_counter
+
+        for caller, call in self._get_callers(handler_func):
+            ensure_function_node(caller)
+            caller_node = nodes[caller.qualified_name]
+            existing_distance = caller_node.metadata.get("upstream_distance")
+            if existing_distance is None or distance < existing_distance:
+                caller_node.metadata["upstream_distance"] = distance
+            caller_node.metadata["context_direction"] = "upstream"
+
+            if not any(
+                edge.source_id == caller.qualified_name
+                and edge.target_id == handler_func.qualified_name
+                and edge.metadata.get("upstream_edge")
+                for edge in edges
+            ):
+                edge_counter += 1
+                edges.append(FlowEdge(
+                    id=f"e{edge_counter}",
+                    source_id=caller.qualified_name,
+                    target_id=handler_func.qualified_name,
+                    edge_type=EdgeType.CALLS,
+                    confidence=Confidence.DEFINITE,
+                    evidence=[Evidence(
+                        source="static_analysis",
+                        file_path=caller.file_path,
+                        line_number=call.line,
+                        detail=(
+                            f"Reference to {handler_func.name} at line {call.line}"
+                            if call.relation == "reference"
+                            else f"Call to {handler_func.name} at line {call.line}"
+                        ),
+                    )],
+                    label=call.label,
+                    condition=call.condition,
+                    is_error_path=call.is_error_path,
+                    metadata={
+                        "upstream_edge": True,
+                        "call_line": call.line,
+                        "upstream_relation": call.relation,
+                    },
+                ))
+
+            if caller.qualified_name in seen:
+                continue
+            seen.add(caller.qualified_name)
+            edge_counter = self._add_caller_context(
+                handler_func=caller,
+                remaining_depth=remaining_depth - 1,
+                nodes=nodes,
+                edges=edges,
+                edge_counter=edge_counter,
+                ensure_function_node=ensure_function_node,
+                seen=seen,
+                distance=distance + 1,
+            )
+        return edge_counter
 
     def _add_logic_nodes(
         self,
@@ -555,6 +863,39 @@ class CallGraphBuilder:
             previous_id = node_id
         return edge_counter
 
+    def _find_matching_logic_node(
+        self,
+        call: "CallInfo",
+        function_node_id: str,
+        nodes: dict[str, "FlowNode"],
+    ) -> str | None:
+        """Find the L4 branch node whose condition matches call.branch_condition.
+
+        Returns the node id if found, or None to fall back to the function node.
+        """
+        if not call.branch_condition:
+            return None
+        candidates = [
+            node for node in nodes.values()
+            if node.level == 4
+            and node.node_type == NodeType.BRANCH
+            and node.metadata.get("function_id") == function_node_id
+            and node.metadata.get("condition") == call.branch_condition
+        ]
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0].id
+        # Multiple branches with the same condition — pick the one whose
+        # line range contains the raise statement.
+        for node in candidates:
+            line_start = node.line_start or 0
+            line_end = node.line_end or line_start
+            if line_start <= call.line <= line_end:
+                return node.id
+        # Ambiguous — fall back to function node rather than misrouting
+        return None
+
     def resolve_function_id(
         self,
         name: str,
@@ -601,6 +942,74 @@ class CallGraphBuilder:
         if candidates:
             return candidates[0]
         return None
+
+    def _get_callers(self, target: FunctionDef) -> list[tuple[FunctionDef, CallerReference]]:
+        """Return resolved callers of ``target``, one representative call per caller."""
+        self._build_caller_index()
+        refs = self._caller_index.get(target.qualified_name, []) if self._caller_index else []
+        callers: list[tuple[FunctionDef, CallerReference]] = []
+        for ref in refs:
+            caller = self._functions.get(ref.caller_qualified_name)
+            if caller is None:
+                continue
+            callers.append((caller, ref))
+        callers.sort(key=lambda item: (item[0].file_path, item[1].line, item[0].qualified_name))
+        return callers
+
+    def _build_caller_index(self) -> None:
+        """Build a reverse call index after all functions are known."""
+        if self._caller_index is not None:
+            return
+
+        index: dict[str, dict[str, CallerReference]] = {}
+        for caller in self._functions.values():
+            if caller.definition_type == "class":
+                continue
+            for call in caller.calls:
+                target = self._resolve_call(call, caller)
+                if target is None:
+                    continue
+                per_target = index.setdefault(target.qualified_name, {})
+                existing = per_target.get(caller.qualified_name)
+                if existing is None or call.line < existing.line:
+                    per_target[caller.qualified_name] = CallerReference(
+                        caller_qualified_name=caller.qualified_name,
+                        line=call.line,
+                        relation="call",
+                        condition=call.branch_condition,
+                        is_error_path=call.in_branch in ("except",),
+                    )
+            for ref in caller.references:
+                target = self._resolve_reference(ref, caller)
+                if target is None:
+                    continue
+                per_target = index.setdefault(target.qualified_name, {})
+                existing = per_target.get(caller.qualified_name)
+                if existing is None or ref.line < existing.line:
+                    per_target[caller.qualified_name] = CallerReference(
+                        caller_qualified_name=caller.qualified_name,
+                        line=ref.line,
+                        relation="reference",
+                        label=f"via {ref.container_name}" if ref.container_name else "function reference",
+                    )
+
+        self._caller_index = {
+            target_qname: sorted(
+                refs.values(),
+                key=lambda ref: (ref.line, ref.caller_qualified_name),
+            )
+            for target_qname, refs in index.items()
+        }
+
+    def _resolve_reference(self, ref: ReferenceSite, caller: FunctionDef) -> FunctionDef | None:
+        """Resolve a function reference used as a value, not a direct call."""
+        synthetic = CallSite(
+            func_name=ref.func_name,
+            line=ref.line,
+            owner_parts=ref.owner_parts,
+            is_attribute_call=ref.is_attribute_ref,
+        )
+        return self._resolve_call(synthetic, caller)
 
     def _resolve_call(self, call: CallSite, caller: FunctionDef) -> FunctionDef | None:
         """Try to resolve a call to a known function definition."""
@@ -697,9 +1106,82 @@ class CallGraphBuilder:
         """Summarize top-level statements inside a function body."""
         steps: list[LogicStep] = []
         for stmt in func_node.body:
-            step = self._logic_step_from_statement(stmt)
-            if step is not None:
-                steps.append(step)
+            steps.extend(self._flatten_stmt(stmt))
+        return steps
+
+    def _flatten_stmt(self, stmt: ast.stmt) -> list[LogicStep]:
+        """Return LogicStep(s) for a statement.
+
+        try/except blocks are transparent — their body is flattened into the
+        parent list so inner branches and assignments remain visible.  Each
+        except handler is represented as a BRANCH step.
+        """
+        _try_types = (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
+        if isinstance(stmt, ast.If):
+            return self._expand_if_chain(stmt)
+        if isinstance(stmt, _try_types):
+            return self._expand_try_block(stmt)
+        step = self._logic_step_from_statement(stmt)
+        return [step] if step is not None else []
+
+    def _expand_try_block(self, stmt: ast.Try) -> list[LogicStep]:
+        """Flatten try body + represent except handlers as BRANCH steps."""
+        steps: list[LogicStep] = []
+        for s in stmt.body:
+            steps.extend(self._flatten_stmt(s))
+        for handler in stmt.handlers:
+            exc_name = self._get_name(handler.type) if handler.type else "Exception"
+            body_summary = self._summarize_block(handler.body)
+            steps.append(LogicStep(
+                node_type=NodeType.BRANCH,
+                display_name=f"except {exc_name}",
+                description=f"If {exc_name} is raised, {body_summary}.",
+                line=handler.lineno,
+                line_end=getattr(handler, "end_lineno", handler.lineno),
+                metadata={
+                    "condition": exc_name,
+                    "flow_direction": "branch",
+                    "is_exception_handler": True,
+                },
+            ))
+        return steps
+
+    def _expand_if_chain(self, stmt: ast.If) -> list[LogicStep]:
+        """Walk an if/elif/else chain and emit one BRANCH LogicStep per clause.
+
+        Each elif becomes its own node with the correct condition, so that
+        raise statements inside elif bodies can be rerouted to the right node.
+        """
+        steps: list[LogicStep] = []
+        current: ast.If = stmt
+        keyword = "if"
+        while True:
+            condition = ast.unparse(current.test) if hasattr(ast, "unparse") else "condition"
+            body_summary = self._summarize_block(current.body)
+            orelse = current.orelse
+            is_elif_next = len(orelse) == 1 and isinstance(orelse[0], ast.If)
+            # Span only this clause's body so line-range tiebreaking works
+            line_end = current.body[-1].end_lineno if current.body else current.lineno
+            if is_elif_next:
+                description = f"If `{condition}`, {body_summary}."
+            else:
+                else_summary = self._summarize_block(orelse)
+                description = f"If `{condition}`, {body_summary}."
+                if else_summary:
+                    description += f" Otherwise, {else_summary}."
+            steps.append(LogicStep(
+                node_type=NodeType.BRANCH,
+                display_name=f"{keyword} {self._compact(condition)}",
+                description=description,
+                line=current.lineno,
+                line_end=line_end,
+                metadata={"condition": condition, "flow_direction": "branch"},
+            ))
+            if is_elif_next:
+                current = orelse[0]
+                keyword = "elif"
+            else:
+                break
         return steps
 
     def _logic_step_from_statement(self, stmt: ast.stmt) -> LogicStep | None:
@@ -716,7 +1198,7 @@ class CallGraphBuilder:
                 description=f"Assign `{targets}` from {value}.",
                 line=stmt.lineno,
                 line_end=stmt.end_lineno,
-                metadata={"target": targets, "value": value},
+                metadata={"target": targets, "value": value, "flow_direction": "sequential"},
             )
 
         if isinstance(stmt, ast.AnnAssign):
@@ -728,7 +1210,7 @@ class CallGraphBuilder:
                 description=f"Assign `{target}` from {value}.",
                 line=stmt.lineno,
                 line_end=stmt.end_lineno,
-                metadata={"target": target, "value": value},
+                metadata={"target": target, "value": value, "flow_direction": "sequential"},
             )
 
         if isinstance(stmt, ast.AugAssign):
@@ -741,28 +1223,38 @@ class CallGraphBuilder:
                 description=f"Update `{target}` with `{op}=` using {value}.",
                 line=stmt.lineno,
                 line_end=stmt.end_lineno,
-                metadata={"target": target, "value": value},
+                metadata={"target": target, "value": value, "flow_direction": "sequential"},
             )
 
-        if isinstance(stmt, ast.If):
-            condition = ast.unparse(stmt.test) if hasattr(ast, "unparse") else "condition"
+        if isinstance(stmt, ast.AsyncFor):
+            target = ast.unparse(stmt.target) if hasattr(ast, "unparse") else self._get_name(stmt.target)
+            iterator = self._expr_summary(stmt.iter)
+            iterator_call = self._iterator_call_signature(stmt.iter)
             body_summary = self._summarize_block(stmt.body)
-            else_summary = self._summarize_block(stmt.orelse)
-            description = f"If `{condition}`, {body_summary}."
-            if else_summary:
-                description += f" Otherwise, {else_summary}."
+            description = f"Consume async stream from {iterator} as `{target}` and {body_summary}."
+            if iterator_call:
+                description = (
+                    f"Consume async stream from `{iterator_call[0]}` as `{target}` and {body_summary}."
+                )
             return LogicStep(
-                node_type=NodeType.BRANCH,
-                display_name=f"if {self._compact(condition)}",
+                node_type=NodeType.LOOP,
+                display_name=f"async for {target} in {self._compact(iterator)}",
                 description=description,
                 line=stmt.lineno,
                 line_end=stmt.end_lineno,
-                metadata={"condition": condition},
+                metadata={
+                    "target": target,
+                    "iterator": iterator,
+                    "iterator_call": iterator_call[0] if iterator_call else None,
+                    "loop_kind": "async_for",
+                    "flow_direction": "sequential",
+                },
             )
 
-        if isinstance(stmt, (ast.For, ast.AsyncFor)):
+        if isinstance(stmt, ast.For):
             target = ast.unparse(stmt.target) if hasattr(ast, "unparse") else self._get_name(stmt.target)
             iterator = self._expr_summary(stmt.iter)
+            iterator_call = self._iterator_call_signature(stmt.iter)
             body_summary = self._summarize_block(stmt.body)
             return LogicStep(
                 node_type=NodeType.LOOP,
@@ -770,7 +1262,13 @@ class CallGraphBuilder:
                 description=f"Loop over {iterator} as `{target}` and {body_summary}.",
                 line=stmt.lineno,
                 line_end=stmt.end_lineno,
-                metadata={"target": target, "iterator": iterator},
+                metadata={
+                    "target": target,
+                    "iterator": iterator,
+                    "iterator_call": iterator_call[0] if iterator_call else None,
+                    "loop_kind": "for",
+                    "flow_direction": "sequential",
+                },
             )
 
         if isinstance(stmt, ast.While):
@@ -782,7 +1280,7 @@ class CallGraphBuilder:
                 description=f"Repeat while `{condition}` and {body_summary}.",
                 line=stmt.lineno,
                 line_end=stmt.end_lineno,
-                metadata={"condition": condition},
+                metadata={"condition": condition, "flow_direction": "sequential"},
             )
 
         if isinstance(stmt, ast.Return):
@@ -793,7 +1291,7 @@ class CallGraphBuilder:
                 description=f"Return {value}.",
                 line=stmt.lineno,
                 line_end=stmt.end_lineno,
-                metadata={"value": value},
+                metadata={"value": value, "flow_direction": "sequential"},
             )
 
         if isinstance(stmt, ast.Expr):
@@ -985,6 +1483,8 @@ class CallGraphBuilder:
         human_name = self._humanize_identifier(call.func_name)
         simple_name = call.func_name.split(".")[-1]
 
+        if call.iteration_kind == "async_for":
+            return f"Consume async stream from {human_name}; definition could not be resolved statically."
         if call.is_db_call:
             return f"Possible database operation: {human_name}."
         if call.is_http_call:
@@ -992,6 +1492,31 @@ class CallGraphBuilder:
         if simple_name[:1].isupper():
             return f"Instantiate or invoke {human_name}; definition could not be resolved statically."
         return f"Call {human_name}; definition could not be resolved statically."
+
+    @staticmethod
+    def _call_edge_label(call: CallSite, target_func: FunctionDef | None = None) -> str:
+        """Provide a short label for special call semantics."""
+        if call.iteration_kind == "async_for":
+            return "async stream"
+        if call.iteration_kind == "for":
+            return "iterator"
+        if target_func and target_func.definition_type == "class":
+            return "constructs"
+        return ""
+
+    @staticmethod
+    def _call_edge_metadata(call: CallSite, target_func: FunctionDef | None = None) -> dict[str, Any]:
+        """Attach structured metadata for special call semantics."""
+        metadata: dict[str, Any] = {}
+        if call.iteration_kind:
+            metadata["iteration_kind"] = call.iteration_kind
+            metadata["loop_target"] = call.loop_target
+            metadata["loop_iterator"] = call.loop_iterator
+            metadata["call_kind"] = "async_stream" if call.iteration_kind == "async_for" else "iterator"
+        elif target_func and target_func.definition_type == "class":
+            metadata["call_kind"] = "constructor"
+            metadata["constructed_type"] = target_func.name
+        return metadata
 
     def _prefer_same_module(
         self,
@@ -1013,6 +1538,21 @@ class CallGraphBuilder:
         """Infer simple local/self attribute types from constructor-style assignments."""
         local_types: dict[str, str] = {}
         self_attr_types: dict[str, str] = {}
+
+        # Collect parameter type annotations so calls like supervisor.method()
+        # can be resolved when the parameter is declared as supervisor: Supervisor.
+        all_args = (
+            func_node.args.posonlyargs
+            + func_node.args.args
+            + func_node.args.kwonlyargs
+        )
+        for arg in all_args:
+            if arg.arg == "self" or not arg.annotation:
+                continue
+            ann = self._annotation_str(arg.annotation)
+            if ann and ann[0].isupper():
+                local_types[arg.arg] = ann
+
         body = getattr(func_node, "body", None)
         if not isinstance(body, list):
             return local_types, self_attr_types

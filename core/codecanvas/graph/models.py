@@ -91,7 +91,7 @@ class FlowNode:
     metadata: dict[str, Any] = field(default_factory=dict)
     children: list[str] = field(default_factory=list)  # Child node IDs (for abstraction grouping)
     parent_id: str | None = None
-    level: int = 3                     # Default abstraction level (function)
+    level: int = 3                     # Structural abstraction level, not execution order
 
     def __post_init__(self):
         if not self.display_name:

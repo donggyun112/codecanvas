@@ -5,7 +5,7 @@ import * as fs from 'fs';
 
 const SERVER_PORT = 9120;
 const BASE_URL = `http://127.0.0.1:${SERVER_PORT}`;
-const CORE_DEPS = ['fastapi', 'uvicorn', 'libcst>=1.0.0'];
+const CORE_DEPS = ['fastapi', 'uvicorn', 'libcst>=1.0.0', 'httpx>=0.24.0'];
 
 export class AnalysisServer {
     private process: ChildProcess | null = null;
@@ -43,11 +43,13 @@ export class AnalysisServer {
     }
 
     private getCorePath(): string {
-        const bundledCore = path.join(this.extensionPath, 'core');
+        // Resolve symlinks so ../core works when extension dir is a symlink
+        const realExtPath = fs.realpathSync(this.extensionPath);
+        const bundledCore = path.join(realExtPath, 'core');
         if (fs.existsSync(path.join(bundledCore, 'codecanvas'))) {
             return bundledCore;
         }
-        return path.join(this.extensionPath, '..', 'core');
+        return path.join(realExtPath, '..', 'core');
     }
 
     private findBasePython(): string {
@@ -250,6 +252,64 @@ export class AnalysisServer {
             return await res.json();
         } catch (err: any) {
             vscode.window.showErrorMessage(`Flow generation failed: ${err.message}`);
+            return null;
+        }
+    }
+
+    async getFunctionFlow(projectPath: string, filePath: string, line: number): Promise<any> {
+        if (!this.ready) {
+            vscode.window.showErrorMessage('CodeCanvas server is not running.');
+            return null;
+        }
+        try {
+            const res = await fetch(`${BASE_URL}/flow/from-location`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_path: projectPath,
+                    file_path: filePath,
+                    line,
+                }),
+            });
+            if (!res.ok) {
+                const body = await res.text();
+                vscode.window.showErrorMessage(`Function flow failed (${res.status}): ${body.slice(0, 200)}`);
+                return null;
+            }
+            return await res.json();
+        } catch (err: any) {
+            vscode.window.showErrorMessage(`Function flow failed: ${err.message}`);
+            return null;
+        }
+    }
+
+    async traceFlow(
+        projectPath: string,
+        entryId: string,
+        request: { method: string; path: string; headers?: Record<string, string>; body?: any },
+    ): Promise<any> {
+        if (!this.ready) {
+            vscode.window.showErrorMessage('CodeCanvas server is not running.');
+            return null;
+        }
+        try {
+            const res = await fetch(`${BASE_URL}/trace`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_path: projectPath,
+                    entry_id: entryId,
+                    request,
+                }),
+            });
+            if (!res.ok) {
+                const body = await res.text();
+                vscode.window.showErrorMessage(`Trace failed (${res.status}): ${body.slice(0, 200)}`);
+                return null;
+            }
+            return await res.json();
+        } catch (err: any) {
+            vscode.window.showErrorMessage(`Trace failed: ${err.message}`);
             return null;
         }
     }

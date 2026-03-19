@@ -2,6 +2,9 @@
 
 ## 현재 초점
 
+- [ ] 함수 단위 정적 CFG 구현
+  basic block, true / false edge, loop back-edge, try / except edge를 명시적으로 표현
+
 - [ ] Runtime trace 붙이기
   실제 요청 1회를 실행해서 실제로 탄 함수, DB, 외부 API, 예외 경로를 기록
 
@@ -13,6 +16,9 @@
 
 - [ ] return / response origin 연결
   어떤 assignment / branch / return이 최종 응답을 만들었는지 표시
+
+- [ ] CFG 위 actual path overlay
+  nested branch 전체 중 실제 요청이 어느 edge를 탔는지 시각적으로 구분
 
 ## UI / UX
 

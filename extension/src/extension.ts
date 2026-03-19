@@ -65,6 +65,107 @@ export function activate(context: vscode.ExtensionContext) {
                 flowPanel.showFlow(flow);
             }
         }),
+
+        vscode.commands.registerCommand('codecanvas.showFunctionFlow', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showWarningMessage('No active editor');
+                return;
+            }
+            if (editor.document.languageId !== 'python') {
+                vscode.window.showWarningMessage('CodeCanvas function flow only supports Python files');
+                return;
+            }
+
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+            if (!workspaceFolder) {
+                vscode.window.showWarningMessage('The current file is not inside an open workspace');
+                return;
+            }
+
+            await server.ensureRunning();
+            const flow = await server.getFunctionFlow(
+                workspaceFolder.uri.fsPath,
+                editor.document.uri.fsPath,
+                editor.selection.active.line + 1,
+            );
+            if (flow) {
+                flowPanel.showFlow(flow);
+            }
+        }),
+
+        vscode.commands.registerCommand('codecanvas.traceFlow', async (entryId?: string) => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) return;
+
+            await server.ensureRunning();
+
+            if (!entryId) {
+                const result = await server.analyze(workspaceFolder.uri.fsPath);
+                const entrypoints = result?.entrypoints || result?.endpoints || [];
+                if (!entrypoints.length) {
+                    vscode.window.showWarningMessage('No entry points found');
+                    return;
+                }
+                interface EntryPointItem extends vscode.QuickPickItem {
+                    entryId: string;
+                    method: string;
+                    path: string;
+                }
+                const items: EntryPointItem[] = entrypoints
+                    .filter((e: any) => e.kind === 'api')
+                    .map((entry: any) => ({
+                        label: entry.label,
+                        description: `${entry.group} -> ${entry.handler_name}`,
+                        detail: entry.description,
+                        entryId: entry.id,
+                        method: entry.method,
+                        path: entry.path,
+                    }));
+                const picked = await vscode.window.showQuickPick(items, {
+                    placeHolder: 'Select API endpoint to trace',
+                });
+                if (!picked) return;
+                entryId = picked.entryId;
+
+                // Ask for request body (for POST/PUT/PATCH)
+                let body: any = undefined;
+                if (['POST', 'PUT', 'PATCH'].includes(picked.method)) {
+                    const bodyStr = await vscode.window.showInputBox({
+                        prompt: `JSON body for ${picked.method} ${picked.path}`,
+                        placeHolder: '{"key": "value"}',
+                    });
+                    if (bodyStr) {
+                        try { body = JSON.parse(bodyStr); } catch { body = bodyStr; }
+                    }
+                }
+
+                const flow = await server.traceFlow(
+                    workspaceFolder.uri.fsPath,
+                    entryId!,
+                    { method: picked.method, path: picked.path, body },
+                );
+                if (flow) {
+                    flowPanel.showFlow(flow);
+                }
+                return;
+            }
+
+            // Direct call with entryId (from sidebar)
+            const result = await server.analyze(workspaceFolder.uri.fsPath);
+            const entrypoints = result?.entrypoints || result?.endpoints || [];
+            const entry = entrypoints.find((e: any) => e.id === entryId);
+            if (!entry) return;
+
+            const flow = await server.traceFlow(
+                workspaceFolder.uri.fsPath,
+                entryId,
+                { method: entry.method || 'GET', path: entry.path || '/' },
+            );
+            if (flow) {
+                flowPanel.showFlow(flow);
+            }
+        }),
     );
 
     // Auto-analyze on startup if workspace has Python files

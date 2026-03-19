@@ -76,7 +76,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             DELETE: '#f93e3e', PATCH: '#50e3c2',
         };
 
-        const data = JSON.parse(atob('${dataBase64}'));
+        const data = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob('${dataBase64}'), function(c) { return c.charCodeAt(0); })));
         const list = document.getElementById('list');
 
         if (data.length === 0) {

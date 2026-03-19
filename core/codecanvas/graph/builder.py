@@ -58,6 +58,10 @@ class FlowGraphBuilder:
         """Build a complete flow graph for a single entry point."""
         self.get_entrypoints()
         graph = FlowGraph(entrypoint=entrypoint)
+        caller_depth = 0
+        if entrypoint.kind == "function":
+            caller_depth = int(entrypoint.metadata.get("caller_depth", 0) or 0)
+        mark_context_root = bool(entrypoint.metadata.get("from_location"))
 
         # Level 1-2: Module/service grouping (derived from file paths)
         # Level 3: Function-level call graph — build FIRST so handler node exists
@@ -65,11 +69,14 @@ class FlowGraphBuilder:
             handler_name=entrypoint.handler_name,
             handler_file=entrypoint.handler_file,
             line_number=entrypoint.handler_line,
+            caller_depth=caller_depth,
+            mark_context_root=mark_context_root,
         )
         for node in nodes.values():
             graph.add_node(node)
         for edge in edges:
             graph.add_edge(edge)
+        self._add_dependency_callers_for_function_context(graph, entrypoint)
 
         # Level 0: Trigger -> API/EntryPoint -> handler (must come after call graph)
         self._add_level0_nodes(graph, entrypoint)
@@ -82,6 +89,8 @@ class FlowGraphBuilder:
 
         # Build abstraction levels
         self._build_level_hierarchy(graph)
+        self._rewrite_execution_pipeline(graph)
+        self._annotate_pipeline_phases(graph)
         self._fill_missing_descriptions(graph)
 
         return graph
@@ -151,13 +160,27 @@ class FlowGraphBuilder:
             ))
             source_id = "entrypoint"
 
-        graph.add_edge(FlowEdge(
-            id="e_entry_handler",
-            source_id=source_id,
-            target_id=target_id,
-            edge_type=EdgeType.CALLS,
-            confidence=Confidence.DEFINITE,
-        ))
+        if entrypoint.kind != "api":
+            if entrypoint.metadata.get("from_location"):
+                upstream_roots = self._find_upstream_roots(graph, target_id)
+                if upstream_roots:
+                    for i, root_id in enumerate(upstream_roots):
+                        graph.add_edge(FlowEdge(
+                            id=f"e_entry_context_{i}",
+                            source_id=source_id,
+                            target_id=root_id,
+                            edge_type=EdgeType.CALLS,
+                            confidence=Confidence.DEFINITE,
+                            metadata={"context_edge": True},
+                        ))
+                    return
+            graph.add_edge(FlowEdge(
+                id="e_entry_handler",
+                source_id=source_id,
+                target_id=target_id,
+                edge_type=EdgeType.CALLS,
+                confidence=Confidence.DEFINITE,
+            ))
 
     def _add_dependency_nodes(self, graph: FlowGraph, entrypoint: EntryPoint) -> None:
         """Add Depends() injection nodes."""
@@ -167,13 +190,18 @@ class FlowGraphBuilder:
         handler_id = self._find_handler_node_id(graph, entrypoint)
         for i, dep in enumerate(deps):
             dep_id = self._dependency_node_id(dep.func_name, dep.resolved_file_path or dep.file_path)
+            inject_label = self._dependency_injection_label(dep.param_name, dep.declared_type)
             if dep_id not in graph.nodes:
                 graph.add_node(FlowNode(
                     id=dep_id,
                     node_type=NodeType.DEPENDENCY,
                     name=dep.func_name,
                     display_name=f"Depends({dep.func_name})",
-                    description=f"Resolve dependency `{dep.func_name}` before the route handler runs.",
+                    description=(
+                        f"Resolve dependency `{dep.func_name}` for `{inject_label}` before the route handler runs."
+                        if inject_label else
+                        f"Resolve dependency `{dep.func_name}` before the route handler runs."
+                    ),
                     file_path=dep.file_path,
                     line_start=dep.line,
                     confidence=Confidence.DEFINITE,
@@ -184,15 +212,27 @@ class FlowGraphBuilder:
                         detail=f"Depends({dep.func_name})",
                     )],
                     level=1,
+                    metadata={
+                        "dependency_param": dep.param_name,
+                        "declared_type": dep.declared_type,
+                    },
                 ))
+            else:
+                graph.nodes[dep_id].metadata.setdefault("dependency_param", dep.param_name)
+                graph.nodes[dep_id].metadata.setdefault("declared_type", dep.declared_type)
 
             graph.add_edge(FlowEdge(
                 id=f"e_dep_{i}",
                 source_id=dep_id,
                 target_id=handler_id,
                 edge_type=EdgeType.INJECTS,
-                label=f"Depends({dep.func_name})",
+                label=inject_label or f"Depends({dep.func_name})",
                 confidence=Confidence.DEFINITE,
+                metadata={
+                    "dependency_param": dep.param_name,
+                    "declared_type": dep.declared_type,
+                    "call_kind": "dependency",
+                },
             ))
 
             dep_file = dep.resolved_file_path or dep.file_path
@@ -217,12 +257,16 @@ class FlowGraphBuilder:
                     graph.nodes[dep_id].description = (
                         f"Resolve dependency `{dep.func_name}` before the route runs. {root_desc}"
                     )
+                if dep.param_name:
+                    graph.nodes[dep_id].metadata["dependency_param"] = dep.param_name
+                if dep.declared_type:
+                    graph.nodes[dep_id].metadata["declared_type"] = dep.declared_type
                 graph.add_edge(FlowEdge(
                     id=self._unique_edge_id(graph, f"e_dep_root_{i}"),
                     source_id=dep_id,
                     target_id=dep_root_id,
                     edge_type=EdgeType.DEPENDS_ON,
-                    label="resolves dependency",
+                    label=inject_label or "resolves dependency",
                     confidence=Confidence.HIGH,
                     evidence=[Evidence(
                         source="decorator",
@@ -230,6 +274,10 @@ class FlowGraphBuilder:
                         line_number=dep.line,
                         detail=f"Depends({dep.func_name}) resolves to {dep_root_id}",
                     )],
+                    metadata={
+                        "dependency_param": dep.param_name,
+                        "declared_type": dep.declared_type,
+                    },
                 ))
 
     def _add_middleware_nodes(self, graph: FlowGraph) -> None:
@@ -327,8 +375,8 @@ class FlowGraphBuilder:
             tgt = graph.nodes.get(edge.target_id)
             if not src or not tgt:
                 continue
-            src_file = src.parent_id if src.level >= 3 else None
-            tgt_file = tgt.parent_id if tgt.level >= 3 else None
+            src_file = src.parent_id if src.level == 3 else None
+            tgt_file = tgt.parent_id if tgt.level == 3 else None
             if src_file and tgt_file and src_file != tgt_file:
                 key = (src_file, tgt_file)
                 if key not in seen_l2:
@@ -514,6 +562,371 @@ class FlowGraphBuilder:
         return entrypoint.handler_name
 
     @staticmethod
+    def _find_upstream_roots(graph: FlowGraph, target_id: str) -> list[str]:
+        """Return the top-most upstream caller branches for a centered function flow."""
+        upstream_ids = {
+            node.id for node in graph.nodes.values()
+            if node.metadata.get("upstream_distance")
+        }
+        if not upstream_ids:
+            return []
+
+        roots: list[str] = []
+        for node_id in sorted(upstream_ids):
+            has_upstream_parent = any(
+                edge.target_id == node_id
+                and edge.source_id in upstream_ids
+                for edge in graph.edges
+            )
+            if not has_upstream_parent:
+                roots.append(node_id)
+        return roots
+
+    def _add_dependency_callers_for_function_context(
+        self,
+        graph: FlowGraph,
+        entrypoint: EntryPoint,
+    ) -> None:
+        """Attach FastAPI Depends() route callers above a selected function flow."""
+        if entrypoint.kind != "function" or not entrypoint.metadata.get("from_location"):
+            return
+
+        target_id = self.call_graph.resolve_function_id(
+            entrypoint.handler_name,
+            entrypoint.handler_file,
+            entrypoint.handler_line,
+        )
+        if not target_id or target_id not in graph.nodes:
+            return
+
+        endpoint_index = {
+            (endpoint.handler_file, endpoint.handler_name): endpoint
+            for endpoint in self.get_endpoints()
+        }
+        prefix_index = 0
+        for handler_key, deps in self.extractor.dependencies.items():
+            if ":" not in handler_key:
+                continue
+            handler_file, handler_name = handler_key.rsplit(":", 1)
+            route_entry = endpoint_index.get((handler_file, handler_name))
+            route_line = route_entry.handler_line if route_entry else None
+
+            for dep in deps:
+                dep_target_id = self.call_graph.resolve_function_id(
+                    dep.func_name,
+                    dep.resolved_file_path or dep.file_path,
+                    dep.resolved_line,
+                )
+                if dep_target_id != target_id:
+                    continue
+
+                route_id = self.call_graph.resolve_function_id(
+                    handler_name,
+                    handler_file,
+                    route_line,
+                )
+                if not route_id:
+                    continue
+
+                if route_id not in graph.nodes:
+                    route_nodes, route_edges = self.call_graph.build_flow_from(
+                        handler_name=handler_name,
+                        handler_file=handler_file,
+                        line_number=route_line,
+                        max_depth=-1,
+                    )
+                    self._merge_subgraph(
+                        graph,
+                        route_nodes,
+                        route_edges,
+                        edge_prefix=f"depcaller{prefix_index}",
+                    )
+                    prefix_index += 1
+
+                route_node = graph.nodes.get(route_id)
+                if route_node is not None:
+                    existing_distance = route_node.metadata.get("upstream_distance")
+                    if existing_distance is None or 1 < existing_distance:
+                        route_node.metadata["upstream_distance"] = 1
+                    route_node.metadata["context_direction"] = "upstream"
+
+                self._upsert_edge(
+                    graph,
+                    preferred_id=f"e_depcaller_{route_id}_{target_id}",
+                    source_id=route_id,
+                    target_id=target_id,
+                    edge_type=EdgeType.INJECTS,
+                    confidence=Confidence.HIGH,
+                    label=self._dependency_injection_label(dep.param_name, dep.declared_type)
+                    or f"Depends({dep.func_name})",
+                    metadata={
+                        "upstream_edge": True,
+                        "upstream_relation": "dependency",
+                        "dependency_param": dep.param_name,
+                        "declared_type": dep.declared_type,
+                    },
+                )
+
+    def _rewrite_execution_pipeline(self, graph: FlowGraph) -> None:
+        """Rewrite API entrypoint edges to match request pipeline semantics.
+
+        The graph ``level`` is structural abstraction only. For API flows, the
+        request pipeline should read as:
+            trigger -> api -> middleware* -> dependency* -> handler
+        while file/layer lift edges hang off the last pre-handler stage.
+        """
+        if graph.entrypoint.kind != "api":
+            return
+
+        handler_id = self._find_handler_node_id(graph, graph.entrypoint)
+        handler_node = graph.nodes.get(handler_id)
+        if not handler_node:
+            return
+
+        graph.edges = [
+            edge for edge in graph.edges
+            if edge.id != "e_entry_handler"
+            and edge.id != "e_root_file"
+            and edge.id != "e_root_layer"
+            and not edge.id.startswith("e_mw_")
+            and not edge.id.startswith("e_dep_l1_")
+        ]
+
+        source_id = self._root_flow_node_id(graph)
+        middleware_ids = self._pipeline_nodes(graph, NodeType.MIDDLEWARE)
+        dependency_ids = self._pipeline_nodes(graph, NodeType.DEPENDENCY)
+
+        for middleware_id in middleware_ids:
+            self._upsert_edge(
+                graph,
+                preferred_id=f"e_mw_{source_id}_{middleware_id}",
+                source_id=source_id,
+                target_id=middleware_id,
+                edge_type=EdgeType.MIDDLEWARE_CHAIN,
+                confidence=Confidence.DEFINITE,
+                metadata={"pipeline_edge": True, "pipeline_phase": "middleware"},
+            )
+            source_id = middleware_id
+
+        handler_file_id = handler_node.parent_id
+        handler_layer_id = None
+        if handler_file_id and handler_file_id in graph.nodes:
+            handler_layer_id = graph.nodes[handler_file_id].parent_id
+
+        if dependency_ids:
+            for dependency_id in dependency_ids:
+                self._upsert_edge(
+                    graph,
+                    preferred_id=f"e_pipeline_dep_{source_id}_{dependency_id}",
+                    source_id=source_id,
+                    target_id=dependency_id,
+                    edge_type=EdgeType.CALLS,
+                    confidence=Confidence.DEFINITE,
+                    metadata={"pipeline_edge": True, "pipeline_phase": "dependency"},
+                )
+
+                # Find the resolved function for this dependency
+                dep_resolved_id = self._find_dependency_resolved_function(
+                    graph, dependency_id,
+                )
+
+                if dep_resolved_id:
+                    # Dependency resolved function → handler (inject edge)
+                    dependency_node = graph.nodes.get(dependency_id)
+                    dep_resolved_node = graph.nodes.get(dep_resolved_id)
+                    dependency_param = (
+                        dependency_node.metadata.get("dependency_param")
+                        if dependency_node else None
+                    )
+                    dependency_type = (
+                        (dependency_node.metadata.get("declared_type") if dependency_node else None)
+                        or (dep_resolved_node.metadata.get("return_type") if dep_resolved_node else None)
+                    )
+                    inject_label = (
+                        self._dependency_injection_label(
+                            str(dependency_param or ""),
+                            str(dependency_type or ""),
+                        )
+                        or "injects result"
+                    )
+                    self._upsert_edge(
+                        graph,
+                        preferred_id=f"e_dep_resolved_handler_{dep_resolved_id}",
+                        source_id=dep_resolved_id,
+                        target_id=handler_id,
+                        edge_type=EdgeType.INJECTS,
+                        confidence=Confidence.DEFINITE,
+                        label=inject_label,
+                        metadata={
+                            "pipeline_edge": True,
+                            "pipeline_phase": "dependency_result",
+                            "dependency_param": dependency_param,
+                            "dependency_type": dependency_type,
+                            "call_kind": "dependency_result",
+                        },
+                    )
+                else:
+                    # No resolved function — connect dep node directly to handler
+                    self._upsert_edge(
+                        graph,
+                        preferred_id=f"e_dep_handler_{dependency_id}",
+                        source_id=dependency_id,
+                        target_id=handler_id,
+                        edge_type=EdgeType.INJECTS,
+                        confidence=Confidence.DEFINITE,
+                        label=f"Depends({graph.nodes[dependency_id].name})",
+                        metadata={"pipeline_edge": True, "pipeline_phase": "dependency"},
+                    )
+                if handler_layer_id:
+                    self._upsert_edge(
+                        graph,
+                        preferred_id=f"e_dep_l1_{dependency_id}",
+                        source_id=dependency_id,
+                        target_id=handler_layer_id,
+                        edge_type=EdgeType.INJECTS,
+                        confidence=Confidence.DEFINITE,
+                        metadata={
+                            "pipeline_edge": True,
+                            "pipeline_phase": "dependency",
+                            "structural_lift": True,
+                        },
+                    )
+                if handler_file_id:
+                    self._upsert_edge(
+                        graph,
+                        preferred_id=f"e_dep_l2_{dependency_id}",
+                        source_id=dependency_id,
+                        target_id=handler_file_id,
+                        edge_type=EdgeType.CALLS,
+                        confidence=Confidence.DEFINITE,
+                        metadata={
+                            "pipeline_edge": True,
+                            "pipeline_phase": "dependency",
+                            "structural_lift": True,
+                        },
+                    )
+            return
+
+        self._upsert_edge(
+            graph,
+            preferred_id="e_entry_handler",
+            source_id=source_id,
+            target_id=handler_id,
+            edge_type=EdgeType.CALLS,
+            confidence=Confidence.DEFINITE,
+            metadata={"pipeline_edge": True, "pipeline_phase": "handler"},
+        )
+        if handler_layer_id:
+            self._upsert_edge(
+                graph,
+                preferred_id="e_root_layer",
+                source_id=source_id,
+                target_id=handler_layer_id,
+                edge_type=EdgeType.CALLS,
+                confidence=Confidence.DEFINITE,
+                metadata={
+                    "pipeline_edge": True,
+                    "pipeline_phase": "handler",
+                    "structural_lift": True,
+                },
+            )
+        if handler_file_id:
+            self._upsert_edge(
+                graph,
+                preferred_id="e_root_file",
+                source_id=source_id,
+                target_id=handler_file_id,
+                edge_type=EdgeType.CALLS,
+                confidence=Confidence.DEFINITE,
+                metadata={
+                    "pipeline_edge": True,
+                    "pipeline_phase": "handler",
+                    "structural_lift": True,
+                },
+            )
+
+    def _annotate_pipeline_phases(self, graph: FlowGraph) -> None:
+        """Attach pipeline metadata without overloading structural levels."""
+        self._annotate_node_phase(graph, "trigger", "trigger", 0)
+
+        root_id = self._root_flow_node_id(graph)
+        root_phase = "api" if graph.entrypoint.kind == "api" else "entrypoint"
+        self._annotate_node_phase(graph, root_id, root_phase, 10)
+
+        for index, middleware_id in enumerate(self._pipeline_nodes(graph, NodeType.MIDDLEWARE), start=1):
+            self._annotate_node_phase(graph, middleware_id, "middleware", 20 + index)
+
+        for index, dependency_id in enumerate(self._pipeline_nodes(graph, NodeType.DEPENDENCY), start=1):
+            self._annotate_node_phase(graph, dependency_id, "dependency", 40 + index)
+            # Also annotate the resolved function
+            resolved_id = self._find_dependency_resolved_function(graph, dependency_id)
+            if resolved_id:
+                self._annotate_node_phase(graph, resolved_id, "dependency", 40 + index)
+
+        handler_id = self._find_handler_node_id(graph, graph.entrypoint)
+        if handler_id in graph.nodes:
+            self._annotate_node_phase(graph, handler_id, "handler", 60)
+
+        default_phase_map = {
+            NodeType.ROUTER: ("handler", 60),
+            NodeType.SERVICE: ("service", 70),
+            NodeType.REPOSITORY: ("repository", 80),
+            NodeType.DATABASE: ("database", 90),
+            NodeType.EXTERNAL_API: ("external", 90),
+        }
+        for node in graph.nodes.values():
+            if node.metadata.get("pipeline_phase"):
+                continue
+            phase = default_phase_map.get(node.node_type)
+            if not phase:
+                continue
+            self._annotate_node_phase(graph, node.id, phase[0], phase[1])
+
+    @staticmethod
+    def _annotate_node_phase(graph: FlowGraph, node_id: str, phase: str, order: int) -> None:
+        """Store pipeline metadata on a node."""
+        node = graph.nodes.get(node_id)
+        if not node:
+            return
+        node.metadata.setdefault("pipeline_phase", phase)
+        node.metadata.setdefault("pipeline_order", order)
+
+    @staticmethod
+    def _find_dependency_resolved_function(
+        graph: FlowGraph, dependency_node_id: str,
+    ) -> str | None:
+        """Find the L3 function that a dependency node resolves to."""
+        for edge in graph.edges:
+            if (edge.source_id == dependency_node_id
+                    and edge.edge_type == EdgeType.DEPENDS_ON
+                    and edge.target_id in graph.nodes):
+                target = graph.nodes[edge.target_id]
+                if target.level == 3:
+                    return target.id
+        return None
+
+    @staticmethod
+    def _dependency_injection_label(param_name: str | None, declared_type: str | None) -> str:
+        """Human-readable label for a resolved dependency value."""
+        if param_name and declared_type:
+            return f"injects {param_name}: {declared_type}"
+        if param_name:
+            return f"injects {param_name}"
+        if declared_type:
+            return f"injects {declared_type}"
+        return ""
+
+    @staticmethod
+    def _pipeline_nodes(graph: FlowGraph, node_type: NodeType) -> list[str]:
+        """Return pipeline nodes in source order."""
+        nodes = [
+            node for node in graph.nodes.values()
+            if node.node_type == node_type and node.level == 1
+        ]
+        nodes.sort(key=lambda node: (node.line_start or 0, node.display_name, node.id))
+        return [node.id for node in nodes]
+
+    @staticmethod
     def _dependency_node_id(func_name: str, file_path: str | None) -> str:
         """Create a stable dependency node ID without colliding across files."""
         if not file_path:
@@ -545,6 +958,38 @@ class FlowGraphBuilder:
                 condition=edge.condition,
                 is_error_path=edge.is_error_path,
             ))
+
+    def _upsert_edge(
+        self,
+        graph: FlowGraph,
+        preferred_id: str,
+        source_id: str,
+        target_id: str,
+        edge_type: EdgeType,
+        confidence: Confidence,
+        label: str = "",
+        metadata: dict | None = None,
+    ) -> None:
+        """Create or enrich an edge without duplicating the same relationship."""
+        for edge in graph.edges:
+            if (edge.source_id == source_id
+                    and edge.target_id == target_id
+                    and edge.edge_type == edge_type):
+                if label and not edge.label:
+                    edge.label = label
+                if metadata:
+                    edge.metadata.update(metadata)
+                return
+
+        graph.add_edge(FlowEdge(
+            id=self._unique_edge_id(graph, preferred_id),
+            source_id=source_id,
+            target_id=target_id,
+            edge_type=edge_type,
+            label=label,
+            confidence=confidence,
+            metadata=metadata or {},
+        ))
 
     @staticmethod
     def _unique_edge_id(graph: FlowGraph, preferred_id: str) -> str:

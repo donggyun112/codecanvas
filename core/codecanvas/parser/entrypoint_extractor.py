@@ -37,6 +37,47 @@ class EntryPointExtractor:
 
         return api_entrypoints + script_entrypoints + function_entrypoints
 
+    def locate_function_entrypoint(self, file_path: str, line: int) -> EntryPoint | None:
+        """Resolve the callable enclosing ``line`` into a synthetic function entrypoint.
+
+        This is used by the VS Code editor-context action so function flow can
+        be opened directly from the current cursor location, even inside API
+        projects where generic function fallback discovery is disabled.
+        """
+        resolved_file = self._resolve_file_path(file_path)
+        if resolved_file is None:
+            return None
+
+        self._parse_file(resolved_file)
+        tree = self._file_asts.get(resolved_file)
+        if tree is None:
+            return None
+
+        match = self._find_enclosing_callable(tree, line)
+        if match is None:
+            return None
+
+        node, qualname = match
+        rel_path = os.path.relpath(resolved_file, self.project_root)
+        description = ast.get_docstring(node) or f"Trace `{qualname}()` from `{rel_path}`."
+        return EntryPoint(
+            kind="function",
+            group="Functions",
+            label=f"{qualname}()",
+            trigger=f"Function: {qualname}()",
+            path=rel_path,
+            handler_name=node.name,
+            handler_file=resolved_file,
+            handler_line=node.lineno,
+            description=description,
+            metadata={
+                "from_location": True,
+                "caller_depth": 2,
+                "qualname": qualname,
+                "source_line": line,
+            },
+        )
+
     def _find_python_files(self) -> list[str]:
         exclude = {
             ".venv", "venv", "node_modules", "__pycache__", ".git",
@@ -49,6 +90,26 @@ class EntryPointExtractor:
                 if filename.endswith(".py"):
                     result.append(os.path.join(root, filename))
         return result
+
+    def _resolve_file_path(self, file_path: str) -> str | None:
+        """Normalize a user-provided path and ensure it lives under the project."""
+        candidate = Path(file_path)
+        if not candidate.is_absolute():
+            candidate = self.project_root / candidate
+
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            return None
+
+        try:
+            resolved.relative_to(self.project_root.resolve())
+        except ValueError:
+            return None
+
+        if resolved.suffix != ".py":
+            return None
+        return str(resolved)
 
     def _parse_file(self, file_path: str) -> None:
         if file_path in self._file_asts:
@@ -136,6 +197,44 @@ class EntryPointExtractor:
             node for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
+
+    @staticmethod
+    def _find_enclosing_callable(
+        tree: ast.Module,
+        line: int,
+    ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, str] | None:
+        """Return the deepest function/method containing ``line``."""
+        candidates: list[tuple[int, int, int, ast.FunctionDef | ast.AsyncFunctionDef, str]] = []
+
+        def visit(body: list[ast.stmt], stack: list[str]) -> None:
+            for node in body:
+                if isinstance(node, ast.ClassDef):
+                    visit(node.body, stack + [node.name])
+                    continue
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+
+                start_line = min(
+                    [node.lineno] + [decorator.lineno for decorator in node.decorator_list],
+                )
+                end_line = getattr(node, "end_lineno", node.lineno)
+                qualname = ".".join(stack + [node.name])
+
+                if start_line <= line <= end_line:
+                    depth = len(stack) + 1
+                    span = end_line - start_line
+                    candidates.append((depth, span, start_line, node, qualname))
+                    visit(node.body, stack + [node.name])
+
+        visit(tree.body, [])
+        if not candidates:
+            return None
+
+        depth, span, start_line, node, qualname = max(
+            candidates,
+            key=lambda item: (item[0], -item[1], -item[2]),
+        )
+        return node, qualname
 
     def _main_guard_targets(self, tree: ast.Module) -> list[tuple[str, int]]:
         targets: list[tuple[str, int]] = []

@@ -45,6 +45,8 @@ class RouterInstance:
 class DependencyCall:
     """A Depends() call found in a route handler."""
     func_name: str
+    param_name: str = ""
+    declared_type: str | None = None
     file_path: str = ""
     line: int = 0
     is_class: bool = False
@@ -289,26 +291,57 @@ class FastAPIExtractor:
     ) -> list[DependencyCall]:
         """Extract Depends() calls from function parameters."""
         deps = []
-        for arg in func_node.args.args + func_node.args.kwonlyargs:
-            if arg.annotation is None:
-                continue
-            dep = self._parse_depends_annotation(arg.annotation, file_path)
+        positional = func_node.args.args
+        positional_defaults: list[ast.expr | None] = (
+            [None] * (len(positional) - len(func_node.args.defaults))
+            + list(func_node.args.defaults)
+        )
+
+        for arg, default in zip(positional, positional_defaults):
+            dep = self._extract_param_dependency(arg, default, file_path)
             if dep:
                 deps.append(dep)
 
-        # Also check default values
-        all_defaults = func_node.args.defaults + func_node.args.kw_defaults
-        for default in all_defaults:
-            if default is None:
-                continue
-            dep = self._parse_depends_call(default, file_path)
+        for arg, default in zip(func_node.args.kwonlyargs, func_node.args.kw_defaults):
+            dep = self._extract_param_dependency(arg, default, file_path)
             if dep:
                 deps.append(dep)
-
         return deps
 
+    def _extract_param_dependency(
+        self,
+        arg: ast.arg,
+        default: ast.expr | None,
+        file_path: str,
+    ) -> DependencyCall | None:
+        """Extract a dependency with parameter/type context preserved."""
+        declared_type = self._declared_type(arg.annotation)
+        if arg.annotation is not None:
+            dep = self._parse_depends_annotation(
+                arg.annotation,
+                file_path,
+                param_name=arg.arg,
+                declared_type=declared_type,
+            )
+            if dep:
+                return dep
+        if default is not None:
+            dep = self._parse_depends_call(
+                default,
+                file_path,
+                param_name=arg.arg,
+                declared_type=declared_type,
+            )
+            if dep:
+                return dep
+        return None
+
     def _parse_depends_annotation(
-        self, annotation: ast.expr, file_path: str
+        self,
+        annotation: ast.expr,
+        file_path: str,
+        param_name: str = "",
+        declared_type: str | None = None,
     ) -> DependencyCall | None:
         """Check if annotation is Annotated[type, Depends(func)]."""
         if not isinstance(annotation, ast.Subscript):
@@ -320,13 +353,22 @@ class FastAPIExtractor:
         if not isinstance(annotation.slice, ast.Tuple):
             return None
         for elt in annotation.slice.elts[1:]:
-            dep = self._parse_depends_call(elt, file_path)
+            dep = self._parse_depends_call(
+                elt,
+                file_path,
+                param_name=param_name,
+                declared_type=declared_type,
+            )
             if dep:
                 return dep
         return None
 
     def _parse_depends_call(
-        self, node: ast.expr, file_path: str
+        self,
+        node: ast.expr,
+        file_path: str,
+        param_name: str = "",
+        declared_type: str | None = None,
     ) -> DependencyCall | None:
         """Parse a Depends(func) call."""
         if not isinstance(node, ast.Call):
@@ -344,6 +386,8 @@ class FastAPIExtractor:
             resolved_file_path, resolved_line = self._resolve_symbol_definition(func_name, file_path)
             return DependencyCall(
                 func_name=func_name,
+                param_name=param_name,
+                declared_type=declared_type,
                 file_path=file_path,
                 line=node.lineno,
                 is_class=isinstance(func_ref, ast.Call),
@@ -351,6 +395,29 @@ class FastAPIExtractor:
                 resolved_line=resolved_line,
             )
         return None
+
+    def _declared_type(self, annotation: ast.expr | None) -> str | None:
+        """Extract the declared runtime type for a dependency parameter."""
+        if annotation is None:
+            return None
+        if (
+            isinstance(annotation, ast.Subscript)
+            and isinstance(annotation.value, ast.Name)
+            and annotation.value.id == "Annotated"
+            and isinstance(annotation.slice, ast.Tuple)
+            and annotation.slice.elts
+        ):
+            return self._expr_text(annotation.slice.elts[0])
+        return self._expr_text(annotation)
+
+    def _expr_text(self, node: ast.expr) -> str | None:
+        """Best-effort text form for annotations and type expressions."""
+        if hasattr(ast, "unparse"):
+            try:
+                return ast.unparse(node)
+            except Exception:
+                pass
+        return self._get_name(node) or None
 
     def _extract_middleware(self, tree: ast.Module, file_path: str) -> None:
         """Extract app.add_middleware() calls."""
