@@ -1,6 +1,7 @@
 import type { Node, Edge } from '@xyflow/react';
 import type { FlowNodeData, FlowEdgeData } from '../types/flow';
 import type { VisibleResult } from './visibility';
+import { computeNodePathState, computeEdgePathState } from './pathState';
 
 const EDGE_COLORS: Record<string, string | null> = {
   calls: null,
@@ -86,6 +87,7 @@ export function transformToRfElements(
 
     if (isCompound) {
       // Compound container node
+      const ps = computeNodePathState(hasTrace, n.metadata?.runtime_hit, n.confidence);
       rfNodes.push({
         id: n.id,
         type: 'compound',
@@ -93,6 +95,8 @@ export function transformToRfElements(
         data: {
           ...n,
           isHit: hasTrace && !!n.metadata?.runtime_hit,
+          pathState: ps,
+          hasTrace,
           isSelected: n.id === selectedNodeId,
           drillable,
           childCount: kids.length,
@@ -102,6 +106,7 @@ export function transformToRfElements(
 
       // Child nodes inside compound
       kids.forEach((child) => {
+        const cps = computeNodePathState(hasTrace, child.metadata?.runtime_hit, child.confidence);
         rfNodes.push({
           id: child.id,
           type: 'logicStep',
@@ -111,12 +116,15 @@ export function transformToRfElements(
           data: {
             ...child,
             isHit: hasTrace && !!child.metadata?.runtime_hit,
+            pathState: cps,
+            hasTrace,
             isSelected: child.id === selectedNodeId,
             drillable: false,
           },
         });
       });
     } else {
+      const ps = computeNodePathState(hasTrace, n.metadata?.runtime_hit, n.confidence);
       rfNodes.push({
         id: n.id,
         type: nodeTypeKey(n),
@@ -124,6 +132,8 @@ export function transformToRfElements(
         data: {
           ...n,
           isHit: hasTrace && !!n.metadata?.runtime_hit,
+          pathState: ps,
+          hasTrace,
           isSelected: n.id === selectedNodeId,
           drillable,
         },
@@ -142,10 +152,25 @@ export function transformToRfElements(
     });
   });
 
+  // Pre-index step_call relationships to suppress duplicate L3→L3 edges
+  const stepCallCovered = new Set<string>();
+  vis.edges.forEach((e) => {
+    if (!e.metadata?.step_call) return;
+    const src = vis.nodeMap[e.sourceId];
+    const parentId = src?.metadata?.function_id;
+    if (parentId) stepCallCovered.add(`${parentId}:${e.targetId}`);
+  });
+
   // Build edges
   vis.edges.forEach((e) => {
-    // Skip internal compound edges (they'll be handled separately)
-    // Actually include them - React Flow handles parentId edges fine
+    // In callstack mode: skip L3→L3 if step_call covers it
+    if (!e.metadata?.step_call && !e.metadata?.display_only) {
+      const src = vis.nodeMap[e.sourceId];
+      const tgt = vis.nodeMap[e.targetId];
+      if (src?.level === 3 && tgt?.level === 3 && stepCallCovered.has(`${e.sourceId}:${e.targetId}`)) {
+        return;
+      }
+    }
 
     // Skip cross-compound edges that don't make sense at top level
     if (!internalEdgeIds.has(e.id)) {
@@ -158,9 +183,13 @@ export function transformToRfElements(
         const srcNode = vis.nodeMap[e.sourceId];
         const tgtNode = vis.nodeMap[e.targetId];
         if (srcNode && tgtNode) {
-          if (srcNode.level === 3 && l4InCompound.has(e.targetId)) return;
-          if (l4InCompound.has(e.sourceId) && tgtNode.level === 3) return;
-          if (l4InCompound.has(e.sourceId) && extractedReturnIds.has(e.targetId)) return;
+          // Allow step_call (L4→L3) across compound boundary
+          if (l4InCompound.has(e.sourceId) && tgtNode.level === 3) {
+            if (!e.metadata?.step_call) return;
+          } else {
+            if (srcNode.level === 3 && l4InCompound.has(e.targetId)) return;
+            if (l4InCompound.has(e.sourceId) && extractedReturnIds.has(e.targetId)) return;
+          }
         }
       }
     }
@@ -172,6 +201,7 @@ export function transformToRfElements(
       e.type === 'injects' ||
       isUpstream;
 
+    const eps = computeEdgePathState(hasTrace, e.metadata?.runtime_hit, e.confidence);
     rfEdges.push({
       id: e.id,
       source: e.sourceId,
@@ -183,6 +213,7 @@ export function transformToRfElements(
         dashed: isDashed,
         animated: hasTrace && !!e.metadata?.runtime_hit,
         isHit: hasTrace && !!e.metadata?.runtime_hit,
+        pathState: eps,
         hasTrace,
         isFunctionContext,
       },

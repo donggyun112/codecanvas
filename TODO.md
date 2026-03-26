@@ -36,14 +36,57 @@
 
 ## 분석 정확도
 
-- [ ] attribute / dynamic dispatch 해석 개선
-  현재 constructor-style 타입 추론을 넘어 더 많은 객체 메서드 연결 지원
+- [x] attribute / dynamic dispatch 해석 개선
+  _resolve_call_in_expr에 full owner_parts/is_attribute_call 전달하여
+  _resolve_attribute_call의 타입 체인 해석을 AST execution에서도 활용
 
 - [ ] DB / HTTP 체인 호출 분류 강화
   `client.table(...).insert(...).execute()` 같은 체인을 더 정확히 분리
 
-- [ ] side-effect step 분류 개선
-  단순 expression과 의미 있는 상태 변경 / 외부 호출을 더 잘 구분
+- [x] side-effect step 분류 개선
+  unresolved bare expression을 inferred confidence로 emit하여
+  logger/cache/event 등 side-effect 호출을 시각화에 포함
+
+- [x] AST-based pipeline steps
+  FlowGraph 의존 제거 — trigger/middleware/dependency/validation/serialization을
+  handler의 decorator, Depends() 파라미터, return annotation에서 직접 도출
+
+- [x] adaptive max_depth
+  reachable call graph 크기에 따라 depth 4~8 자동 조절
+
+- [x] resolution confidence 전파
+  _resolve_call에서 ambiguous fallback시 inferred 마킹, step에 전파
+
+- [x] multi-implementation DI resolution
+  같은 패키지 우선, Depends() 바인딩 추론, test/mock 제외 휴리스틱
+
+- [x] isinstance 타입 가드 narrowing
+  if isinstance(x, Foo) 뒤에서 x 타입을 Foo로 좁혀 메서드 해석 정확도 향상
+
+- [x] 타입 체인 끊김 보완
+  _follow_attr_chain에서 property/method return annotation으로 중간 타입 추론
+
+- [x] generator/yield 스텝 emit
+  yield/yield from을 inferred confidence respond 스텝으로 시각화
+
+- [x] decorator 파라미터 추출
+  @limiter.limit("100/min") 등 파라미터 컨텍스트를 pipeline step에 포함
+
+- [x] exception hierarchy 확장
+  프로젝트 정의 예외 클래스를 동적 발견하여 CFG except 매칭에 등록
+
+- [x] structural type inference
+  타입 정보 없는 receiver에 대해 프로젝트에서 해당 메서드를 가진 유일한 클래스로 추론
+  체인 호출(client.table().execute())에는 적용 안 함 — false positive 방지
+
+- [x] getattr/setattr 리터럴 추적
+  getattr(obj, "method") → obj.method() 호출로 변환, setattr → 타입 추적
+
+- [x] whole-program call-site 타입 추론
+  모든 호출처에서 같은 타입을 전달하면 파라미터 타입으로 전파
+
+- [x] descriptor/property protocol
+  @property return annotation, __get__ return type으로 속성 타입 추론
 
 - [ ] false positive 회귀 테스트 확대
   실제 저장소 케이스를 테스트 픽스처로 추가

@@ -186,11 +186,33 @@ Endpoint = EntryPoint
 
 
 @dataclass
+class DataFlowStep:
+    """A high-level data transformation step for the data-flow view.
+
+    Unlike LogicStep (code-level), DataFlowStep represents *what happens to the data*:
+    "세션 소유권 확인", "메시지 조회", "포맷 변환" — not code statements.
+    """
+    id: str
+    label: str                         # Human-readable: "메시지 조회", "Check ownership"
+    operation: str                     # query | transform | validate | branch | respond | side_effect
+    inputs: list[str] = field(default_factory=list)     # Variable names consumed
+    output: str | None = None          # Variable name produced
+    output_type: str | None = None     # Return type of the callee, if known
+    error_label: str | None = None     # "404", "400" for validate failure
+    branch_condition: str | None = None  # For branch steps
+    branch_id: str | None = None         # Groups steps into the same branch
+    branch_paths: list[str] = field(default_factory=list)  # ["stream", "non-stream"] labels
+    source_step_ids: list[str] = field(default_factory=list)  # Original L4 step IDs merged into this
+    callee_id: str | None = None       # L3 function called, if any
+
+
+@dataclass
 class FlowGraph:
     """Complete flow graph for a single request path."""
     entrypoint: EntryPoint
     nodes: dict[str, FlowNode] = field(default_factory=dict)
     edges: list[FlowEdge] = field(default_factory=list)
+    _call_graph: Any = field(default=None, repr=False)
 
     def add_node(self, node: FlowNode) -> None:
         self.nodes[node.id] = node
@@ -213,7 +235,7 @@ class FlowGraph:
         """Backward-compatible alias for older API-centric callers."""
         return self.entrypoint
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, include_execution_graph: bool = True) -> dict[str, Any]:
         """Serialize to dict for JSON transport to VS Code webview."""
         entrypoint_payload = {
             "id": self.entrypoint.id,
@@ -232,7 +254,7 @@ class FlowGraph:
             "description": self.entrypoint.description,
             "metadata": self.entrypoint.metadata,
         }
-        return {
+        result = {
             "entrypoint": entrypoint_payload,
             "endpoint": entrypoint_payload,
             "nodes": {
@@ -278,3 +300,36 @@ class FlowGraph:
                 for e in self.edges
             ],
         }
+
+        if include_execution_graph:
+            from codecanvas.graph.ast_execution import ASTExecutionBuilder
+            from codecanvas.parser.call_graph import CallGraphBuilder
+            # Find the call_graph instance from the builder context
+            cg = self._call_graph if hasattr(self, '_call_graph') else None
+            if cg:
+                handler = self.entrypoint
+                aeb = ASTExecutionBuilder(cg)
+                eg = aeb.build(
+                    handler.handler_name,
+                    handler.handler_file,
+                    handler.handler_line,
+                    flow_graph=self,
+                )
+                result["executionGraph"] = eg.to_dict()
+                # L3 summary graph
+                eg_l3 = eg.merge_to_l3()
+                if eg_l3.steps:
+                    result["executionGraphL3"] = eg_l3.to_dict()
+
+                # CFG
+                from codecanvas.graph.cfg import CFGBuilder
+                cfg_builder = CFGBuilder(cg)
+                cfg = cfg_builder.build(
+                    handler.handler_name,
+                    handler.handler_file,
+                    handler.handler_line,
+                )
+                if cfg.blocks:
+                    result["cfg"] = cfg.to_dict()
+
+        return result

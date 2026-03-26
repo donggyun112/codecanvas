@@ -349,6 +349,50 @@ def _invalidate_project_modules(project_path: str) -> None:
         del sys.modules[name]
 
 
+class ImpactRequest(BaseModel):
+    project_path: str
+    diff_text: str | None = None      # Unified diff text
+    git_ref: str | None = None         # e.g. "HEAD~1..HEAD"
+    entry_id: str | None = None        # Optionally scope to one endpoint
+
+
+@app.post("/impact")
+async def analyze_impact(req: ImpactRequest):
+    """Analyze change impact from a diff on the project's call graph."""
+    project_path = req.project_path
+    if not Path(project_path).is_dir():
+        raise HTTPException(404, f"Directory not found: {project_path}")
+
+    builder = _get_or_create_builder(project_path)
+    entrypoints = builder.get_entrypoints()
+
+    from codecanvas.graph.impact import ImpactAnalyzer
+    analyzer = ImpactAnalyzer(
+        builder.call_graph, project_path,
+        entrypoints=entrypoints, flow_builder=builder,
+    )
+
+    if req.diff_text:
+        result = analyzer.analyze_diff(req.diff_text)
+    elif req.git_ref:
+        result = analyzer.analyze_git_ref(req.git_ref)
+    else:
+        result = analyzer.analyze_git_ref("HEAD~1..HEAD")
+
+    response = result.to_dict()
+
+    # If scoped to one endpoint, also return the annotated flow graph
+    if req.entry_id:
+        target = next((e for e in entrypoints if e.id == req.entry_id), None)
+        if target:
+            from codecanvas.graph.impact import annotate_flow_graph_impact
+            graph = builder.build_flow(target)
+            annotate_flow_graph_impact(graph, result)
+            response["flowGraph"] = graph.to_dict()
+
+    return response
+
+
 def main():
     import socket
     import uvicorn

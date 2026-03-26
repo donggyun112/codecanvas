@@ -12,7 +12,11 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onCommand:codecanvas.analyze",
+    "onCommand:codecanvas.showFlow",
+    "onCommand:codecanvas.showFunctionFlow",
+    "onCommand:codecanvas.traceFlow",
+    "onView:codecanvas.sidebar"
   ],
   "main": "./dist/extension.js",
   "contributes": {

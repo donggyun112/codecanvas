@@ -59,6 +59,13 @@ export default function DetailPanel() {
 
   const node = flowData?.nodes[selectedNodeId || ''];
 
+  // Check if selected is a synthetic node (*.df.*, es.*, or bb.*)
+  const isSyntheticStep = !node && selectedNodeId != null && (selectedNodeId.includes('.df.') || selectedNodeId.startsWith('es.'));
+  const isCFGBlock = !node && selectedNodeId != null && selectedNodeId.startsWith('bb.');
+  const rfNode = useFlowStore((s) => s.rfNodes.find((n) => n.id === selectedNodeId));
+  const dfStepData = isSyntheticStep ? (rfNode?.data as any) : null;
+  const cfgBlockData = isCFGBlock ? (rfNode?.data as any) : null;
+
   // Listen for code preview responses
   useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -70,6 +77,263 @@ export default function DetailPanel() {
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
   }, [updateCodePreview]);
+
+  // CFG block detail
+  if (isCFGBlock && cfgBlockData) {
+    const stmts: any[] = cfgBlockData.statements || [];
+    const pathState = cfgBlockData.pathState || 'possible';
+    const blockKind = cfgBlockData.kind || 'block';
+
+    return (
+      <div className="detail-panel visible">
+        <h3>{cfgBlockData.label || `Block ${selectedNodeId}`}</h3>
+        <Section title="Kind" value={blockKind.replace(/_/g, ' ').toUpperCase()} />
+        {cfgBlockData.hasTrace && (
+          <Section title="Path State" value={pathState === 'verified' ? 'Executed' : pathState === 'unverified' ? 'Not executed' : 'Unknown'} />
+        )}
+        {stmts.length > 0 && (
+          <div className="detail-section">
+            <div className="detail-section-title">Statements</div>
+            {stmts.map((s: any, i: number) => (
+              <div key={i} style={{ fontSize: 11, fontFamily: 'var(--vscode-editor-font-family, monospace)', marginBottom: 2, display: 'flex', gap: 6 }}>
+                <span style={{ opacity: 0.3, minWidth: 24, textAlign: 'right' }}>{s.line}</span>
+                <span
+                  className="nav-link"
+                  onClick={() => cfgBlockData.filePath && postMessage({ type: 'navigateToCode', filePath: cfgBlockData.filePath, line: s.line })}
+                >
+                  {s.text}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        {cfgBlockData.filePath && cfgBlockData.lineStart && (
+          <div className="detail-section">
+            <div className="detail-section-title">Location</div>
+            <span
+              className="nav-link"
+              onClick={() => postMessage({ type: 'navigateToCode', filePath: cfgBlockData.filePath, line: cfgBlockData.lineStart })}
+            >
+              {cfgBlockData.filePath.split('/').slice(-2).join('/')}:{cfgBlockData.lineStart}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Synthetic step detail (DataFlowStep or ExecutionStep)
+  if (isSyntheticStep && dfStepData) {
+    const op = dfStepData.operation || '';
+    const inputs = dfStepData.inputs || [];
+    const output = dfStepData.output || '';
+    const outputType = dfStepData.outputType || '';
+    const errorLabel = dfStepData.errorLabel || '';
+    const calleeFunc = dfStepData.calleeFunction || '';
+
+    // Code preview for execution steps
+    let stepCacheKey: string | null = null;
+    if (dfStepData.filePath && dfStepData.lineStart) {
+      const endLine = dfStepData.lineEnd || dfStepData.lineStart;
+      stepCacheKey = [selectedNodeId, 'exec', dfStepData.filePath, dfStepData.lineStart, endLine].join('|');
+      if (!codePreviewCache[stepCacheKey]) {
+        const seq = nextPreviewSeq();
+        updateCodePreview(stepCacheKey, { loading: true, nodeId: selectedNodeId });
+        postMessage({
+          type: 'loadCodePreview',
+          requestId: seq,
+          cacheKey: stepCacheKey,
+          nodeId: selectedNodeId,
+          filePath: dfStepData.filePath,
+          lineStart: dfStepData.lineStart,
+          lineEnd: endLine,
+          locationKind: 'definition',
+        });
+      }
+    }
+
+    // Build step connections from execution graph links
+    const eg = flowData?.executionGraph;
+    const incomingLinks = eg?.links.filter((l) => l.targetStepId === selectedNodeId) || [];
+    const outgoingLinks = eg?.links.filter((l) => l.sourceStepId === selectedNodeId) || [];
+    const stepById: Record<string, { label: string; operation: string }> = {};
+    eg?.steps.forEach((s) => { stepById[s.id] = { label: s.label, operation: s.operation }; });
+
+    // Resolve callee location from FlowGraph nodes
+    const calleeNode = calleeFunc && flowData
+      ? Object.values(flowData.nodes).find(
+          (n) => n.id === calleeFunc || n.name === calleeFunc.split('.').pop(),
+        )
+      : null;
+
+    return (
+      <div className="detail-panel visible">
+        <h3>{dfStepData.label}</h3>
+
+        {/* Callee navigation */}
+        {calleeNode?.filePath && (
+          <>
+            <div className="action-label">Actions</div>
+            <div className="inline-actions">
+              <button
+                className="action-btn primary"
+                onClick={() =>
+                  postMessage({
+                    type: 'openFunctionFlow',
+                    filePath: calleeNode.filePath,
+                    line: calleeNode.lineStart || 1,
+                  })
+                }
+              >
+                Open {calleeFunc.split('.').pop()} Flow
+              </button>
+            </div>
+          </>
+        )}
+
+        <Section title="Operation" value={op.toUpperCase()} />
+        {dfStepData.metadata?.why && <Section title="Why" value={dfStepData.metadata.why} />}
+        {dfStepData.phase && <Section title="Phase" value={dfStepData.phase} />}
+        {dfStepData.depth != null && dfStepData.depth > 0 && <Section title="Depth" value={String(dfStepData.depth)} />}
+        {dfStepData.scope && <Section title="Scope" value={dfStepData.scope} />}
+        {inputs.length > 0 && <Section title="Inputs" value={inputs.join(', ')} />}
+        {output && <Section title="Output" value={outputType ? `${output}: ${outputType}` : output} />}
+        {errorLabel && <Section title="Error Path" value={`fail \u2192 ${errorLabel}`} />}
+        {calleeFunc && <Section title="Callee" value={calleeFunc} />}
+        {dfStepData.branchCondition && <Section title="Condition" value={dfStepData.branchCondition} />}
+        {dfStepData.metadata?.branch_explanation && (
+          <Section title="Explanation" value={dfStepData.metadata.branch_explanation} />
+        )}
+        {dfStepData.metadata?.db_query && (
+          <div className="detail-section">
+            <div className="detail-section-title">Query Detail</div>
+            <div style={{ fontSize: 11, fontFamily: 'var(--vscode-editor-font-family, monospace)' }}>
+              {dfStepData.metadata.db_query.model && <div>Model: {dfStepData.metadata.db_query.model}</div>}
+              {dfStepData.metadata.db_query.table && <div>Table: {dfStepData.metadata.db_query.table}</div>}
+              {dfStepData.metadata.db_query.operation && <div>Op: {dfStepData.metadata.db_query.operation}</div>}
+              {dfStepData.metadata.db_query.filters?.length > 0 && (
+                <div>Filters: {dfStepData.metadata.db_query.filters.map((f: any) => f.column || f.expr || '').join(', ')}</div>
+              )}
+              {dfStepData.metadata.db_query.joins?.length > 0 && (
+                <div>Joins: {dfStepData.metadata.db_query.joins.join(', ')}</div>
+              )}
+              {dfStepData.metadata.db_query.order_by?.length > 0 && (
+                <div>Order: {dfStepData.metadata.db_query.order_by.join(', ')}</div>
+              )}
+              {dfStepData.metadata.db_query.raw_sql && (
+                <div style={{ marginTop: 4, opacity: 0.7, whiteSpace: 'pre-wrap' }}>SQL: {dfStepData.metadata.db_query.raw_sql}</div>
+              )}
+            </div>
+          </div>
+        )}
+        {dfStepData.confidence && dfStepData.confidence !== 'definite' && (
+          <Section title="Confidence" value={dfStepData.confidence} />
+        )}
+        {dfStepData.evidence && (
+          <Section title="Evidence" value={dfStepData.evidence} />
+        )}
+
+        {/* Runtime info */}
+        {dfStepData.hasTrace && (
+          <Section
+            title="Runtime"
+            value={dfStepData.isHit ? 'Executed' : dfStepData.hitUnknown ? 'Unknown' : 'Not executed'}
+          />
+        )}
+
+        {/* Location */}
+        {dfStepData.filePath && dfStepData.lineStart && (
+          <div className="detail-section">
+            <div className="detail-section-title">Location</div>
+            <span
+              className="nav-link"
+              onClick={() =>
+                postMessage({ type: 'navigateToCode', filePath: dfStepData.filePath, line: dfStepData.lineStart })
+              }
+            >
+              {dfStepData.filePath.split('/').slice(-2).join('/')}:{dfStepData.lineStart}
+            </span>
+          </div>
+        )}
+
+        {/* Code preview */}
+        {stepCacheKey && <CodePreview cacheKey={stepCacheKey} />}
+
+        {/* Response origin chain */}
+        {op === 'respond' && dfStepData.metadata?.response_origins?.length > 0 && (
+          <div className="detail-section">
+            <div className="detail-section-title">Response Origin</div>
+            {dfStepData.metadata.return_expression && (
+              <div style={{ fontSize: 11, fontFamily: 'var(--vscode-editor-font-family, monospace)', opacity: 0.6, marginBottom: 6 }}>
+                return {dfStepData.metadata.return_expression}
+              </div>
+            )}
+            {(dfStepData.metadata.response_origins as any[]).map((origin: any) => (
+              <div
+                key={origin.stepId}
+                className="nav-link"
+                style={{ fontSize: 12, marginBottom: 3, display: 'flex', alignItems: 'center', gap: 4 }}
+                onClick={() => selectNode(origin.stepId)}
+              >
+                <span className="origin-op-badge" data-op={origin.operation}>
+                  {origin.operation.toUpperCase().slice(0, 5)}
+                </span>
+                <span>{origin.label}</span>
+                <span style={{ opacity: 0.4, fontSize: 10 }}>via {origin.variable}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Connections */}
+        {(incomingLinks.length > 0 || outgoingLinks.length > 0) && (
+          <div className="detail-section">
+            <div className="detail-section-title">Connections</div>
+            {incomingLinks.length > 0 && (
+              <div style={{ marginBottom: 6 }}>
+                <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 2 }}>Incoming</div>
+                {incomingLinks.map((l) => {
+                  const src = stepById[l.sourceStepId];
+                  return (
+                    <div
+                      key={l.id}
+                      className="nav-link"
+                      style={{ fontSize: 12, marginBottom: 2 }}
+                      onClick={() => selectNode(l.sourceStepId)}
+                    >
+                      {src?.label || l.sourceStepId}
+                      {l.variable && <span style={{ opacity: 0.5 }}> ({l.variable})</span>}
+                      {l.kind !== 'sequence' && <span style={{ opacity: 0.5 }}> [{l.kind}]</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {outgoingLinks.length > 0 && (
+              <div>
+                <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 2 }}>Outgoing</div>
+                {outgoingLinks.map((l) => {
+                  const tgt = stepById[l.targetStepId];
+                  return (
+                    <div
+                      key={l.id}
+                      className="nav-link"
+                      style={{ fontSize: 12, marginBottom: 2 }}
+                      onClick={() => selectNode(l.targetStepId)}
+                    >
+                      {tgt?.label || l.targetStepId}
+                      {l.variable && <span style={{ opacity: 0.5 }}> ({l.variable})</span>}
+                      {l.kind !== 'sequence' && <span style={{ opacity: 0.5 }}> [{l.kind}]</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (!node || !flowData) {
     return <div className="detail-panel" />;
@@ -186,6 +450,42 @@ export default function DetailPanel() {
       <Section title="Type" value={node.type} />
       <Section title="Abstraction" value={`L${node.level}`} />
       <Section title="Confidence" value={node.confidence} />
+
+      {/* Change impact */}
+      {node.metadata?.change_impact?.changed && (
+        <div className="detail-section">
+          <div className="detail-section-title">Change Impact</div>
+          <div style={{ fontSize: 12, color: '#e74c3c', fontWeight: 600 }}>
+            Modified in diff
+          </div>
+          {(node.metadata.change_impact.hunks || []).map((h: any, i: number) => (
+            <div key={i} style={{ fontSize: 11, opacity: 0.7 }}>
+              Lines {h.startLine}-{h.endLine}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Risk score */}
+      {node.metadata?.risk_score != null && (
+        <div className="detail-section">
+          <div className="detail-section-title">Risk</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            <span
+              className="risk-badge"
+              style={{ background: ({ critical: '#c0392b', high: '#e67e22', medium: '#f1c40f', low: '#27ae60' } as any)[node.metadata.risk_level] || '#666' }}
+            >
+              {node.metadata.risk_score}
+            </span>
+            <span style={{ fontSize: 12, textTransform: 'capitalize' }}>{node.metadata.risk_level}</span>
+          </div>
+          {(node.metadata.risk_factors || []).map((f: any, i: number) => (
+            <div key={i} style={{ fontSize: 11, opacity: 0.7 }}>
+              {f.points > 0 ? `+${f.points}` : ''} {f.factor}{f.detail ? ` (${f.detail})` : ''}
+            </div>
+          ))}
+        </div>
+      )}
 
       {node.metadata?.pipeline_phase && (
         <Section

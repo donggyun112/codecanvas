@@ -7,6 +7,7 @@ export class FlowPanelProvider {
     private panel: vscode.WebviewPanel | null = null;
     private flowHistory: any[] = [];
     private historyIndex = -1;
+    private flowSeq = 0;  // Monotonic counter to guard against stale impact responses
 
     constructor(
         private context: vscode.ExtensionContext,
@@ -16,6 +17,11 @@ export class FlowPanelProvider {
     showFlow(flowData: any, options?: { historyMode?: 'reset' | 'push' | 'restore' }) {
         const historyMode = options?.historyMode || 'reset';
         this.updateHistory(flowData, historyMode);
+
+        // Increment sequence — any pending enrichWithImpact from a previous
+        // flow will see a stale seq and skip the re-render.
+        this.flowSeq++;
+        this.enrichWithImpact(flowData, this.flowSeq);
         const entry = flowData.entrypoint || flowData.endpoint;
         const title = entry?.kind === 'api'
             ? `Flow: ${entry.method} ${entry.path}`
@@ -54,6 +60,65 @@ export class FlowPanelProvider {
                 label: this.historyLabel(item),
             })),
         );
+    }
+
+    private async enrichWithImpact(flowData: any, seq: number): Promise<void> {
+        try {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) return;
+
+            const projectPath = workspaceFolder.uri.fsPath;
+            const entryId = flowData.entrypoint?.id || flowData.endpoint?.id;
+            if (!entryId) return;
+
+            // Request impact with entryId so server returns annotated flowGraph
+            const impact = await this.server.getImpact(projectPath, {
+                gitRef: 'HEAD~1..HEAD',
+                entryId,
+            });
+
+            // Guard: if user navigated to a different flow, discard this response
+            if (this.flowSeq !== seq) return;
+            if (!impact?.affectedFunctions?.length) return;
+
+            // Merge change_impact metadata from server's annotated graph into
+            // the CURRENT flowData — preserving runtime_hit/trace data that
+            // may exist from a traced flow.
+            let changed = false;
+            const annotatedNodes = impact.flowGraph?.nodes || {};
+            const currentNodes = flowData.nodes || {};
+            for (const [nid, aNode] of Object.entries(annotatedNodes) as any[]) {
+                if (aNode.metadata?.change_impact && currentNodes[nid]) {
+                    currentNodes[nid].metadata = currentNodes[nid].metadata || {};
+                    currentNodes[nid].metadata.change_impact = aNode.metadata.change_impact;
+                    changed = true;
+                }
+            }
+
+            // Also store impact summary on entrypoint
+            if (flowData.entrypoint) {
+                flowData.entrypoint.metadata = flowData.entrypoint.metadata || {};
+                flowData.entrypoint.metadata.impact = {
+                    affectedFunctions: impact.affectedFunctions?.length || 0,
+                    affectedEndpoints: impact.affectedEndpoints?.length || 0,
+                    summary: impact.summary,
+                };
+                changed = true;
+            }
+
+            if (changed && this.panel) {
+                this.panel.webview.html = this.getWebviewHtml(
+                    flowData,
+                    this.panel.webview.cspSource,
+                    this.flowHistory.slice(0, this.historyIndex + 1).map((item, index) => ({
+                        index,
+                        label: this.historyLabel(item),
+                    })),
+                );
+            }
+        } catch {
+            // Impact enrichment is best-effort
+        }
     }
 
     private updateHistory(flowData: any, historyMode: 'reset' | 'push' | 'restore'): void {

@@ -3,13 +3,25 @@ import type { FlowGraph, FlowNodeData, FlowEdgeData } from '../types/flow';
 const STRUCTURAL_TYPES: Record<string, boolean> = { file: true, module: true };
 const PIPELINE_PHASES: Record<number, Record<string, boolean>> = {
   0: { trigger: true, api: true, entrypoint: true },
-  1: { trigger: true, api: true, entrypoint: true, middleware: true, dependency: true, handler: true },
+  1: { trigger: true, api: true, entrypoint: true, middleware: true, dependency: true, handler: true, validation: true, serialization: true },
 };
 
 export interface VisibleResult {
   nodes: FlowNodeData[];
   edges: FlowEdgeData[];
   nodeMap: Record<string, FlowNodeData>;
+}
+
+/** True for class definitions that have no L4 logic children and are not
+ *  protocol/abstract (DIP binding targets). These add no flow information. */
+function isDefinitionOnlyClass(n: FlowNodeData, flowData: FlowGraph): boolean {
+  if (n.level !== 3 || n.type !== 'class') return false;
+  if (n.metadata?.is_protocol || n.metadata?.is_abstract) return false;
+  // Has L4 children → not definition-only
+  for (const other of Object.values(flowData.nodes)) {
+    if (other.level === 4 && other.metadata?.function_id === n.id) return false;
+  }
+  return true;
 }
 
 export function getVisible(
@@ -40,7 +52,22 @@ export function getVisible(
     return false;
   }
 
+  // Find handler node ID
+  let handlerNodeId: string | null = null;
+  Object.values(flowData.nodes).forEach((n) => {
+    if (!handlerNodeId && n.metadata?.pipeline_phase === 'handler' && n.level === 3) {
+      handlerNodeId = n.id;
+    }
+  });
+
+  // Depth threshold per level for non-function-context API flows:
+  //   L2 (Functions): handler (depth 0) + depth 1 callees
+  //   L3 (Logic): no depth limit
+  const depthThreshold = level === 2 ? 1 : Infinity;
+
   function shouldShowLocalLogic(nodeId: string): boolean {
+    // At L2+, always auto-drill the handler
+    if (level >= 2 && nodeId === handlerNodeId) return true;
     return (nodeDrillState[nodeId] ?? 0) >= 1;
   }
 
@@ -49,6 +76,9 @@ export function getVisible(
   Object.values(flowData.nodes).forEach((n) => {
     if (STRUCTURAL_TYPES[n.type]) return;
     if (isFunctionContext && (n.type === 'trigger' || n.type === 'entrypoint')) return;
+
+    // Hide definition-only classes at L2+
+    if (level >= 2 && isDefinitionOnlyClass(n, flowData)) return;
 
     if (isFunctionContext) {
       if (level === 0) {
@@ -74,31 +104,47 @@ export function getVisible(
         if (n.level > 4) return;
       }
     } else if (phases) {
+      // L0/L1: pipeline phase filter
       const phase = n.metadata?.pipeline_phase;
       if (!phase || !phases[phase]) return;
     } else if (level === 2) {
+      // L2: pipeline nodes + L3 functions filtered by depth
       if (n.level > 3) return;
-      if (n.level === 3 && isUtilityNoise(n)) return;
+      if (n.level === 3) {
+        if (isUtilityNoise(n)) return;
+        // Depth filter: only show callees within threshold
+        const depth = n.metadata?.downstream_distance;
+        if (depth != null && depth > depthThreshold) return;
+      }
     } else {
+      // L3 (Logic): all L3 functions + L4 via drill
       if (n.level > 4) return;
+      if (n.level === 3 && isDefinitionOnlyClass(n, flowData)) return;
     }
 
-    // Runtime filter
+    // Runtime filter (3-way path classification)
     if (hasTrace && viewMode === 'runtime' && !n.metadata?.runtime_hit) return;
-    if (hasTrace && viewMode === 'static' && n.metadata?.runtime_hit) return;
+    if (hasTrace && viewMode === 'static') {
+      // 'static' = unverified paths: hide verified nodes and runtime-only nodes
+      if (n.metadata?.runtime_hit) return;
+      if (n.confidence === 'runtime') return;
+    }
 
     nodes.push(n);
     nodeMap[n.id] = n;
   });
 
-  // Add L4 children of drilled functions
+  // Add L4 children of drilled/auto-drilled functions
   Object.values(flowData.nodes).forEach((n) => {
     if (n.level !== 4) return;
     if (!n.metadata?.function_id) return;
     if (!nodeMap[n.metadata.function_id]) return;
     if (!shouldShowLocalLogic(n.metadata.function_id)) return;
     if (hasTrace && viewMode === 'runtime' && !n.metadata?.runtime_hit) return;
-    if (hasTrace && viewMode === 'static' && n.metadata?.runtime_hit) return;
+    if (hasTrace && viewMode === 'static') {
+      if (n.metadata?.runtime_hit) return;
+      if (n.confidence === 'runtime') return;
+    }
     if (!nodeMap[n.id]) {
       nodes.push(n);
       nodeMap[n.id] = n;
@@ -109,3 +155,4 @@ export function getVisible(
   const edges = flowData.edges.filter((e) => ids.has(e.sourceId) && ids.has(e.targetId));
   return { nodes, edges, nodeMap };
 }
+

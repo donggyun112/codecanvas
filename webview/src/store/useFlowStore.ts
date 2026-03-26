@@ -7,7 +7,11 @@ interface FlowState {
   historyTrail: HistoryItem[];
   currentLevel: number;
   viewMode: 'all' | 'runtime' | 'static';
+  flowViewMode: 'data' | 'callstack' | 'cfg' | 'brief';
+  dataFlowDetail: 'summary' | 'detail';
   selectedNodeId: string | null;
+  highlightedOriginIds: string[];
+  highlightedOriginChain: Array<{ stepId: string; variable: string; label: string; operation: string }>;
   nodeDrillState: Record<string, number>;
   rfNodes: Node[];
   rfEdges: Edge[];
@@ -20,6 +24,8 @@ interface FlowState {
   setFlowData: (data: FlowGraph, history: HistoryItem[]) => void;
   setLevel: (level: number) => void;
   setViewMode: (mode: 'all' | 'runtime' | 'static') => void;
+  setFlowViewMode: (mode: 'data' | 'callstack' | 'cfg' | 'brief') => void;
+  setDataFlowDetail: (detail: 'summary' | 'detail') => void;
   selectNode: (id: string | null) => void;
   setDrillState: (nodeId: string, depth: number) => void;
   advanceDrill: (node: FlowNodeData, isNewSelection: boolean) => boolean;
@@ -33,7 +39,11 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   historyTrail: [],
   currentLevel: 1,
   viewMode: 'all',
+  flowViewMode: 'brief',
+  dataFlowDetail: 'summary',
   selectedNodeId: null,
+  highlightedOriginIds: [],
+  highlightedOriginChain: [],
   nodeDrillState: {},
   rfNodes: [],
   rfEdges: [],
@@ -86,13 +96,30 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       nodeDrillState: drillState,
       selectedNodeId,
       currentLevel: isFunctionContext ? 1 : 1,
+      viewMode: hasTrace ? 'runtime' : 'all',
     });
   },
 
   setLevel: (level) => set({ currentLevel: level }),
   setViewMode: (mode) => set({ viewMode: mode }),
+  setFlowViewMode: (mode) => set({ flowViewMode: mode }),
+  setDataFlowDetail: (detail) => set({ dataFlowDetail: detail }),
 
-  selectNode: (id) => set({ selectedNodeId: id }),
+  selectNode: (id) => {
+    const state = get();
+    let originIds: string[] = [];
+    let originChain: Array<{ stepId: string; variable: string; label: string; operation: string }> = [];
+    // When selecting a respond step, compute its origin chain
+    if (id && state.flowData?.executionGraph) {
+      const step = state.flowData.executionGraph.steps.find((s) => s.id === id);
+      if (step?.operation === 'respond' && step.metadata?.response_origins) {
+        const origins = step.metadata.response_origins as any[];
+        originIds = origins.map((o) => o.stepId);
+        originChain = origins;
+      }
+    }
+    set({ selectedNodeId: id, highlightedOriginIds: originIds, highlightedOriginChain: originChain });
+  },
 
   setDrillState: (nodeId, depth) =>
     set((state) => ({

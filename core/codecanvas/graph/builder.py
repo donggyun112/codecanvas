@@ -10,6 +10,7 @@ import os
 
 from codecanvas.graph.models import (
     Confidence,
+    DataFlowStep,
     EdgeType,
     EntryPoint,
     Evidence,
@@ -73,7 +74,7 @@ class FlowGraphBuilder:
         only on first flow build — not during sidebar listing.
         """
         self.extractor.analyze()  # middleware + exception handlers (lazy, skips if done)
-        graph = FlowGraph(entrypoint=entrypoint)
+        graph = FlowGraph(entrypoint=entrypoint, _call_graph=self.call_graph)
         caller_depth = 0
         if entrypoint.kind == "function":
             caller_depth = int(entrypoint.metadata.get("caller_depth", 0) or 0)
@@ -111,8 +112,14 @@ class FlowGraphBuilder:
         self._build_level_hierarchy(graph)
         self._rewrite_execution_pipeline(graph)
         self._connect_error_paths(graph)
+        if hasattr(graph, "_layer_node_map"):
+            self._lift_edges(graph, graph._layer_node_map)
         self._annotate_pipeline_phases(graph)
+        self._propagate_review_signals(graph)
+        self._compute_risk_scores(graph)
+        self._generate_review_summary(graph)
         self._fill_missing_descriptions(graph)
+        self._generate_data_flow(graph)
 
         return graph
 
@@ -642,49 +649,9 @@ class FlowGraphBuilder:
                 graph.nodes[fid].parent_id = layer_id
                 layer_node_map[fid] = layer_id
 
-        # --- Lift L3 edges to L2 (file→file) ---
-        seen_l2: set[tuple[str, str]] = set()
-        for edge in list(graph.edges):
-            src = graph.nodes.get(edge.source_id)
-            tgt = graph.nodes.get(edge.target_id)
-            if not src or not tgt:
-                continue
-            src_file = src.parent_id if src.level == 3 else None
-            tgt_file = tgt.parent_id if tgt.level == 3 else None
-            if src_file and tgt_file and src_file != tgt_file:
-                key = (src_file, tgt_file)
-                if key not in seen_l2:
-                    seen_l2.add(key)
-                    graph.add_edge(FlowEdge(
-                        id=f"e_l2_{src_file}_{tgt_file}",
-                        source_id=src_file,
-                        target_id=tgt_file,
-                        edge_type=edge.edge_type,
-                        confidence=edge.confidence,
-                    ))
-
-        # --- Lift L2 edges to L1 (layer→layer) ---
-        seen_l1: set[tuple[str, str]] = set()
-        for edge in list(graph.edges):
-            src = graph.nodes.get(edge.source_id)
-            tgt = graph.nodes.get(edge.target_id)
-            if not src or not tgt:
-                continue
-            if src.level != 2 or tgt.level != 2:
-                continue
-            src_layer = layer_node_map.get(src.id)
-            tgt_layer = layer_node_map.get(tgt.id)
-            if src_layer and tgt_layer and src_layer != tgt_layer:
-                key = (src_layer, tgt_layer)
-                if key not in seen_l1:
-                    seen_l1.add(key)
-                    graph.add_edge(FlowEdge(
-                        id=f"e_l1_{src_layer}_{tgt_layer}",
-                        source_id=src_layer,
-                        target_id=tgt_layer,
-                        edge_type=edge.edge_type,
-                        confidence=edge.confidence,
-                    ))
+        # --- Lift L3/L4 edges to L2 and L1 ---
+        graph._layer_node_map = layer_node_map
+        self._lift_edges(graph, layer_node_map)
 
         # --- Lift cross-level edges (L0→L3 like api→handler) ---
         handler_id = self._find_handler_node_id(graph, graph.entrypoint)
@@ -788,6 +755,78 @@ class FlowGraphBuilder:
                 edge_type=EdgeType.REQUESTS,
                 confidence=Confidence.INFERRED,
             ))
+
+    def _lift_edges(
+        self,
+        graph: FlowGraph,
+        layer_node_map: dict[str, str],
+    ) -> None:
+        """Lift L3/L4 edges to L2 (file→file) and L2 to L1 (layer→layer)."""
+        existing_l2 = {
+            (e.source_id, e.target_id)
+            for e in graph.edges
+            if e.source_id.startswith("file.") and e.target_id.startswith("file.")
+        }
+        seen_l2: set[tuple[str, str]] = set(existing_l2)
+
+        def _file_node_of(node: FlowNode) -> str | None:
+            if node.level == 3:
+                return node.parent_id
+            if node.level == 4:
+                parent = graph.nodes.get(node.parent_id) if node.parent_id else None
+                if parent and parent.level == 3:
+                    return parent.parent_id
+                return node.parent_id
+            return None
+
+        for edge in list(graph.edges):
+            # display_only edges (step_call) should not be lifted
+            if edge.metadata.get("display_only"):
+                continue
+            src = graph.nodes.get(edge.source_id)
+            tgt = graph.nodes.get(edge.target_id)
+            if not src or not tgt:
+                continue
+            if src.level not in (3, 4) or tgt.level not in (3, 4):
+                continue
+            src_file = _file_node_of(src)
+            tgt_file = _file_node_of(tgt)
+            if src_file and tgt_file and src_file != tgt_file:
+                key = (src_file, tgt_file)
+                if key not in seen_l2:
+                    seen_l2.add(key)
+                    graph.add_edge(FlowEdge(
+                        id=self._unique_edge_id(graph, f"e_l2_{src_file}_{tgt_file}"),
+                        source_id=src_file,
+                        target_id=tgt_file,
+                        edge_type=edge.edge_type,
+                        confidence=edge.confidence,
+                    ))
+
+        existing_l1 = {
+            (e.source_id, e.target_id)
+            for e in graph.edges
+            if e.source_id.startswith("layer.") and e.target_id.startswith("layer.")
+        }
+        seen_l1: set[tuple[str, str]] = set(existing_l1)
+        for edge in list(graph.edges):
+            src = graph.nodes.get(edge.source_id)
+            tgt = graph.nodes.get(edge.target_id)
+            if not src or not tgt or src.level != 2 or tgt.level != 2:
+                continue
+            src_layer = layer_node_map.get(src.id)
+            tgt_layer = layer_node_map.get(tgt.id)
+            if src_layer and tgt_layer and src_layer != tgt_layer:
+                key = (src_layer, tgt_layer)
+                if key not in seen_l1:
+                    seen_l1.add(key)
+                    graph.add_edge(FlowEdge(
+                        id=self._unique_edge_id(graph, f"e_l1_{src_layer}_{tgt_layer}"),
+                        source_id=src_layer,
+                        target_id=tgt_layer,
+                        edge_type=edge.edge_type,
+                        confidence=edge.confidence,
+                    ))
 
     @staticmethod
     def _classify_file_layer(
@@ -1079,7 +1118,46 @@ class FlowGraphBuilder:
                             "structural_lift": True,
                         },
                     )
-            self._add_validation_serialization_nodes(graph, handler_id)
+                # Also lift to the resolved function's file/layer if different
+                if dep_resolved_id:
+                    resolved_node = graph.nodes.get(dep_resolved_id)
+                    if resolved_node and resolved_node.parent_id:
+                        dep_file_id = resolved_node.parent_id
+                        if dep_file_id != handler_file_id and dep_file_id in graph.nodes:
+                            self._upsert_edge(
+                                graph,
+                                preferred_id=f"e_dep_l2_resolved_{dependency_id}",
+                                source_id=dependency_id,
+                                target_id=dep_file_id,
+                                edge_type=EdgeType.DEPENDS_ON,
+                                confidence=Confidence.DEFINITE,
+                                metadata={
+                                    "pipeline_edge": True,
+                                    "pipeline_phase": "dependency",
+                                    "structural_lift": True,
+                                },
+                            )
+                            dep_file_node = graph.nodes.get(dep_file_id)
+                            if dep_file_node and dep_file_node.parent_id:
+                                dep_layer_id = dep_file_node.parent_id
+                                if dep_layer_id != handler_layer_id and dep_layer_id in graph.nodes:
+                                    self._upsert_edge(
+                                        graph,
+                                        preferred_id=f"e_dep_l1_resolved_{dependency_id}",
+                                        source_id=dependency_id,
+                                        target_id=dep_layer_id,
+                                        edge_type=EdgeType.DEPENDS_ON,
+                                        confidence=Confidence.DEFINITE,
+                                        metadata={
+                                            "pipeline_edge": True,
+                                            "pipeline_phase": "dependency",
+                                            "structural_lift": True,
+                                        },
+                                    )
+            last_dep = dependency_ids[-1]
+            self._add_validation_serialization_nodes(
+                graph, handler_id, pipeline_source_id=last_dep,
+            )
             return
 
         self._upsert_edge(
@@ -1091,7 +1169,9 @@ class FlowGraphBuilder:
             confidence=Confidence.DEFINITE,
             metadata={"pipeline_edge": True, "pipeline_phase": "handler"},
         )
-        self._add_validation_serialization_nodes(graph, handler_id)
+        self._add_validation_serialization_nodes(
+            graph, handler_id, pipeline_source_id=source_id,
+        )
         if handler_layer_id:
             self._upsert_edge(
                 graph,
@@ -1123,6 +1203,7 @@ class FlowGraphBuilder:
 
     def _add_validation_serialization_nodes(
         self, graph: FlowGraph, handler_id: str,
+        pipeline_source_id: str | None = None,
     ) -> None:
         """Add Body Validation (→422) and Response Serialization pipeline steps."""
         ep = graph.entrypoint
@@ -1147,6 +1228,32 @@ class FlowGraphBuilder:
                     "schema_type": ep.request_body,
                 },
             ))
+
+            # Pipeline source → validation (incoming edge)
+            if pipeline_source_id:
+                self._upsert_edge(
+                    graph,
+                    preferred_id="e_pipeline_validation",
+                    source_id=pipeline_source_id,
+                    target_id=validation_id,
+                    edge_type=EdgeType.CALLS,
+                    confidence=Confidence.DEFINITE,
+                    metadata={"pipeline_edge": True, "pipeline_phase": "validation"},
+                )
+
+            # Schema → validation (incoming edge for schema node)
+            body_id = f"schema.request.{ep.request_body}"
+            if body_id in graph.nodes:
+                root_id = self._root_flow_node_id(graph)
+                self._upsert_edge(
+                    graph,
+                    preferred_id="e_api_schema_req",
+                    source_id=root_id,
+                    target_id=body_id,
+                    edge_type=EdgeType.CALLS,
+                    confidence=Confidence.DEFINITE,
+                    metadata={"pipeline_edge": True, "schema_edge": True},
+                )
 
             # Validation → handler
             self._upsert_edge(
@@ -1347,6 +1454,284 @@ class FlowGraphBuilder:
             return
         node.metadata.setdefault("pipeline_phase", phase)
         node.metadata.setdefault("pipeline_order", order)
+
+    @staticmethod
+    def _propagate_review_signals(graph: FlowGraph) -> None:
+        """Propagate and enrich review signals across the graph.
+
+        - Mark handler with 'auth' if it has Security() dependency injections.
+        - Propagate callee signals to callers (shallow, 1-hop) so that
+          a handler calling a repo with db_write also shows db_write.
+        """
+        # 1. Mark auth on handler if Security deps exist
+        handler_id = None
+        for node in graph.nodes.values():
+            if node.metadata.get("pipeline_phase") == "handler" and node.level == 3:
+                handler_id = node.id
+                break
+        if handler_id:
+            for edge in graph.edges:
+                if edge.target_id == handler_id and edge.edge_type == EdgeType.INJECTS:
+                    dep_node = graph.nodes.get(edge.source_id)
+                    if dep_node and dep_node.metadata.get("scopes"):
+                        signals = graph.nodes[handler_id].metadata.setdefault("review_signals", [])
+                        if "auth" not in signals:
+                            signals.append("auth")
+
+        # 2. Propagate callee signals to direct callers (1-hop)
+        PROPAGATED = {"db_write", "db_read", "http_call"}
+        for edge in graph.edges:
+            if edge.edge_type not in (EdgeType.CALLS, EdgeType.QUERIES, EdgeType.REQUESTS):
+                continue
+            src = graph.nodes.get(edge.source_id)
+            tgt = graph.nodes.get(edge.target_id)
+            if not src or not tgt or src.level != 3 or tgt.level != 3:
+                continue
+            tgt_signals = set(tgt.metadata.get("review_signals", []))
+            propagate = tgt_signals & PROPAGATED
+            if propagate:
+                src_signals = src.metadata.setdefault("review_signals", [])
+                for sig in propagate:
+                    if sig not in src_signals:
+                        src_signals.append(sig)
+
+    @staticmethod
+    def _compute_risk_scores(graph: FlowGraph) -> None:
+        """Compute risk scores for L3 function nodes and the endpoint.
+
+        Score is based on review signals, error paths, call complexity,
+        and pipeline phase exposure.
+        """
+        SIGNAL_POINTS = {
+            "db_write": 3, "db_read": 1, "http_call": 3,
+            "raises_5xx": 4, "raises_4xx": 2, "raises": 1,
+            "auth": 2, "io": 1,
+        }
+        PHASE_MULTIPLIER = {
+            "handler": 1.5, "repository": 1.3, "service": 1.0,
+            "dependency": 0.8, "middleware": 0.7,
+        }
+
+        # Pre-compute outgoing edges per node
+        outgoing_calls: dict[str, int] = {}
+        error_edges_from: dict[str, int] = {}
+        for edge in graph.edges:
+            if edge.edge_type == EdgeType.CALLS:
+                outgoing_calls[edge.source_id] = outgoing_calls.get(edge.source_id, 0) + 1
+            if edge.is_error_path:
+                error_edges_from[edge.source_id] = error_edges_from.get(edge.source_id, 0) + 1
+
+        endpoint_total = 0
+        endpoint_factors: list[dict] = []
+
+        for node in graph.nodes.values():
+            if node.level != 3:
+                continue
+            if node.node_type.value in ("class",):
+                continue
+
+            factors: list[dict] = []
+            raw_score = 0
+
+            # 1. Review signal points
+            signals = node.metadata.get("review_signals", [])
+            seen_raises = False
+            for sig in signals:
+                # Skip generic 'raises' if specific status exists
+                if sig == "raises" and ("raises_4xx" in signals or "raises_5xx" in signals):
+                    continue
+                pts = SIGNAL_POINTS.get(sig, 0)
+                if pts > 0:
+                    raw_score += pts
+                    factors.append({"factor": sig, "points": pts})
+
+            # 2. Error path edges from this node
+            err_count = error_edges_from.get(node.id, 0)
+            if err_count > 0:
+                pts = err_count
+                raw_score += pts
+                factors.append({"factor": "error_paths", "points": pts, "detail": f"{err_count} error edges"})
+
+            # 3. Call complexity (callees > 3)
+            call_count = outgoing_calls.get(node.id, 0)
+            if call_count > 3:
+                pts = call_count - 3
+                raw_score += pts
+                factors.append({"factor": "complexity", "points": pts, "detail": f"{call_count} callees"})
+
+            # 4. Phase multiplier
+            phase = node.metadata.get("pipeline_phase", "")
+            multiplier = PHASE_MULTIPLIER.get(phase, 1.0)
+            score = round(raw_score * multiplier, 1)
+
+            if multiplier != 1.0 and raw_score > 0:
+                factors.append({"factor": f"phase:{phase}", "points": 0, "detail": f"x{multiplier}"})
+
+            if score > 0:
+                # Determine risk level
+                if score >= 10:
+                    level = "critical"
+                elif score >= 6:
+                    level = "high"
+                elif score >= 3:
+                    level = "medium"
+                else:
+                    level = "low"
+
+                node.metadata["risk_score"] = score
+                node.metadata["risk_level"] = level
+                node.metadata["risk_factors"] = factors
+                endpoint_total += score
+                endpoint_factors.append({"node": node.name, "score": score, "level": level})
+
+        # Endpoint-level aggregate
+        if endpoint_total > 0:
+            if endpoint_total >= 15:
+                ep_level = "critical"
+            elif endpoint_total >= 8:
+                ep_level = "high"
+            elif endpoint_total >= 4:
+                ep_level = "medium"
+            else:
+                ep_level = "low"
+            graph.entrypoint.metadata["risk_score"] = endpoint_total
+            graph.entrypoint.metadata["risk_level"] = ep_level
+            graph.entrypoint.metadata["risk_breakdown"] = endpoint_factors
+
+    @staticmethod
+    def _generate_review_summary(graph: FlowGraph) -> None:
+        """Generate a structured review summary for "review without reading code".
+
+        Aggregates: risk, review signals, error paths, auth, response complexity.
+        """
+        SIGNAL_LABELS = {
+            "db_write": "Database write operations",
+            "db_read": "Database read operations",
+            "http_call": "External HTTP calls",
+            "raises_4xx": "Client error responses (4xx)",
+            "raises_5xx": "Server error responses (5xx)",
+            "raises": "Exception throwing",
+            "auth": "Authentication/authorization logic",
+        }
+
+        concerns: list[dict] = []
+        all_signals: set[str] = set()
+        error_edge_count = 0
+        total_l3 = 0
+        functions_with_risk: list[dict] = []
+
+        for node in graph.nodes.values():
+            if node.level != 3 or node.node_type.value == "class":
+                continue
+            total_l3 += 1
+            signals = node.metadata.get("review_signals", [])
+            all_signals.update(signals)
+            risk = node.metadata.get("risk_score", 0)
+            if risk >= 3:
+                functions_with_risk.append({
+                    "name": node.name,
+                    "score": risk,
+                    "level": node.metadata.get("risk_level", "low"),
+                    "phase": node.metadata.get("pipeline_phase", ""),
+                })
+
+        for edge in graph.edges:
+            if edge.is_error_path:
+                error_edge_count += 1
+
+        # Build concerns list
+        for sig in ["auth", "db_write", "http_call", "raises_5xx", "raises_4xx"]:
+            if sig in all_signals:
+                concerns.append({
+                    "signal": sig,
+                    "label": SIGNAL_LABELS.get(sig, sig),
+                    "severity": "high" if sig in ("auth", "db_write", "raises_5xx") else "medium",
+                })
+
+        if error_edge_count > 0:
+            concerns.append({
+                "signal": "error_paths",
+                "label": f"{error_edge_count} error path(s) in flow",
+                "severity": "medium",
+            })
+
+        # Focus areas: functions with highest risk
+        functions_with_risk.sort(key=lambda f: -f["score"])
+        focus_areas = functions_with_risk[:5]
+
+        summary = {
+            "concerns": concerns,
+            "focusAreas": focus_areas,
+            "totalFunctions": total_l3,
+            "errorPaths": error_edge_count,
+            "signalCoverage": sorted(all_signals),
+        }
+        graph.entrypoint.metadata["review_summary"] = summary
+
+        # Generate flow narrative
+        narrative = FlowGraphBuilder._generate_flow_narrative(graph, concerns, error_edge_count)
+        if narrative:
+            graph.entrypoint.metadata["flow_narrative"] = narrative
+
+    @staticmethod
+    def _generate_flow_narrative(
+        graph: FlowGraph, concerns: list[dict], error_edge_count: int,
+    ) -> str:
+        """Synthesize a natural language summary of the endpoint's logic."""
+        ep = graph.entrypoint
+        parts: list[str] = []
+
+        # Opening: what is this endpoint
+        if ep.kind == "api":
+            parts.append(f"{ep.method} {ep.path}")
+            if ep.description:
+                parts[0] += f": {ep.description.rstrip('.')}"
+        else:
+            parts.append(ep.label or ep.handler_name)
+
+        # Dependencies
+        deps = [n for n in graph.nodes.values()
+                if n.metadata.get("pipeline_phase") == "dependency" and n.level <= 1]
+        if deps:
+            dep_names = [n.name for n in deps]
+            parts.append(f"Requires {', '.join(dep_names)}.")
+
+        # Main flow: describe the handler's key steps
+        handler = None
+        for n in graph.nodes.values():
+            if n.metadata.get("pipeline_phase") == "handler" and n.level == 3:
+                handler = n
+                break
+        if handler and handler.description:
+            parts.append(handler.description.rstrip(".") + ".")
+
+        # Branches
+        branch_nodes = [n for n in graph.nodes.values()
+                        if n.node_type.value == "branch" and n.level == 4
+                        and n.metadata.get("function_id") == (handler.id if handler else "")]
+        if branch_nodes:
+            branch_desc = [n.display_name or n.name for n in branch_nodes[:3]]
+            parts.append(f"Branches on: {'; '.join(branch_desc)}.")
+
+        # Error paths
+        if error_edge_count > 0:
+            error_nodes = [n for n in graph.nodes.values()
+                           if n.node_type.value in ("exception", "error_response")]
+            statuses = []
+            for en in error_nodes:
+                status = en.metadata.get("status_code")
+                if status:
+                    statuses.append(str(status))
+            if statuses:
+                parts.append(f"May return error: HTTP {', '.join(sorted(set(statuses)))}.")
+            else:
+                parts.append(f"Has {error_edge_count} error path(s).")
+
+        # Response
+        if ep.response_model:
+            parts.append(f"Returns {ep.response_model}.")
+
+        return " ".join(parts)
 
     @staticmethod
     def _find_dependency_resolved_function(
@@ -1612,3 +1997,360 @@ class FlowGraphBuilder:
         if entrypoint.kind == "function":
             return entrypoint.description or f"Trace the function `{entrypoint.handler_name}()`."
         return entrypoint.description or f"Execute `{entrypoint.label or entrypoint.handler_name}`."
+
+    # ------------------------------------------------------------------
+    # Data-flow step generation
+    # ------------------------------------------------------------------
+
+    def _generate_data_flow(self, graph: FlowGraph) -> None:
+        """Generate DataFlowSteps for L3 functions that have L4 logic children.
+
+        Groups raw L4 steps into high-level data transformation steps:
+        code statements → "what happens to the data".
+        """
+        for node in list(graph.nodes.values()):
+            if node.level != 3:
+                continue
+            l4_nodes = [
+                n for n in graph.nodes.values()
+                if n.level == 4 and n.metadata.get("function_id") == node.id
+            ]
+            if not l4_nodes:
+                continue
+
+            l4_nodes.sort(key=lambda n: (n.line_start or 0, n.id))
+            steps = self._build_data_flow_steps(graph, node, l4_nodes)
+            if steps:
+                # Propagate branch_id/branch_path from source L4 nodes
+                for s in steps:
+                    for src_id in s.source_step_ids:
+                        src_node = graph.nodes.get(src_id)
+                        if src_node and src_node.metadata.get("branch_id"):
+                            path = src_node.metadata.get("branch_path", "")
+                            s.branch_id = f'{src_node.metadata["branch_id"]}:{path}' if path else src_node.metadata["branch_id"]
+                            break
+
+                node.metadata["data_flow_steps"] = [
+                    {
+                        "id": s.id,
+                        "label": s.label,
+                        "operation": s.operation,
+                        "inputs": s.inputs,
+                        "output": s.output,
+                        "outputType": s.output_type,
+                        "errorLabel": s.error_label,
+                        "branchCondition": s.branch_condition,
+                        "branchId": s.branch_id,
+                        "branchPaths": s.branch_paths,
+                        "sourceStepIds": s.source_step_ids,
+                        "calleeId": s.callee_id,
+                    }
+                    for s in steps
+                ]
+
+    def _build_data_flow_steps(
+        self,
+        graph: FlowGraph,
+        func_node: FlowNode,
+        l4_nodes: list[FlowNode],
+    ) -> list[DataFlowStep]:
+        """Convert L4 logic nodes into data-flow steps.
+
+        Merging rules:
+        - try body + except raise → one "validate" step
+        - simple assignment before a meaningful step → absorbed
+        - exception nodes → collected into error paths on validate steps
+        - branch → one step with branch_paths
+        """
+        raw: list[tuple[FlowNode, str, dict]] = []  # (node, operation, extra)
+
+        # Pre-index: which L4 steps have step_call edges to L3 callees
+        step_callees: dict[str, list[str]] = {}  # l4_id -> [callee_qname]
+        for edge in graph.edges:
+            if edge.metadata.get("step_call") and edge.source_id in {n.id for n in l4_nodes}:
+                step_callees.setdefault(edge.source_id, []).append(edge.target_id)
+
+        # Classify each L4 node
+        for n in l4_nodes:
+            nt = n.node_type
+            meta = n.metadata
+            callees = step_callees.get(n.id, [])
+
+            if nt == NodeType.EXCEPTION:
+                status = meta.get("status_code", "")
+                raw.append((n, "error", {"status": status}))
+
+            elif nt == NodeType.BRANCH:
+                condition = meta.get("condition", "")
+                if meta.get("is_exception_handler"):
+                    raw.append((n, "except_handler", {"condition": condition}))
+                else:
+                    raw.append((n, "branch", {"condition": condition}))
+
+            elif nt == NodeType.RETURN:
+                raw.append((n, "respond", {}))
+
+            elif nt == NodeType.LOOP:
+                callee_info = self._callee_info(graph, callees)
+                # Fallback: use iterator_call name if no resolved callees
+                if not callee_info and meta.get("iterator_call"):
+                    iter_name = meta["iterator_call"].split(".")[-1]
+                    callee_info = {"name": iter_name, "is_io": True}
+                raw.append((n, "query" if callee_info.get("is_io") else "process", {
+                    "callee": callee_info,
+                }))
+
+            elif nt in (NodeType.ASSIGNMENT, NodeType.STEP):
+                target = meta.get("target", "")
+                value = meta.get("value", "")
+
+                if not callees and not target:
+                    # Bare expression with no callee — side effect
+                    raw.append((n, "side_effect", {}))
+                elif not callees:
+                    # Simple assignment (no function call) — may be absorbed
+                    raw.append((n, "assign", {"target": target, "value": value}))
+                else:
+                    callee_info = self._callee_info(graph, callees)
+                    if callee_info.get("is_io"):
+                        raw.append((n, "query", {"target": target, "callee": callee_info}))
+                    else:
+                        raw.append((n, "transform", {"target": target, "callee": callee_info}))
+            else:
+                raw.append((n, "side_effect", {}))
+
+        # Merge pass: group validate patterns, absorb simple assigns, deduplicate
+        return self._merge_data_flow_steps(func_node, raw)
+
+    def _callee_info(self, graph: FlowGraph, callee_ids: list[str]) -> dict:
+        """Extract callee metadata for data-flow classification."""
+        if not callee_ids:
+            return {}
+        # I/O hint names: functions whose name suggests data fetching/storing
+        _IO_NAME_HINTS = {
+            "get", "fetch", "find", "list", "query", "search", "load",
+            "save", "store", "create", "update", "delete", "insert",
+            "init", "send", "post", "put", "patch", "process", "invoke",
+            "execute", "run", "call", "request",
+        }
+
+        def _name_suggests_io(name: str) -> bool:
+            parts = name.lstrip("_").lower().split("_")
+            return bool(set(parts) & _IO_NAME_HINTS)
+
+        # Use the first non-schema callee
+        for cid in callee_ids:
+            callee_node = graph.nodes.get(cid)
+            if not callee_node:
+                callee_func = self.call_graph.get_function(cid)
+                if callee_func:
+                    return {
+                        "name": callee_func.name,
+                        "return_type": callee_func.return_annotation,
+                        "is_io": _name_suggests_io(callee_func.name),
+                        "id": cid,
+                    }
+                continue
+            is_io = callee_node.node_type in (
+                NodeType.REPOSITORY, NodeType.DATABASE, NodeType.EXTERNAL_API,
+            ) or callee_node.metadata.get("pipeline_phase") in ("repository", "database", "external")
+            if not is_io:
+                is_io = _name_suggests_io(callee_node.name)
+            return {
+                "name": callee_node.name,
+                "display_name": callee_node.display_name,
+                "return_type": callee_node.metadata.get("return_type"),
+                "is_io": is_io,
+                "id": cid,
+            }
+        return {}
+
+    def _merge_data_flow_steps(
+        self,
+        func_node: FlowNode,
+        raw: list[tuple[FlowNode, str, dict]],
+    ) -> list[DataFlowStep]:
+        """Merge classified L4 steps into data-flow steps.
+
+        - try body step + except handler → validate step
+        - consecutive simple assigns before a meaningful step → absorbed
+        - standalone errors → attached to preceding validate/process step
+        - duplicate steps (from if/else flatten) → deduplicated
+        """
+        merged: list[DataFlowStep] = []
+        seen_source_ids: set[str] = set()  # Track L4 node IDs to skip true duplicates (from flatten)
+        pending_assigns: list[tuple[FlowNode, dict]] = []
+        pending_errors: list[tuple[FlowNode, dict]] = []
+        step_counter = 0
+
+        def flush_assigns():
+            """Pending simple assignments are absorbed — not emitted."""
+            pending_assigns.clear()
+
+        def make_id():
+            nonlocal step_counter
+            step_counter += 1
+            return f"{func_node.id}.df.{step_counter}"
+
+        def humanize_name(display_name: str) -> str:
+            import re as _re
+            func_match = _re.search(r'\.?(\w+)\s*\(', display_name)
+            if func_match:
+                return humanize_callee({"name": func_match.group(1)})
+            return display_name
+
+        def humanize_callee(callee: dict) -> str:
+            name = callee.get("display_name") or callee.get("name", "")
+            # CamelCase → words
+            import re
+            name = re.sub(r"([a-z])([A-Z])", r"\1 \2", name)
+            # snake_case → words, strip leading _
+            name = name.lstrip("_").replace("_", " ")
+            return name.strip().capitalize() if name else "Process"
+
+        def infer_inputs(n: FlowNode) -> list[str]:
+            """Extract input variable names from the step's value expression."""
+            value = n.metadata.get("value", "")
+            # Simple heuristic: find identifiers that look like variables
+            import re
+            # Match word chars that aren't part of function calls or strings
+            candidates = re.findall(r'\b([a-z_][a-z0-9_]*)\b', value)
+            # Filter out common noise
+            noise = {"await", "self", "None", "True", "False", "not", "and", "or",
+                     "in", "is", "if", "else", "for", "async", "return", "str", "int",
+                     "float", "bool", "list", "dict", "set", "json", "f", "get"}
+            return [c for c in candidates if c not in noise and len(c) > 1][:5]
+
+        i = 0
+        while i < len(raw):
+            node, op, extra = raw[i]
+
+            # Skip true duplicates (same L4 node from if/else flatten)
+            if node.id in seen_source_ids:
+                i += 1
+                continue
+            seen_source_ids.add(node.id)
+
+            # --- Validate pattern: step + except_handler/error ---
+            if op in ("query", "transform", "process", "side_effect"):
+                j = i + 1
+                error_labels = []
+                except_ids = []
+                while j < len(raw):
+                    _, next_op, next_extra = raw[j]
+                    if next_op == "except_handler":
+                        except_ids.append(raw[j][0].id)
+                        seen_source_ids.add(raw[j][0].id)
+                        j += 1
+                        continue
+                    if next_op == "error":
+                        error_labels.append(str(next_extra.get("status", "")))
+                        except_ids.append(raw[j][0].id)
+                        seen_source_ids.add(raw[j][0].id)
+                        j += 1
+                        continue
+                    break
+
+                if error_labels:
+                    callee = extra.get("callee", {})
+                    label = humanize_callee(callee) if callee else humanize_name(node.display_name)
+                    error_str = "/".join(f for f in error_labels if f) or "error"
+                    merged.append(DataFlowStep(
+                        id=make_id(), label=label, operation="validate",
+                        inputs=infer_inputs(node), output=extra.get("target"),
+                        output_type=callee.get("return_type"), error_label=error_str,
+                        source_step_ids=[node.id] + except_ids, callee_id=callee.get("id"),
+                    ))
+                    i = j
+                    continue
+
+            if op == "assign":
+                i += 1
+                continue
+            if op == "error":
+                pending_errors.append((node, extra))
+                i += 1
+                continue
+            if op == "except_handler":
+                i += 1
+                continue
+
+            if op == "branch":
+                merged.append(DataFlowStep(
+                    id=make_id(), label=extra.get("condition", ""),
+                    operation="branch", branch_condition=extra.get("condition", ""),
+                    source_step_ids=[node.id],
+                ))
+                i += 1
+                continue
+
+            if op == "query":
+                callee = extra.get("callee", {})
+                merged.append(DataFlowStep(
+                    id=make_id(), label=humanize_callee(callee) if callee else node.display_name,
+                    operation="query", inputs=infer_inputs(node),
+                    output=extra.get("target") or None, output_type=callee.get("return_type"),
+                    source_step_ids=[node.id], callee_id=callee.get("id"),
+                ))
+                i += 1
+                continue
+
+            if op == "transform":
+                callee = extra.get("callee", {})
+                merged.append(DataFlowStep(
+                    id=make_id(), label=humanize_callee(callee) if callee else node.display_name,
+                    operation="transform", inputs=infer_inputs(node),
+                    output=extra.get("target") or None, output_type=callee.get("return_type"),
+                    source_step_ids=[node.id], callee_id=callee.get("id"),
+                ))
+                i += 1
+                continue
+
+            if op == "respond":
+                import re as _re
+                value = node.metadata.get("value", "")
+                match = _re.match(r"(\w+)\(", value)
+                merged.append(DataFlowStep(
+                    id=make_id(), label=match.group(1) if match else "response",
+                    operation="respond", inputs=infer_inputs(node),
+                    source_step_ids=[node.id],
+                ))
+                i += 1
+                continue
+
+            if op in ("side_effect", "process"):
+                callee = extra.get("callee", {})
+                label = humanize_callee(callee) if callee else humanize_name(node.display_name)
+                if label.startswith("(yield"):
+                    label = "Stream events"
+                merged.append(DataFlowStep(
+                    id=make_id(), label=label, operation=op,
+                    source_step_ids=[node.id], callee_id=callee.get("id"),
+                ))
+                i += 1
+                continue
+
+            i += 1
+
+        # Collapse consecutive "Stream events"
+        collapsed: list[DataFlowStep] = []
+        for step in merged:
+            if (step.label == "Stream events" and collapsed
+                    and collapsed[-1].label == "Stream events"):
+                collapsed[-1].source_step_ids.extend(step.source_step_ids)
+            else:
+                collapsed.append(step)
+
+        # Attach buffered errors to last validate step
+        for err_node, err_extra in pending_errors:
+            status = str(err_extra.get("status", ""))
+            for step in reversed(collapsed):
+                if step.operation == "validate":
+                    if status and step.error_label and status not in step.error_label:
+                        step.error_label += f"/{status}"
+                    elif status and not step.error_label:
+                        step.error_label = status
+                    step.source_step_ids.append(err_node.id)
+                    break
+
+        return collapsed

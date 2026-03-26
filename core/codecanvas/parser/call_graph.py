@@ -66,6 +66,7 @@ class CallSite:
     iteration_kind: str | None = None   # "for" | "async_for"
     loop_target: str | None = None
     loop_iterator: str | None = None
+    in_return: bool = False
 
 
 @dataclass
@@ -142,7 +143,83 @@ _DB_CHAIN_HINTS = {
     "table", "query", "select", "insert", "update", "delete",
     "filter", "filter_by", "where", "join", "outerjoin",
     "scalar", "scalars", "from_", "values",
+    "upsert", "rpc",  # Supabase
 }
+_HTTP_CHAIN_HINTS = {
+    "headers", "auth", "timeout", "follow_redirects",
+}
+
+def _safe_unparse(node: ast.AST) -> str:
+    """Safely unparse an AST node, returning '<expr>' on failure."""
+    try:
+        if hasattr(ast, "unparse"):
+            s = ast.unparse(node)
+            return s[:80] if len(s) > 80 else s
+    except Exception:
+        pass
+    return "<expr>"
+
+
+def _parse_simple_sql(sql: str) -> dict[str, Any] | None:
+    """Lightweight regex-based SQL parser for display purposes."""
+    import re as _re
+    sql = " ".join(sql.split()).strip().rstrip(";")
+    result: dict[str, Any] = {}
+
+    upper = sql.upper()
+    if upper.startswith("SELECT"):
+        result["operation"] = "SELECT"
+        # columns
+        m = _re.search(r"(?i)SELECT\s+(.*?)\s+FROM\s+", sql)
+        if m:
+            cols = m.group(1).strip()
+            result["columns"] = [c.strip() for c in cols.split(",")][:5]
+        # table
+        m = _re.search(r"(?i)FROM\s+(\w+)", sql)
+        if m:
+            result["table"] = m.group(1)
+        # joins
+        join_matches = _re.findall(r"(?i)JOIN\s+(\w+)", sql)
+        if join_matches:
+            result["joins"] = join_matches
+        # where
+        m = _re.search(r"(?i)WHERE\s+(.+?)(?:\s+ORDER|\s+GROUP|\s+LIMIT|\s+$|$)", sql)
+        if m:
+            result["where"] = m.group(1).strip()[:100]
+        # order by
+        m = _re.search(r"(?i)ORDER\s+BY\s+(.+?)(?:\s+LIMIT|\s+$|$)", sql)
+        if m:
+            result["order_by"] = m.group(1).strip()
+        # limit
+        m = _re.search(r"(?i)LIMIT\s+(\d+)", sql)
+        if m:
+            result["limit"] = int(m.group(1))
+    elif upper.startswith("INSERT"):
+        result["operation"] = "INSERT"
+        m = _re.search(r"(?i)INSERT\s+INTO\s+(\w+)", sql)
+        if m:
+            result["table"] = m.group(1)
+    elif upper.startswith("UPDATE"):
+        result["operation"] = "UPDATE"
+        m = _re.search(r"(?i)UPDATE\s+(\w+)", sql)
+        if m:
+            result["table"] = m.group(1)
+        m = _re.search(r"(?i)WHERE\s+(.+?)$", sql)
+        if m:
+            result["where"] = m.group(1).strip()[:100]
+    elif upper.startswith("DELETE"):
+        result["operation"] = "DELETE"
+        m = _re.search(r"(?i)DELETE\s+FROM\s+(\w+)", sql)
+        if m:
+            result["table"] = m.group(1)
+        m = _re.search(r"(?i)WHERE\s+(.+?)$", sql)
+        if m:
+            result["where"] = m.group(1).strip()[:100]
+    else:
+        return None
+
+    return result if result.get("operation") else None
+
 
 DB_PATTERNS = {
     "execute", "query", "fetch", "fetchone", "fetchall", "fetchmany",
@@ -150,7 +227,7 @@ DB_PATTERNS = {
     "scalar", "scalars", "all", "first", "one", "one_or_none", "get",
     "filter", "filter_by", "where", "select", "insert", "update",
 }
-DB_OBJECT_HINTS = {"session", "db", "database", "conn", "connection", "cursor", "engine"}
+DB_OBJECT_HINTS = {"session", "db", "database", "conn", "connection", "cursor", "engine", "supabase"}
 
 HTTP_PATTERNS = {
     "get", "post", "put", "delete", "patch", "head", "options",
@@ -214,6 +291,7 @@ class CallGraphBuilder:
                     fpath = os.path.join(root, f)
                     self._analyze_file(fpath)
         self._enrich_logic_step_calls()
+        self._infer_param_types_from_callers()
         self._analyzed = True
 
     def get_function(self, qualified_name: str) -> FunctionDef | None:
@@ -284,10 +362,33 @@ class CallGraphBuilder:
                 self._name_index.setdefault(node.name, []).append(qname)
                 if node.name == "__init__" and class_qname and self_attr_types:
                     self._class_attr_types.setdefault(class_qname, {}).update(self_attr_types)
-                # Recurse into function bodies to index nested functions.
-                # They may serve as entrypoints (e.g. LangGraph node callbacks),
-                # but calls TO them from the parent are filtered in traverse().
-                self._visit_definitions(node, qname, file_path, class_name, class_qname)
+                # Recurse into function body — use ast.walk to find nested defs
+                # at any depth (e.g. generator inside if-branch).
+                for child in ast.walk(node):
+                    if child is node:
+                        continue
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        nested_qname = f"{qname}.{child.name}"
+                        if nested_qname not in self._functions:
+                            nested_local_types, _ = self._extract_assignment_types(child)
+                            self._functions[nested_qname] = FunctionDef(
+                                name=child.name,
+                                qualified_name=nested_qname,
+                                file_path=file_path,
+                                line_start=child.lineno,
+                                line_end=child.end_lineno or child.lineno,
+                                is_async=isinstance(child, ast.AsyncFunctionDef),
+                                class_name=class_name,
+                                calls=self._extract_calls(child),
+                                docstring=ast.get_docstring(child) or "",
+                                params=[a.arg for a in child.args.args if a.arg != "self"],
+                                return_annotation=self._annotation_str(child.returns),
+                                class_qname=class_qname,
+                                local_types=nested_local_types,
+                                logic_steps=self._extract_logic_steps(child),
+                            )
+                            self._ast_nodes[nested_qname] = child
+                            self._name_index.setdefault(child.name, []).append(nested_qname)
 
             elif isinstance(node, ast.ClassDef):
                 class_qname = f"{namespace}.{node.name}"
@@ -332,7 +433,26 @@ class CallGraphBuilder:
                 )
                 self._functions[class_qname] = class_def
                 self._name_index.setdefault(node.name, []).append(class_qname)
+                # Extract annotation-only field types for dataclass/schema/attrs classes
+                self._extract_class_field_types(node, class_qname)
                 self._visit_definitions(node, class_qname, file_path, node.name, class_qname)
+
+    def _extract_class_field_types(self, class_node: ast.ClassDef, class_qname: str) -> None:
+        """Extract annotation-only field types from class body.
+
+        Handles @dataclass, Pydantic BaseModel, attrs, and any class with
+        annotated class-level fields like:
+            name: str
+            user: User
+            items: list[Item] = field(default_factory=list)
+        """
+        for stmt in class_node.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                ann = self._annotation_str(stmt.annotation)
+                if ann:
+                    normalized = self._normalize_type_name(ann)
+                    if normalized and normalized[0].isupper():
+                        self._class_attr_types.setdefault(class_qname, {})[stmt.target.id] = normalized
 
     def _extract_calls(self, func_node: ast.AST) -> list[CallSite]:
         """Extract all function calls within a function body using recursive traversal.
@@ -374,10 +494,13 @@ class CallGraphBuilder:
         node: ast.AST,
         calls: list[CallSite],
         branch_ctx: tuple[str, str | None] | None,
+        return_ctx: bool = False,
     ) -> None:
         """Recursively visit AST nodes, tracking branch context with proper push/pop."""
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-            # Nested scopes are indexed separately; do not flatten them into the parent flow.
+            # Nested scopes are indexed separately; do not flatten them into
+            # the parent's call list.  Logic step extraction (_flatten_stmt)
+            # handles nested function body flattening for L4 step purposes.
             return
 
         # Determine branch context for children of control-flow nodes
@@ -439,25 +562,47 @@ class CallGraphBuilder:
                     ))
             return
 
+        # Return statements — mark all calls inside as in_return
+        if isinstance(node, ast.Return):
+            if node.value:
+                self._visit_calls(node.value, calls, branch_ctx, return_ctx=True)
+            return
+
         # Extract calls from this node
         if isinstance(node, ast.Call):
-            func_name, owner_parts, is_attribute_call = self._get_call_target(node)
-            is_db = self._is_db_call(node)
-            is_http = self._is_http_call(node)
-            if func_name and not self._should_ignore_call(func_name) and not self._is_low_signal_call(node, is_db, is_http):
+            # --- getattr(obj, "literal") → treat as obj.literal() ---
+            getattr_call = self._extract_getattr_literal(node)
+            if getattr_call:
+                ga_func_name, ga_owner_parts = getattr_call
                 calls.append(CallSite(
-                    func_name=func_name,
+                    func_name=ga_func_name,
                     line=node.lineno,
                     is_await=False,
                     in_branch=branch_ctx[0] if branch_ctx else None,
                     branch_condition=branch_ctx[1] if branch_ctx else None,
-                    is_db_call=is_db,
-                    is_http_call=is_http,
-                    db_detail=self._extract_db_detail(node) if is_db else None,
-                    http_detail=self._extract_http_detail(node) if is_http else None,
-                    owner_parts=owner_parts,
-                    is_attribute_call=is_attribute_call,
+                    owner_parts=ga_owner_parts,
+                    is_attribute_call=True,
+                    in_return=return_ctx,
                 ))
+            else:
+                func_name, owner_parts, is_attribute_call = self._get_call_target(node)
+                is_db = self._is_db_call(node)
+                is_http = self._is_http_call(node)
+                if func_name and not self._should_ignore_call(func_name) and not self._is_low_signal_call(node, is_db, is_http):
+                    calls.append(CallSite(
+                        func_name=func_name,
+                        line=node.lineno,
+                        is_await=False,
+                        in_branch=branch_ctx[0] if branch_ctx else None,
+                        branch_condition=branch_ctx[1] if branch_ctx else None,
+                        is_db_call=is_db,
+                        is_http_call=is_http,
+                        db_detail=self._extract_db_detail(node) if is_db else None,
+                        http_detail=self._extract_http_detail(node) if is_http else None,
+                        owner_parts=owner_parts,
+                        is_attribute_call=is_attribute_call,
+                        in_return=return_ctx,
+                    ))
 
         if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
             if calls and calls[-1].line == node.value.lineno:
@@ -465,7 +610,33 @@ class CallGraphBuilder:
 
         # Recurse into children
         for child in ast.iter_child_nodes(node):
-            self._visit_calls(child, calls, branch_ctx)
+            self._visit_calls(child, calls, branch_ctx, return_ctx=return_ctx)
+
+    @classmethod
+    def _extract_getattr_literal(cls, node: ast.Call) -> tuple[str, tuple[str, ...]] | None:
+        """Detect getattr(obj, "literal_string") → synthesize as obj.literal call.
+
+        Also handles getattr(obj, var) where var is a Name that might be
+        a string constant — caller should use _string_constants to resolve.
+
+        Returns (func_name, owner_parts) or None.
+        """
+        if not isinstance(node.func, ast.Name) or node.func.id != "getattr":
+            return None
+        if len(node.args) < 2:
+            return None
+        obj_node = node.args[0]
+        attr_node = node.args[1]
+        # Direct string literal
+        if isinstance(attr_node, ast.Constant) and isinstance(attr_node.value, str):
+            attr_name = attr_node.value
+            owner_parts = cls._extract_owner_parts(obj_node)
+            if owner_parts:
+                func_name = ".".join((*owner_parts, attr_name))
+            else:
+                func_name = attr_name
+            return func_name, owner_parts
+        return None
 
     def _iterator_call_signature(self, expr: ast.AST) -> tuple[str, int] | None:
         """Return the outer iterator call in a for/async-for expression."""
@@ -599,6 +770,7 @@ class CallGraphBuilder:
             if func.qualified_name in nodes:
                 return func.qualified_name
 
+            review_signals = self._aggregate_review_signals(func)
             node = FlowNode(
                 id=func.qualified_name,
                 node_type=self._classify_function(func),
@@ -624,6 +796,7 @@ class CallGraphBuilder:
                     "bases": func.bases,
                     "is_protocol": func.is_protocol,
                     "is_abstract": func.is_abstract,
+                    **({"review_signals": review_signals} if review_signals else {}),
                 },
             )
             nodes[node.id] = node
@@ -696,9 +869,13 @@ class CallGraphBuilder:
                     # an architectural flow step (e.g. User(...), UserIdentity(...)).
                     if target_func.definition_type == "schema":
                         continue
-                    # Skip nested functions of the current function — they are
-                    # closures / helpers that are implementation details.
-                    if target_func.qualified_name.startswith(func.qualified_name + "."):
+                    # Nested functions of the current function: include them
+                    # as callees (they are helpers called from within the scope).
+                    # The visibility layer handles noise filtering.
+                    # Skip class constructors used purely as return value wrappers.
+                    # The L4 RETURN node already captures what is being returned;
+                    # a separate L3 node for the constructor adds visual noise.
+                    if call.in_return and target_func.definition_type == "class":
                         continue
                     # Definite connection
                     child_id = traverse(target_func, depth + 1, node.id)
@@ -709,23 +886,53 @@ class CallGraphBuilder:
                     elif call.is_http_call:
                         edge_type = EdgeType.REQUESTS
 
+                    edge_meta = self._call_edge_metadata(call, target_func)
+                    return_node_id = None
+                    if call.in_return:
+                        edge_meta["in_return"] = True
+                        return_node_id = self._find_matching_return_node(
+                            call.line, node.id, nodes,
+                        )
+                        if return_node_id:
+                            edge_meta["return_node_id"] = return_node_id
+
+                    label = self._call_edge_label(call, target_func)
+                    evidence = [Evidence(
+                        source="static_analysis",
+                        file_path=func.file_path,
+                        line_number=call.line,
+                        detail=f"Call to {call.func_name} at line {call.line}",
+                    )]
+
+                    # L3→L3 edge (always — call graph contract)
                     edges.append(FlowEdge(
                         id=f"e{edge_counter}",
                         source_id=node.id,
                         target_id=child_id,
                         edge_type=edge_type,
-                        label=self._call_edge_label(call, target_func),
+                        label=label,
                         confidence=Confidence.DEFINITE,
-                        evidence=[Evidence(
-                            source="static_analysis",
-                            file_path=func.file_path,
-                            line_number=call.line,
-                            detail=f"Call to {call.func_name} at line {call.line}",
-                        )],
-                        metadata=self._call_edge_metadata(call, target_func),
+                        evidence=evidence,
+                        metadata=dict(edge_meta),
                         condition=call.branch_condition,
                         is_error_path=call.in_branch in ("except",),
                     ))
+
+                    # L4→L3 edge (return calls only — detailed view)
+                    if call.in_return and return_node_id:
+                        edge_counter += 1
+                        edges.append(FlowEdge(
+                            id=f"e{edge_counter}",
+                            source_id=return_node_id,
+                            target_id=child_id,
+                            edge_type=edge_type,
+                            label=label,
+                            confidence=Confidence.DEFINITE,
+                            evidence=evidence,
+                            metadata={**edge_meta, "return_detail_edge": True},
+                            condition=call.branch_condition,
+                            is_error_path=call.in_branch in ("except",),
+                        ))
                 else:
                     # Only create stub nodes for semantically meaningful unresolved
                     # calls (database / HTTP).  Plain external library calls like
@@ -902,7 +1109,12 @@ class CallGraphBuilder:
         edges: list[FlowEdge],
         edge_counter: int,
     ) -> int:
-        """Attach Level 4 statement summaries to a function node."""
+        """Attach Level 4 statement summaries to a function node.
+
+        Also creates ``step_call`` edges from L4 steps to their resolved L3
+        callee targets.  These edges are marked ``display_only: True`` so that
+        ``_lift_edges`` does not derive L2/L1 duplicates from them.
+        """
         previous_id = function_node_id
         for index, step in enumerate(func.logic_steps):
             node_id = f"{function_node_id}.logic.{index}"
@@ -942,6 +1154,31 @@ class CallGraphBuilder:
                 condition=step.metadata.get("condition"),
             ))
             previous_id = node_id
+
+            # step_call edges: L4 step → L3 callee (display-only, not lifted)
+            for target in step.metadata.get("call_targets", []):
+                target_qname = target.get("qualified_name")
+                if not target_qname:
+                    continue
+                edge_counter += 1
+                call_kind = target.get("call_kind") or "calls"
+                step_edge_type = {
+                    "db_query": EdgeType.QUERIES,
+                    "http_request": EdgeType.REQUESTS,
+                }.get(call_kind, EdgeType.CALLS)
+                edges.append(FlowEdge(
+                    id=f"e{edge_counter}",
+                    source_id=node_id,
+                    target_id=target_qname,
+                    edge_type=step_edge_type,
+                    label=target.get("label", ""),
+                    confidence=Confidence.DEFINITE,
+                    metadata={
+                        "step_call": True,
+                        "display_only": True,
+                    },
+                ))
+
         return edge_counter
 
     def _find_matching_logic_node(
@@ -975,6 +1212,21 @@ class CallGraphBuilder:
             if line_start <= call.line <= line_end:
                 return node.id
         # Ambiguous — fall back to function node rather than misrouting
+        return None
+
+    @staticmethod
+    def _find_matching_return_node(
+        call_line: int,
+        function_node_id: str,
+        nodes: dict[str, "FlowNode"],
+    ) -> str | None:
+        """Find the L4 RETURN node that contains the given call line."""
+        for node in nodes.values():
+            if (node.level == 4
+                    and node.node_type == NodeType.RETURN
+                    and node.metadata.get("function_id") == function_node_id
+                    and (node.line_start or 0) <= call_line <= (node.line_end or node.line_start or 0)):
+                return node.id
         return None
 
     def resolve_function_id(
@@ -1093,73 +1345,423 @@ class CallGraphBuilder:
         return self._resolve_call(synthetic, caller)
 
     def _resolve_call(self, call: CallSite, caller: FunctionDef) -> FunctionDef | None:
-        """Try to resolve a call to a known function definition."""
+        """Try to resolve a call to a known function definition.
+
+        Returns (FunctionDef, confidence_str) via the `_last_resolve_confidence`
+        instance attribute — avoids tagging shared FunctionDef singletons.
+        Confidence levels:
+          - "definite" : single candidate or local nested match
+          - "high"     : same-module preference among few candidates
+          - "inferred" : ambiguous fallback (multiple candidates, no type info)
+        """
         if call.is_attribute_call:
             resolved = self._resolve_attribute_call(call, caller)
             if resolved is not None:
+                # Sub-paths set _last_resolve_confidence themselves;
+                # default to "high" (type-based attribute resolution)
+                if not getattr(self, '_last_resolve_confidence', None):
+                    self._last_resolve_confidence = "high"
                 return resolved
 
             # Avoid binding object/client method chains like
             # `client.table(...).execute()` to unrelated project methods
             # purely because the last segment shares a name.
+            self._last_resolve_confidence = None
             return None
 
         name = call.func_name
 
         candidates = self._name_index.get(name, [])
         if not candidates:
+            self._last_resolve_confidence = None
             return None
         resolved_candidates = [self._functions[qname] for qname in candidates]
 
+        # Exact: local nested function
         local_nested = [
             func for func in resolved_candidates
             if func.file_path == caller.file_path
             and func.qualified_name.startswith(caller.qualified_name + ".")
         ]
         if local_nested:
+            self._last_resolve_confidence = "definite"
             return min(local_nested, key=lambda func: abs(func.line_start - call.line))
+
+        # Single candidate — definite
+        if len(resolved_candidates) == 1:
+            self._last_resolve_confidence = "definite"
+            return resolved_candidates[0]
 
         if name[:1].isupper():
             class_candidates = [func for func in resolved_candidates if func.definition_type == "class"]
             preferred_class = self._prefer_same_module(class_candidates, caller)
             if preferred_class:
+                self._last_resolve_confidence = "high"
                 return preferred_class
 
-        # Prefer same module
+        # Prefer same module — high confidence (strong locality signal)
         preferred = self._prefer_same_module(resolved_candidates, caller)
         if preferred:
+            self._last_resolve_confidence = "high"
             return preferred
 
-        # Fallback: first candidate
+        # Fallback: first candidate — AMBIGUOUS
+        self._last_resolve_confidence = "inferred"
         return resolved_candidates[0]
 
     def _resolve_attribute_call(self, call: CallSite, caller: FunctionDef) -> FunctionDef | None:
-        """Resolve attribute/member calls only when the receiver type is known."""
+        """Resolve attribute/member calls only when the receiver type is known.
+
+        Supports:
+        - self.method() → method on caller's class
+        - self.attr.method() → follow attr type from __init__
+        - self.attr1.attr2.method() → chain following through class attrs
+        - local_var.method() → local type from assignments or param annotations
+        - local_var.attr.method() → follow chain through class attrs
+        - ClassName.method() → static/class method
+        - DI param resolution → Depends() provider return type → concrete impl
+        """
         method_name = call.func_name.split(".")[-1]
         owner_parts = call.owner_parts
         if not owner_parts:
             return None
 
         root = owner_parts[0]
+
+        # --- self.x.y.method() chain resolution ---
         if root == "self" and caller.class_name:
             if len(owner_parts) == 1:
                 return self._resolve_method_on_class(caller.class_name, method_name, caller)
 
+            # Follow multi-level chain: self.repo.session.method()
+            resolved_type = self._follow_attr_chain(
+                caller.class_qname, owner_parts[1:],
+            )
+            if resolved_type:
+                return self._resolve_method_on_class(resolved_type, method_name, caller)
+
+            # Fallback: single-level self.attr (original behavior)
             if caller.class_qname:
                 attr_name = owner_parts[1]
                 attr_type = self._class_attr_types.get(caller.class_qname, {}).get(attr_name)
                 if attr_type:
                     return self._resolve_method_on_class(attr_type, method_name, caller)
+
+            # Structural inference for self.unknown_attr.method()
+            result = self._resolve_by_structural_typing(method_name, caller)
+            if result:
+                self._last_resolve_confidence = "inferred"
+                return result
             return None
 
+        # --- Local variable / parameter type resolution ---
         local_type = caller.local_types.get(root)
         if local_type:
-            return self._resolve_method_on_class(local_type, method_name, caller)
+            if len(owner_parts) > 1:
+                # Follow chain: local_var.attr.method()
+                resolved_type = self._follow_attr_chain_from_type(
+                    local_type, owner_parts[1:],
+                )
+                if resolved_type:
+                    result = self._resolve_method_on_class(resolved_type, method_name, caller)
+                    if result:
+                        return result
 
+            # Try declared type first (preserves protocol/abstract method nodes)
+            result = self._resolve_method_on_class(local_type, method_name, caller)
+            if result:
+                return result
+
+            # Fallback: if declared type is abstract/protocol and method not found,
+            # resolve to concrete implementation
+            concrete = self._resolve_concrete_type(local_type, caller)
+            if concrete:
+                result = self._resolve_method_on_class(concrete, method_name, caller)
+                if result:
+                    # Concrete type resolution is inherently uncertain
+                    self._last_resolve_confidence = "inferred"
+                    return result
+
+            # Structural fallback when declared type doesn't help
+            result = self._resolve_by_structural_typing(method_name, caller)
+            if result:
+                self._last_resolve_confidence = "inferred"
+                return result
+            return None
+
+        # --- ClassName.method() ---
         if root[:1].isupper():
             return self._resolve_method_on_class(root, method_name, caller)
 
+        # --- Structural type inference (last resort) ---
+        # Only for simple receiver.method() calls — NOT for chained method calls
+        # like client.table().insert().execute() which are likely external APIs.
+        if len(owner_parts) <= 1:
+            result = self._resolve_by_structural_typing(method_name, caller)
+            if result:
+                self._last_resolve_confidence = "inferred"
+            return result
         return None
+
+    def _follow_attr_chain(
+        self,
+        class_qname: str | None,
+        attr_parts: tuple[str, ...],
+    ) -> str | None:
+        """Follow a chain of attribute accesses through class __init__ types.
+
+        Given class_qname for ``MyService`` and attr_parts ``("repo", "session")``,
+        looks up ``self.repo`` type in MyService.__init__, then ``self.session`` type
+        in that class, etc.
+
+        Uses only already-indexed data to avoid re-entrance into analyze_project().
+        """
+        if not class_qname or not attr_parts:
+            return None
+
+        current_class = class_qname
+        last_known_type: str | None = None
+        for attr in attr_parts:
+            attr_type = self._class_attr_types.get(current_class, {}).get(attr)
+            if not attr_type:
+                # Fallback 1: look for a property/method named `attr` on this class
+                # and use its return annotation as the type
+                attr_type = self._infer_attr_type_from_method(current_class, attr)
+            if not attr_type:
+                # Fallback 2: search all classes for one that has a method matching
+                # the next attribute in the chain (structural typing heuristic)
+                if last_known_type:
+                    return last_known_type
+                return None
+            # Resolve to the class's qualified name for the next level
+            simple = self._normalize_type_name(attr_type)
+            candidates = [
+                self._functions[qname]
+                for qname in self._name_index.get(simple, [])
+                if self._functions[qname].definition_type in {"class", "schema"}
+            ]
+            if not candidates:
+                last_known_type = attr_type
+                # Don't give up — attr_type might still be usable at the end
+                continue
+            current_class = candidates[0].qualified_name
+            last_known_type = self._normalize_type_name(current_class.split(".")[-1])
+        # Return the simple class name of the final resolved type
+        return last_known_type or self._normalize_type_name(current_class.split(".")[-1])
+
+    def _infer_attr_type_from_method(
+        self,
+        class_qname: str,
+        attr_name: str,
+    ) -> str | None:
+        """Infer attribute type by looking at property/method return annotations.
+
+        Checks (in priority order):
+        1. @property decorated methods → return annotation IS the attribute type
+        2. Descriptor __get__ return type on the attribute's class
+        3. Regular methods with return annotation (factory-style)
+        """
+        class_simple = class_qname.split(".")[-1]
+        property_match: str | None = None
+        method_match: str | None = None
+
+        for qname in self._name_index.get(attr_name, []):
+            func = self._functions.get(qname)
+            if not func or func.class_name != class_simple:
+                continue
+            if not func.return_annotation:
+                continue
+            ann = self._normalize_type_name(func.return_annotation)
+            if not ann or not ann[0].isupper():
+                continue
+            # @property has highest priority
+            if "property" in func.decorators:
+                return ann
+            property_match = property_match or ann
+
+        # Check for descriptor protocol: if attr_name's type has __get__
+        if not property_match:
+            # Look in class body for class-level assignments (descriptors)
+            attrs = self._class_attr_types.get(class_qname, {})
+            attr_type = attrs.get(attr_name)
+            if attr_type:
+                # Check if this type has __get__ (descriptor)
+                for qname in self._name_index.get("__get__", []):
+                    func = self._functions.get(qname)
+                    if func and func.class_name == attr_type and func.return_annotation:
+                        ann = self._normalize_type_name(func.return_annotation)
+                        if ann and ann[0].isupper():
+                            return ann
+
+        return property_match or method_match
+
+    def _follow_attr_chain_from_type(
+        self,
+        type_name: str,
+        attr_parts: tuple[str, ...],
+    ) -> str | None:
+        """Follow attribute chain starting from a known type name.
+
+        Uses only already-indexed data to avoid re-entrance into analyze_project().
+        """
+        simple = self._normalize_type_name(type_name)
+        candidates = [
+            self._functions[qname]
+            for qname in self._name_index.get(simple, [])
+            if self._functions[qname].definition_type in {"class", "schema"}
+        ]
+        if not candidates:
+            return None
+        return self._follow_attr_chain(candidates[0].qualified_name, attr_parts)
+
+    def _resolve_by_structural_typing(
+        self,
+        method_name: str,
+        caller: FunctionDef,
+    ) -> FunctionDef | None:
+        """Last-resort resolution: find classes that define this method.
+
+        If exactly one project class has a method with this name, resolve to it.
+        If multiple, prefer same-module / same-package.
+        Excludes schema/data classes (Pydantic models) — they rarely have
+        business logic methods that are the target of dynamic dispatch.
+        """
+        candidates = self._name_index.get(method_name, [])
+        if not candidates:
+            return None
+
+        # Filter to actual class methods (not standalone functions)
+        class_methods = [
+            self._functions[qname] for qname in candidates
+            if self._functions[qname].class_name
+            and self._functions[qname].definition_type not in ("class", "schema")
+        ]
+        if not class_methods:
+            return None
+
+        # Exclude methods on schema/data classes
+        class_methods = [
+            f for f in class_methods
+            if not any(
+                self._functions.get(f.class_qname, FunctionDef(
+                    name="", qualified_name="", file_path="", line_start=0, line_end=0
+                )).definition_type == "schema"
+                for _ in [None]  # just to make the comprehension work
+            )
+        ]
+
+        # Single match — strong signal
+        if len(class_methods) == 1:
+            return class_methods[0]
+
+        # Multiple: prefer same file
+        if caller.file_path:
+            same_file = [f for f in class_methods if f.file_path == caller.file_path]
+            if len(same_file) == 1:
+                return same_file[0]
+
+        # Same package
+        if caller.file_path:
+            caller_pkg = os.path.dirname(caller.file_path)
+            same_pkg = [f for f in class_methods if os.path.dirname(f.file_path) == caller_pkg]
+            if len(same_pkg) == 1:
+                return same_pkg[0]
+
+        # Too ambiguous — don't guess
+        return None
+
+    def _resolve_concrete_type(
+        self,
+        type_name: str,
+        caller: FunctionDef,
+    ) -> str | None:
+        """If type_name is abstract/protocol, find the concrete implementation.
+
+        Checks:
+        1. If the type is a protocol/abstract class with a single implementation
+        2. If the caller has a Depends() default for this parameter, infer from provider
+
+        Note: uses only already-indexed data (_functions, _name_index) to avoid
+        re-entering analyze_project() during enrichment.
+        """
+        # Look up type definition from already-indexed functions (no re-entrance)
+        simple_name = self._normalize_type_name(type_name)
+        if not simple_name:
+            return None
+        candidates = [
+            self._functions[qname]
+            for qname in self._name_index.get(simple_name, [])
+            if self._functions[qname].definition_type in {"class", "schema"}
+        ]
+        if not candidates:
+            return None
+        type_def = candidates[0]
+        if not type_def.is_protocol and not type_def.is_abstract:
+            return None  # Already concrete
+
+        # Find concrete implementations from already-indexed classes
+        implementations = [
+            func for func in self._functions.values()
+            if func.definition_type == "class"
+            and self._normalize_type_name(func.name) != simple_name
+            and any(self._normalize_type_name(base) == simple_name for base in func.bases)
+        ]
+        if not implementations:
+            return None
+
+        # Single implementation — definite
+        if len(implementations) == 1:
+            return implementations[0].name
+
+        # Multiple implementations: apply disambiguation heuristics
+        # 1. Same file as caller
+        if caller.file_path:
+            same_file = [f for f in implementations if f.file_path == caller.file_path]
+            if len(same_file) == 1:
+                return same_file[0].name
+
+        # 2. Same package as caller (prefer locality)
+        if caller.file_path:
+            caller_pkg = os.path.dirname(caller.file_path)
+            same_pkg = [f for f in implementations if os.path.dirname(f.file_path) == caller_pkg]
+            if len(same_pkg) == 1:
+                return same_pkg[0].name
+
+        # 3. Check if caller has a Depends() default that returns a specific impl
+        caller_ast = self._ast_nodes.get(caller.qualified_name)
+        if caller_ast and isinstance(caller_ast, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for default in list(caller_ast.args.defaults) + list(caller_ast.args.kw_defaults):
+                if default is None:
+                    continue
+                if isinstance(default, ast.Call):
+                    func_node = default.func
+                    fname = None
+                    if isinstance(func_node, ast.Name):
+                        fname = func_node.id
+                    elif isinstance(func_node, ast.Attribute):
+                        fname = func_node.attr
+                    if fname == "Depends" and default.args:
+                        provider_name = None
+                        if isinstance(default.args[0], ast.Name):
+                            provider_name = default.args[0].id
+                        elif isinstance(default.args[0], ast.Attribute):
+                            provider_name = default.args[0].attr
+                        if provider_name:
+                            for qn in self._name_index.get(provider_name, []):
+                                provider_func = self._functions.get(qn)
+                                concrete = self._infer_provider_return_type_safe(provider_func)
+                                if concrete:
+                                    for impl in implementations:
+                                        if self._normalize_type_name(impl.name) == self._normalize_type_name(concrete):
+                                            return impl.name
+
+        # 4. Exclude test/mock implementations, prefer non-test
+        non_test = [f for f in implementations if "/test" not in f.file_path and "mock" not in f.name.lower()]
+        if len(non_test) == 1:
+            return non_test[0].name
+
+        # Still ambiguous — return first. Caller should mark result as inferred.
+        return implementations[0].name
 
     def _resolve_method_on_class(
         self,
@@ -1167,18 +1769,55 @@ class CallGraphBuilder:
         method_name: str,
         caller: FunctionDef,
     ) -> FunctionDef | None:
-        """Resolve a method on a specific class name."""
+        """Resolve a method on a specific class name, walking MRO if needed."""
         candidates = [
             self._functions[qname]
             for qname in self._name_index.get(method_name, [])
             if self._functions[qname].class_name == class_name
         ]
-        if not candidates:
-            return None
-        preferred = self._prefer_same_module(candidates, caller)
-        if preferred:
-            return preferred
-        return candidates[0]
+        if candidates:
+            preferred = self._prefer_same_module(candidates, caller)
+            return preferred or candidates[0]
+
+        # Walk MRO: check base classes for the method
+        for base_name in self._get_mro(class_name):
+            if base_name == class_name:
+                continue
+            candidates = [
+                self._functions[qname]
+                for qname in self._name_index.get(method_name, [])
+                if self._functions[qname].class_name == base_name
+            ]
+            if candidates:
+                preferred = self._prefer_same_module(candidates, caller)
+                return preferred or candidates[0]
+        return None
+
+    def _get_mro(self, class_name: str) -> list[str]:
+        """Get simplified MRO (method resolution order) for a class.
+
+        Returns list of class names in resolution order.
+        Uses C3 linearization approximation: class → bases left-to-right → their bases.
+        """
+        visited: list[str] = []
+        queue = [class_name]
+        seen: set[str] = set()
+        while queue:
+            name = queue.pop(0)
+            if name in seen:
+                continue
+            seen.add(name)
+            visited.append(name)
+            # Find class definition and get its bases
+            for qname in self._name_index.get(name, []):
+                func = self._functions.get(qname)
+                if func and func.definition_type in ("class", "schema"):
+                    for base in func.bases:
+                        base_simple = self._normalize_type_name(base)
+                        if base_simple and base_simple not in seen:
+                            queue.append(base_simple)
+                    break
+        return visited
 
     def resolve_type_definition(self, type_name: str, from_file: str | None = None) -> FunctionDef | None:
         """Resolve a class / protocol / abstract type name to its definition."""
@@ -1281,6 +1920,34 @@ class CallGraphBuilder:
                 return token
         return type_name.split(".")[-1]
 
+    @staticmethod
+    def _extract_element_type(type_name: str | None) -> str | None:
+        """Extract inner element type from collection annotations.
+
+        list[User] → User, Sequence[Item] → Item, AsyncIterator[Row] → Row,
+        Optional[list[User]] → User, Iterator[Message] → Message.
+        """
+        if not type_name:
+            return None
+        # Match patterns like list[User], List[User], Sequence[Item], etc.
+        _ITERABLE_WRAPPERS = {
+            "list", "List", "Sequence", "Iterable", "Iterator",
+            "AsyncIterator", "AsyncIterable", "Generator",
+            "Set", "set", "FrozenSet", "frozenset",
+            "Tuple", "tuple",
+        }
+        m = re.match(r"(?:Optional\[)?(\w+)\[([^\]]+)\]", type_name)
+        if m:
+            wrapper, inner = m.group(1), m.group(2)
+            if wrapper in _ITERABLE_WRAPPERS:
+                # Extract first type parameter (for dict, this is the key — skip)
+                if wrapper.lower() in ("dict",):
+                    parts = inner.split(",")
+                    if len(parts) >= 2:
+                        return parts[1].strip().split("[")[0].strip()
+                return inner.strip().split(",")[0].strip().split("[")[0].strip()
+        return None
+
     def _infer_provider_return_type(self, provider_func: FunctionDef | None) -> str | None:
         """Infer a concrete class returned by a dependency/provider function."""
         if provider_func is None:
@@ -1309,6 +1976,42 @@ class CallGraphBuilder:
                     return normalized
         return None
 
+    def _infer_provider_return_type_safe(self, provider_func: FunctionDef | None) -> str | None:
+        """Infer provider return type using only already-indexed data (no re-entrance).
+
+        Unlike _infer_provider_return_type, this does NOT call resolve_type_definition
+        or analyze_project, so it's safe to call during _enrich_logic_step_calls.
+        """
+        if provider_func is None:
+            return None
+        node = self._ast_nodes.get(provider_func.qualified_name)
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return None
+
+        # Check return annotation first
+        if provider_func.return_annotation:
+            ann = self._normalize_type_name(provider_func.return_annotation)
+            if ann and ann[0].isupper():
+                return ann
+
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Return) or child.value is None:
+                continue
+            value = child.value
+            if isinstance(value, ast.Name):
+                inferred = provider_func.local_types.get(value.id)
+                if inferred:
+                    return inferred
+            if isinstance(value, ast.Call):
+                func_name, _, _ = self._get_call_target(value)
+                if not func_name:
+                    continue
+                # Use name index directly instead of resolve_type_definition
+                normalized = self._normalize_type_name(func_name)
+                if normalized and normalized[:1].isupper():
+                    return normalized
+        return None
+
     def _extract_logic_steps(
         self,
         func_node: ast.FunctionDef | ast.AsyncFunctionDef,
@@ -1318,6 +2021,69 @@ class CallGraphBuilder:
         for stmt in func_node.body:
             steps.extend(self._flatten_stmt(stmt))
         return steps
+
+    def _infer_param_types_from_callers(self) -> None:
+        """Whole-program type inference: propagate argument types to parameters.
+
+        For each function with untyped parameters, find all call sites in the
+        project. If every caller passes the same type for a parameter position,
+        infer that type. This enables method resolution on previously untyped vars.
+        """
+        # Build reverse call map: qualified_name → [(caller_func, call_site)]
+        call_map: dict[str, list[tuple[FunctionDef, CallSite]]] = {}
+        for func in self._functions.values():
+            for call in func.calls:
+                target = self._resolve_call(call, func)
+                if target:
+                    call_map.setdefault(target.qualified_name, []).append((func, call))
+
+        for func in self._functions.values():
+            if not func.params:
+                continue
+            # Check which params lack type info
+            untyped_params = [
+                (i, p) for i, p in enumerate(func.params)
+                if p not in func.local_types
+            ]
+            if not untyped_params:
+                continue
+
+            callers = call_map.get(func.qualified_name, [])
+            if not callers:
+                continue
+
+            for param_idx, param_name in untyped_params:
+                # Collect types passed at this argument position
+                inferred_types: set[str] = set()
+                for caller_func, call_site in callers:
+                    # Find the AST call node to get the actual argument
+                    caller_ast = self._ast_nodes.get(caller_func.qualified_name)
+                    if not caller_ast:
+                        continue
+                    # Search for the call at the right line
+                    for node in ast.walk(caller_ast):
+                        if not isinstance(node, ast.Call) or node.lineno != call_site.line:
+                            continue
+                        # Adjust index: if this is a method, skip 'self' param
+                        effective_idx = param_idx
+                        if len(node.args) > effective_idx:
+                            arg_node = node.args[effective_idx]
+                            # Try to infer type of the argument
+                            if isinstance(arg_node, ast.Name):
+                                arg_type = caller_func.local_types.get(arg_node.id)
+                                if arg_type:
+                                    inferred_types.add(arg_type)
+                            elif isinstance(arg_node, ast.Call):
+                                # Constructor call: Foo()
+                                call_name, _, _ = self._get_call_target(arg_node)
+                                simple = call_name.split(".")[-1] if call_name else ""
+                                if simple and simple[0].isupper():
+                                    inferred_types.add(simple)
+                        break
+
+                # If all callers agree on the same type, propagate
+                if len(inferred_types) == 1:
+                    func.local_types[param_name] = inferred_types.pop()
 
     def _enrich_logic_step_calls(self) -> None:
         """Attach resolved call targets to each summarized logic step."""
@@ -1330,17 +2096,62 @@ class CallGraphBuilder:
                     step.metadata["call_targets"] = targets
 
     def _logic_step_call_targets(self, func: FunctionDef, step: LogicStep) -> list[dict[str, Any]]:
-        """Return resolved project call targets that belong to one logic step."""
+        """Return resolved project call targets that belong to one logic step.
+
+        Also searches nested function definitions (closures/generators) whose
+        calls overlap the step's line range — these are flattened into the
+        parent's logic_steps but not into the parent's calls list.
+        """
         step_start = step.line
         step_end = step.line_end or step.line
         targets: list[dict[str, Any]] = []
         seen: set[str] = set()
 
-        for call in func.calls:
+        # Collect all call sources: this function + any nested functions within range
+        all_calls: list[tuple[CallSite, FunctionDef]] = [
+            (call, func) for call in func.calls
+        ]
+        # Check nested functions whose body overlaps the step range
+        prefix = func.qualified_name + "."
+        for qname, nested in self._functions.items():
+            if not qname.startswith(prefix):
+                continue
+            if nested.line_start and nested.line_end:
+                if nested.line_start > step_end or nested.line_end < step_start:
+                    continue
+            for call in nested.calls:
+                all_calls.append((call, nested))
+
+        # Also: if the step calls a nested function of the parent,
+        # include that nested function's own call targets transitively.
+        called_nested: list[FunctionDef] = []
+        for call, owner in all_calls:
             if call.line < step_start or call.line > step_end:
                 continue
-            target = self._resolve_call(call, func)
-            if target is None or target.definition_type == "class":
+            # Check if this call targets a nested function
+            for qname in self._name_index.get(call.func_name, []):
+                if qname.startswith(prefix):
+                    nested_func = self._functions.get(qname)
+                    if nested_func:
+                        called_nested.append(nested_func)
+
+        # Add calls FROM called nested functions (transitive)
+        for nested_func in called_nested:
+            for call in nested_func.calls:
+                all_calls.append((call, nested_func))
+
+        for call, owner in all_calls:
+            if call.line < step_start or call.line > step_end:
+                # For transitive nested calls, allow any line
+                if owner.qualified_name.startswith(prefix) and owner != func:
+                    pass  # nested function call — don't filter by parent step range
+                else:
+                    continue
+            target = self._resolve_call(call, owner)
+            if target is None or target.definition_type in ("class", "schema"):
+                continue
+            # Skip nested functions of the owner — closures, not callees
+            if target.qualified_name.startswith(owner.qualified_name + "."):
                 continue
             if target.qualified_name in seen:
                 continue
@@ -1363,12 +2174,30 @@ class CallGraphBuilder:
         try/except blocks are transparent — their body is flattened into the
         parent list so inner branches and assignments remain visible.  Each
         except handler is represented as a BRANCH step.
+
+        for/while loops emit a LOOP header step, then flatten the loop body
+        so inner branches, assignments, and calls remain visible at L4.
+
+        Nested function/generator definitions (e.g. ``async def event_generator()``)
+        are treated as transparent: their body is flattened into the parent so
+        that calls like ``supervisor.process_stream()`` inside them become visible
+        as L4 steps of the enclosing function.
         """
         _try_types = (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
         if isinstance(stmt, ast.If):
             return self._expand_if_chain(stmt)
         if isinstance(stmt, _try_types):
             return self._expand_try_block(stmt)
+        if isinstance(stmt, (ast.For, ast.AsyncFor)):
+            return self._expand_for_loop(stmt)
+        if isinstance(stmt, ast.While):
+            return self._expand_while_loop(stmt)
+        # Nested function/generator — do NOT flatten body into parent.
+        # The nested function's internals are its own scope.  If it's called
+        # inline (e.g. ``return EventSourceResponse(event_generator())``),
+        # the call will appear in the parent's call list naturally.
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return []
         step = self._logic_step_from_statement(stmt)
         return [step] if step is not None else []
 
@@ -1399,6 +2228,9 @@ class CallGraphBuilder:
 
         Each elif becomes its own node with the correct condition, so that
         raise statements inside elif bodies can be rerouted to the right node.
+        The body of each branch is flattened so nested statements (assignments,
+        calls, returns) appear as separate L4 steps rather than being buried
+        inside a summary string.
         """
         steps: list[LogicStep] = []
         current: ast.If = stmt
@@ -1417,6 +2249,7 @@ class CallGraphBuilder:
                 description = f"If `{condition}`, {body_summary}."
                 if else_summary:
                     description += f" Otherwise, {else_summary}."
+            branch_id = f"br_{current.lineno}"
             steps.append(LogicStep(
                 node_type=NodeType.BRANCH,
                 display_name=f"{keyword} {self._compact(condition)}",
@@ -1425,11 +2258,88 @@ class CallGraphBuilder:
                 line_end=line_end,
                 metadata={"condition": condition, "flow_direction": "branch"},
             ))
+            # Flatten body statements, tagging each with its branch path.
+            for child_stmt in current.body:
+                for child_step in self._flatten_stmt(child_stmt):
+                    child_step.metadata["branch_id"] = branch_id
+                    child_step.metadata["branch_path"] = "if"
+                    steps.append(child_step)
+
             if is_elif_next:
                 current = orelse[0]
                 keyword = "elif"
             else:
+                # Flatten else body, tagged as "else" path
+                for child_stmt in orelse:
+                    if not isinstance(child_stmt, ast.If):
+                        for child_step in self._flatten_stmt(child_stmt):
+                            child_step.metadata["branch_id"] = branch_id
+                            child_step.metadata["branch_path"] = "else"
+                            steps.append(child_step)
                 break
+        return steps
+
+    def _expand_for_loop(self, stmt: ast.For | ast.AsyncFor) -> list[LogicStep]:
+        """Emit a LOOP header step then flatten the loop body into child steps."""
+        is_async = isinstance(stmt, ast.AsyncFor)
+        target = ast.unparse(stmt.target) if hasattr(ast, "unparse") else self._get_name(stmt.target)
+        iterator = self._expr_summary(stmt.iter)
+        iterator_call = self._iterator_call_signature(stmt.iter)
+        prefix = "async for" if is_async else "for"
+        loop_kind = "async_for" if is_async else "for"
+
+        body_summary = self._summarize_block(stmt.body)
+        description = f"Loop over {iterator} as `{target}` and {body_summary}."
+        if is_async and iterator_call:
+            description = (
+                f"Consume async stream from `{iterator_call[0]}` as `{target}` and {body_summary}."
+            )
+
+        loop_id = f"loop_{stmt.lineno}"
+        steps: list[LogicStep] = []
+        steps.append(LogicStep(
+            node_type=NodeType.LOOP,
+            display_name=f"{prefix} {target} in {self._compact(iterator)}",
+            description=description,
+            line=stmt.lineno,
+            line_end=stmt.end_lineno,
+            metadata={
+                "target": target,
+                "iterator": iterator,
+                "iterator_call": iterator_call[0] if iterator_call else None,
+                "loop_kind": loop_kind,
+                "flow_direction": "sequential",
+            },
+        ))
+        # Flatten body into child steps
+        for child_stmt in stmt.body:
+            for child_step in self._flatten_stmt(child_stmt):
+                child_step.metadata["loop_id"] = loop_id
+                child_step.metadata["loop_path"] = "body"
+                steps.append(child_step)
+        return steps
+
+    def _expand_while_loop(self, stmt: ast.While) -> list[LogicStep]:
+        """Emit a LOOP header step then flatten the while body into child steps."""
+        condition = ast.unparse(stmt.test) if hasattr(ast, "unparse") else "condition"
+        body_summary = self._summarize_block(stmt.body)
+
+        loop_id = f"loop_{stmt.lineno}"
+        steps: list[LogicStep] = []
+        steps.append(LogicStep(
+            node_type=NodeType.LOOP,
+            display_name=f"while {self._compact(condition)}",
+            description=f"Repeat while `{condition}` and {body_summary}.",
+            line=stmt.lineno,
+            line_end=stmt.end_lineno,
+            metadata={"condition": condition, "flow_direction": "sequential"},
+        ))
+        # Flatten body into child steps
+        for child_stmt in stmt.body:
+            for child_step in self._flatten_stmt(child_stmt):
+                child_step.metadata["loop_id"] = loop_id
+                child_step.metadata["loop_path"] = "body"
+                steps.append(child_step)
         return steps
 
     def _logic_step_from_statement(self, stmt: ast.stmt) -> LogicStep | None:
@@ -1624,30 +2534,35 @@ class CallGraphBuilder:
         return NodeType.FUNCTION
 
     def _describe_function(self, func: FunctionDef) -> str:
-        """Build a human-readable description for a function node."""
+        """Build a human-readable description for a function node.
+
+        Synthesizes a behavioural summary from the function's calls,
+        parameters, return type, and error paths — so users understand
+        what a function *does* without reading the source code.
+        """
+        if func.definition_type == "class":
+            return self._describe_class(func)
+
+        if func.name == "__init__":
+            return self._describe_init(func)
+
+        # Synthesize from calls + params + return type
+        synthesized = self._synthesize_description(func)
         docstring = self._normalize_text(func.docstring)
+
+        if docstring and synthesized:
+            # Merge: docstring provides intent, synthesis adds error paths
+            # and call details that the docstring omits.
+            extra = self._extract_extra_from_synthesis(docstring, synthesized)
+            if extra:
+                return f"{docstring} {extra}"
+            return docstring
+        if synthesized:
+            return synthesized
         if docstring:
             return docstring
 
-        if func.definition_type == "class":
-            human_name = self._humanize_identifier(func.name)
-            return f"Construct {human_name}."
-
-        simple_name = func.name.lstrip("_")
-        special_cases = {
-            "__init__": f"Initialize {func.class_name or 'the object'}.",
-            "execute": "Execute a database command.",
-            "fetchone": "Fetch one row from the database result.",
-            "fetchall": "Fetch all rows from the database result.",
-            "commit": "Commit the current database transaction.",
-            "close": "Close the active database or network resource.",
-            "check_password": "Check whether the provided password is valid.",
-            "create_jwt": "Create a JWT token payload for the response.",
-            "decode_jwt": "Decode a JWT token and extract its payload.",
-        }
-        if simple_name in special_cases:
-            return special_cases[simple_name]
-
+        # Final fallback: humanized name
         human_name = self._humanize_identifier(func.name)
         node_type = self._classify_function(func)
         prefix_map = {
@@ -1660,6 +2575,280 @@ class CallGraphBuilder:
         }
         prefix = prefix_map.get(node_type, "Run step")
         return f"{prefix}: {human_name}."
+
+    def _describe_class(self, func: FunctionDef) -> str:
+        """Describe a class definition from its bases and __init__ calls."""
+        human_name = self._humanize_identifier(func.name)
+        if func.is_protocol:
+            return f"Protocol defining the contract for {human_name}."
+        if func.is_abstract:
+            return f"Abstract base class for {human_name}."
+        if func.bases:
+            base_names = ", ".join(func.bases)
+            return f"{human_name} (extends {base_names})."
+        return f"Construct {human_name}."
+
+    @staticmethod
+    def _aggregate_review_signals(func: FunctionDef) -> list[str]:
+        """Aggregate review-relevant signals from a function's call sites.
+
+        Returns a list of signal tags:
+          db_read, db_write, http_call, raises, raises_4xx, raises_5xx, auth
+        """
+        DB_WRITE_OPS = {"add", "delete", "merge", "insert", "update", "execute",
+                        "commit", "flush", "remove", "bulk_save_objects",
+                        "bulk_insert_mappings", "bulk_update_mappings"}
+        signals: set[str] = set()
+        for call in func.calls:
+            if call.is_raise:
+                signals.add("raises")
+                if call.raise_status:
+                    if 400 <= call.raise_status < 500:
+                        signals.add("raises_4xx")
+                    elif call.raise_status >= 500:
+                        signals.add("raises_5xx")
+                continue
+            if call.is_db_call:
+                op = (call.db_detail or {}).get("operation", "").lower()
+                if op in DB_WRITE_OPS:
+                    signals.add("db_write")
+                else:
+                    signals.add("db_read")
+                continue
+            if call.is_http_call:
+                signals.add("http_call")
+                continue
+        # Auth signal: function has security-related params
+        auth_hints = {"current_user", "token", "credentials", "api_key", "auth"}
+        if any(p in auth_hints for p in func.params):
+            signals.add("auth")
+        return sorted(signals) if signals else []
+
+    def _describe_init(self, func: FunctionDef) -> str:
+        """Describe __init__ by listing what it sets up."""
+        class_name = func.class_name or "the object"
+        # Check what gets constructed/stored
+        constructed = []
+        for call in func.calls:
+            target = self._resolve_call(call, func)
+            if target and target.definition_type == "class":
+                constructed.append(target.name)
+        if constructed:
+            deps = ", ".join(constructed)
+            return f"Initialize {class_name} with {deps}."
+        if func.params:
+            params = ", ".join(func.params)
+            return f"Initialize {class_name} from ({params})."
+        return f"Initialize {class_name}."
+
+    def _synthesize_description(self, func: FunctionDef) -> str:
+        """Build a description by combining call semantics, errors, and return info."""
+        parts: list[str] = []
+
+        # 1. Collect behavioural phrases from calls
+        db_actions: list[str] = []
+        http_actions: list[str] = []
+        method_calls: list[str] = []
+        error_phrases: list[str] = []
+
+        for call in func.calls:
+            if call.is_raise:
+                error_phrases.append(self._describe_raise(call))
+                continue
+            if call.is_db_call:
+                db_actions.append(self._describe_db_action(call))
+                continue
+            if call.is_http_call:
+                http_actions.append(self._describe_http_action(call))
+                continue
+
+            # Regular method/function call — only include resolved project calls
+            target = self._resolve_call(call, func)
+            if target and target.definition_type != "schema":
+                label = self._describe_call_action(call, target)
+                if label:
+                    method_calls.append(label)
+
+        # 2. Assemble main action sentence
+        actions: list[str] = []
+        # Deduplicate while preserving order
+        for action_list in [method_calls, db_actions, http_actions]:
+            seen: set[str] = set()
+            for item in action_list:
+                if item not in seen:
+                    seen.add(item)
+                    actions.append(item)
+
+        if actions:
+            # Cap at 4 actions to keep it readable
+            if len(actions) > 4:
+                parts.append(", ".join(actions[:3]) + f", and {len(actions) - 3} more steps")
+            else:
+                parts.append(", ".join(actions[:-1]) + f", then {actions[-1]}" if len(actions) > 1 else actions[0])
+
+        # 2b. Fallback: if no resolved calls, summarize from logic_steps
+        if not actions and func.logic_steps:
+            steps_summary = self._summarize_logic_steps(func)
+            if steps_summary:
+                parts.append(steps_summary)
+
+        # 3. Error conditions
+        if error_phrases:
+            parts.append(". ".join(error_phrases))
+
+        # 4. Return type
+        if func.return_annotation:
+            ret = self._normalize_type_name(func.return_annotation)
+            if ret and ret not in {"None", "str", "int", "bool", "dict", "list", "float"}:
+                parts.append(f"Returns {ret}.")
+
+        if not parts:
+            return ""
+
+        result = ". ".join(parts)
+        # Capitalize first letter, ensure trailing period
+        result = result[0].upper() + result[1:] if result else result
+        if result and not result.endswith("."):
+            result += "."
+        return result
+
+    def _summarize_logic_steps(self, func: FunctionDef) -> str:
+        """Summarize logic steps into a readable behavioural description.
+
+        Used as fallback when no project-level calls could be resolved
+        (e.g. the function only talks to stdlib or unresolved attributes).
+        """
+        phrases: list[str] = []
+        for step in func.logic_steps:
+            if step.node_type == NodeType.BRANCH:
+                phrases.append(step.description)
+            elif step.node_type == NodeType.LOOP:
+                phrases.append(step.description)
+            elif step.node_type == NodeType.RETURN:
+                val = step.metadata.get("value", "")
+                if val and val != "no value":
+                    phrases.append(f"returns {self._compact(val, 50)}")
+            elif step.node_type == NodeType.ASSIGNMENT:
+                # Only include assignments that involve calls (not simple x = 1)
+                val = step.metadata.get("value", "")
+                target = step.metadata.get("target", "")
+                if "(" in val or "await" in val:
+                    phrases.append(f"computes `{target}` from {self._compact(val, 50)}")
+            elif step.node_type == NodeType.STEP:
+                val = step.metadata.get("value", "")
+                if val:
+                    phrases.append(f"executes {self._compact(val, 50)}")
+
+        if not phrases:
+            return ""
+
+        # Cap at 3 steps
+        if len(phrases) > 3:
+            return ", then ".join(phrases[:2]) + f", and {len(phrases) - 2} more steps"
+        if len(phrases) == 1:
+            return phrases[0]
+        return ", then ".join(phrases[:-1]) + f", then {phrases[-1]}"
+
+    @staticmethod
+    def _extract_extra_from_synthesis(docstring: str, synthesized: str) -> str:
+        """Extract information from synthesis that the docstring doesn't cover.
+
+        Typically this means error paths (Raises HTTP 401 if ...) and
+        specific call details that add value beyond the docstring's intent.
+        """
+        # Extract "Raises ..." phrases — these are almost never in docstrings
+        # but critical for understanding flow without reading code.
+        extras: list[str] = []
+        for sentence in synthesized.replace(". ", ".\n").split("\n"):
+            sentence = sentence.strip().rstrip(".")
+            if not sentence:
+                continue
+            if sentence.startswith("Raises "):
+                extras.append(sentence)
+
+        if not extras:
+            return ""
+        return ". ".join(extras) + "."
+
+    def _describe_raise(self, call: CallSite) -> str:
+        """Describe an error raise with its condition."""
+        status = call.raise_status
+        condition = call.branch_condition
+        if status and condition:
+            return f"Raises HTTP {status} if `{self._compact(condition, 50)}`"
+        if status:
+            return f"Raises HTTP {status}"
+        exc_name = self._humanize_identifier(call.func_name)
+        if condition:
+            return f"Raises {exc_name} if `{self._compact(condition, 50)}`"
+        return f"Raises {exc_name}"
+
+    @staticmethod
+    def _describe_db_action(call: CallSite) -> str:
+        """Describe a database call from its detail metadata."""
+        d = call.db_detail or {}
+        model = d.get("model", "")
+        op = d.get("operation", call.func_name.split(".")[-1])
+        table = d.get("table", "")
+
+        op_verbs = {
+            "query": "queries", "select": "queries", "get": "fetches",
+            "first": "fetches first", "all": "fetches all", "one": "fetches one",
+            "filter": "filters", "filter_by": "filters",
+            "add": "inserts", "insert": "inserts",
+            "update": "updates", "merge": "merges",
+            "delete": "deletes", "remove": "removes",
+            "execute": "executes query on", "commit": "commits",
+            "scalar": "fetches scalar from", "scalars": "fetches scalars from",
+            "fetchone": "fetches one row from", "fetchall": "fetches all rows from",
+        }
+        verb = op_verbs.get(op, op)
+
+        if model:
+            return f"{verb} {model} in DB"
+        if table:
+            return f'{verb} "{table}" table'
+        return f"{verb} DB"
+
+    @staticmethod
+    def _describe_http_action(call: CallSite) -> str:
+        """Describe an external HTTP call."""
+        d = call.http_detail or {}
+        method = d.get("method", "")
+        url = d.get("url", d.get("url_var", ""))
+        if method and url:
+            return f"calls external {method} {url}"
+        if method:
+            return f"calls external {method} API"
+        return "calls external API"
+
+    def _describe_call_action(self, call: CallSite, target: FunctionDef) -> str:
+        """Describe a resolved function/method call in context."""
+        # Skip private helpers and nested — they're implementation detail
+        if target.name.startswith("_") and target.name != "__init__":
+            return ""
+        # Skip constructors of the same class (self-referential)
+        if target.definition_type == "class":
+            return ""
+
+        func_label = target.name
+        if target.class_name and target.name != "__init__":
+            func_label = f"{target.class_name}.{target.name}"
+
+        node_type = self._classify_function(target)
+        # Give semantic context based on what it is
+        if node_type == NodeType.REPOSITORY:
+            return f"calls {func_label} (data access)"
+        if node_type == NodeType.SERVICE:
+            return f"calls {func_label} (service)"
+        if node_type == NodeType.DEPENDENCY:
+            return f"resolves {func_label}"
+
+        # Conditional call
+        if call.branch_condition:
+            return f"calls {func_label} if `{self._compact(call.branch_condition, 40)}`"
+
+        return f"calls {func_label}"
 
     def _summarize_block(self, statements: list[ast.stmt]) -> str:
         """Summarize a block of statements into one review-friendly phrase."""
@@ -1908,6 +3097,9 @@ class CallGraphBuilder:
             inferred_type = self._infer_assigned_type(node.value) if node.value else None
             if inferred_type:
                 self._record_assignment_type(node.target, inferred_type, local_types, self_attr_types)
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            # setattr(self, "attr_name", SomeClass()) → track as self.attr_name type
+            self._try_setattr_type(node.value, local_types, self_attr_types)
 
         for child in ast.iter_child_nodes(node):
             self._visit_type_assignments(child, local_types, self_attr_types)
@@ -1930,6 +3122,32 @@ class CallGraphBuilder:
             and target.value.id == "self"
         ):
             self_attr_types[target.attr] = inferred_type
+
+    def _try_setattr_type(
+        self,
+        call: ast.Call,
+        local_types: dict[str, str],
+        self_attr_types: dict[str, str],
+    ) -> None:
+        """Handle setattr(obj, "literal_attr", SomeClass()) for type tracking."""
+        if not isinstance(call.func, ast.Name) or call.func.id != "setattr":
+            return
+        if len(call.args) < 3:
+            return
+        obj, attr_node, value = call.args[0], call.args[1], call.args[2]
+        # attr must be string literal
+        if not (isinstance(attr_node, ast.Constant) and isinstance(attr_node.value, str)):
+            return
+        attr_name = attr_node.value
+        inferred_type = self._infer_assigned_type(value)
+        if not inferred_type:
+            return
+        # setattr(self, "attr", val) → self_attr_types
+        if isinstance(obj, ast.Name) and obj.id == "self":
+            self_attr_types[attr_name] = inferred_type
+        elif isinstance(obj, ast.Name):
+            # setattr(local_var, "attr", val) — less common but possible
+            pass  # Not tracking for now
 
     def _infer_assigned_type(self, value: ast.expr | None) -> str | None:
         """Infer a class name from constructor-style calls like `Foo(...)`."""
@@ -1996,7 +3214,15 @@ class CallGraphBuilder:
 
     @staticmethod
     def _is_db_call(node: ast.Call) -> bool:
-        """Heuristic: is this call likely a database operation?"""
+        """Heuristic: is this call likely a database operation?
+
+        Detects:
+        - session.query(User).filter_by(...).first()
+        - db.add(user), db.commit()
+        - select(User).where(...) (SQLAlchemy 2.0 style)
+        - client.table("users").insert({...}).execute() (Supabase)
+        - client.from_("users").select("*").execute() (Supabase)
+        """
         if isinstance(node.func, ast.Attribute):
             if node.func.attr in DB_PATTERNS:
                 root = _chain_root_name(node.func.value)
@@ -2006,15 +3232,33 @@ class CallGraphBuilder:
                 # if intermediate methods are DB-specific, it's a DB call.
                 if _chain_has_any(node.func.value, _DB_CHAIN_HINTS):
                     return True
+            # Supabase-style: .execute() at the end of a chain with table()/from_()
+            if node.func.attr == "execute":
+                if _chain_has_any(node.func.value, {"table", "from_", "rpc"}):
+                    return True
+        # Top-level function calls: select(User), insert(User)
+        if isinstance(node.func, ast.Name):
+            if node.func.id in ("select", "insert", "update", "delete"):
+                return True
         return False
 
     @staticmethod
     def _is_http_call(node: ast.Call) -> bool:
-        """Heuristic: is this call likely an external HTTP request?"""
+        """Heuristic: is this call likely an external HTTP request?
+
+        Detects:
+        - client.get("/api/..."), httpx.post(url)
+        - requests.request("GET", url)
+        - aiohttp session.get(url)
+        - Chain patterns: client.headers({...}).get(url)
+        """
         if isinstance(node.func, ast.Attribute):
             if node.func.attr in HTTP_PATTERNS:
                 root = _chain_root_name(node.func.value)
                 if root is not None and root.lower() in HTTP_OBJECT_HINTS:
+                    return True
+                # Chain: client.headers({}).get(url) — check deeper in chain
+                if _chain_has_any(node.func.value, HTTP_OBJECT_HINTS):
                     return True
         return False
 
@@ -2066,7 +3310,93 @@ class CallGraphBuilder:
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 detail["table"] = arg.value
 
+        # Supabase-style chains: client.table("users").insert({}).execute()
+        # Walk the chain to find table() or from_() calls with string args
+        chain_cur: ast.expr = node.func.value if isinstance(node.func, ast.Attribute) else node
+        while isinstance(chain_cur, ast.Call):
+            if isinstance(chain_cur.func, ast.Attribute):
+                method_name = chain_cur.func.attr
+                if method_name in ("table", "from_") and chain_cur.args:
+                    arg = chain_cur.args[0]
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        detail.setdefault("table", arg.value)
+                if method_name == "rpc" and chain_cur.args:
+                    arg = chain_cur.args[0]
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        detail["rpc_function"] = arg.value
+                # Supabase operations: .insert(), .upsert(), .select()
+                if method_name in ("insert", "upsert", "select", "update", "delete"):
+                    detail.setdefault("operation", method_name)
+                    # .select("col1, col2")
+                    if method_name == "select" and chain_cur.args:
+                        arg = chain_cur.args[0]
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            detail["columns"] = [c.strip() for c in arg.value.split(",")]
+                chain_cur = chain_cur.func.value
+            else:
+                break
+
         detail["chain"] = list(reversed(chain))
+
+        # Extract filter conditions from chain: .filter_by(name=x), .filter(User.id == x)
+        filters: list[dict[str, str]] = []
+        order_by: list[str] = []
+        joins: list[str] = []
+        limit_val: str | None = None
+
+        # Re-walk the chain to extract modifiers
+        cur: ast.expr = node.func.value
+        while isinstance(cur, ast.Call):
+            if isinstance(cur.func, ast.Attribute):
+                method = cur.func.attr
+                if method == "filter_by":
+                    for kw in cur.keywords:
+                        if kw.arg:
+                            filters.append({"column": kw.arg, "op": "==", "value": _safe_unparse(kw.value)})
+                elif method == "filter" or method == "where":
+                    for arg in cur.args:
+                        filters.append({"expr": _safe_unparse(arg)})
+                elif method == "order_by":
+                    for arg in cur.args:
+                        order_by.append(_safe_unparse(arg))
+                elif method == "join":
+                    for arg in cur.args:
+                        if isinstance(arg, ast.Name):
+                            joins.append(arg.id)
+                        else:
+                            joins.append(_safe_unparse(arg))
+                elif method == "limit" and cur.args:
+                    limit_val = _safe_unparse(cur.args[0])
+                cur = cur.func.value
+            else:
+                break
+
+        if filters:
+            detail["filters"] = filters
+        if order_by:
+            detail["order_by"] = order_by
+        if joins:
+            detail["joins"] = joins
+        if limit_val:
+            detail["limit"] = limit_val
+
+        # Extract raw SQL from execute(text("SELECT ...")) or execute("SELECT ...")
+        if node.func.attr == "execute" and node.args:
+            sql_arg = node.args[0]
+            raw_sql = None
+            # execute("SELECT ...")
+            if isinstance(sql_arg, ast.Constant) and isinstance(sql_arg.value, str):
+                raw_sql = sql_arg.value
+            # execute(text("SELECT ..."))
+            elif isinstance(sql_arg, ast.Call) and isinstance(sql_arg.func, ast.Name) and sql_arg.func.id == "text":
+                if sql_arg.args and isinstance(sql_arg.args[0], ast.Constant):
+                    raw_sql = sql_arg.args[0].value
+            if raw_sql and isinstance(raw_sql, str):
+                detail["raw_sql"] = raw_sql
+                parsed = _parse_simple_sql(raw_sql)
+                if parsed:
+                    detail["sql_parsed"] = parsed
+
         return detail
 
     @staticmethod

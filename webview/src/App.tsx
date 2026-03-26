@@ -17,14 +17,18 @@ import { nodeTypes } from './nodes';
 import { edgeTypes } from './edges';
 import { getVisible } from './transform/visibility';
 import { transformToRfElements } from './transform';
+import { transformExecutionGraph } from './transform/executionTransform';
+import { transformCFG } from './transform/cfgTransform';
 import { applyElkLayout } from './layout/elkLayout';
 import TopBar from './components/TopBar';
 import DetailPanel from './components/DetailPanel';
+import ReviewBrief from './components/ReviewBrief';
 import type { FlowGraph, HistoryItem } from './types/flow';
 
 import './styles/index.css';
 import './styles/nodes.css';
 import './styles/detail.css';
+import './styles/review-brief.css';
 
 function decodeFlowData(encoded: string): any {
   const binary = atob(encoded);
@@ -42,7 +46,11 @@ export default function App() {
     flowData,
     currentLevel,
     viewMode,
+    flowViewMode,
+    dataFlowDetail,
     selectedNodeId,
+    highlightedOriginIds,
+    highlightedOriginChain,
     nodeDrillState,
     isFunctionContext,
     hasTrace,
@@ -74,33 +82,44 @@ export default function App() {
   useEffect(() => {
     if (!flowData) return;
 
-    const vis = getVisible(
-      flowData,
-      currentLevel,
-      viewMode,
-      isFunctionContext,
-      hasTrace,
-      nodeDrillState,
-    );
+    let rfNodes: Node[];
+    let rfEdges: Edge[];
+    let layoutDirection: 'DOWN' | 'RIGHT';
 
-    if (vis.nodes.length === 0) {
-      setNodes([]);
-      setEdges([]);
-      return;
+    if (flowViewMode === 'cfg') {
+      // CFG mode: use ControlFlowGraph with optional trace overlay
+      const cfg = flowData.cfg;
+      if (!cfg?.blocks?.length) { setNodes([]); setEdges([]); return; }
+      const result = transformCFG(cfg, selectedNodeId, flowData, hasTrace, viewMode);
+      rfNodes = result.nodes;
+      rfEdges = result.edges;
+      layoutDirection = 'DOWN';
+    } else if (flowViewMode === 'data') {
+      // Data flow mode: use L3 summary or L4 detail
+      const eg = dataFlowDetail === 'summary' && flowData.executionGraphL3
+        ? flowData.executionGraphL3
+        : flowData.executionGraph;
+      if (!eg?.steps?.length) { setNodes([]); setEdges([]); return; }
+      const result = transformExecutionGraph(eg, selectedNodeId, flowData, hasTrace, viewMode, highlightedOriginChain);
+      rfNodes = result.nodes;
+      rfEdges = result.edges;
+      layoutDirection = 'RIGHT';
+    } else {
+      // Callstack mode: use FlowGraph with visibility
+      const vis = getVisible(flowData, currentLevel, viewMode, isFunctionContext, hasTrace, nodeDrillState);
+      if (vis.nodes.length === 0) { setNodes([]); setEdges([]); return; }
+      const result = transformToRfElements(vis, nodeDrillState, hasTrace, selectedNodeId, isFunctionContext);
+      rfNodes = result.nodes;
+      rfEdges = result.edges;
+      layoutDirection = 'DOWN';
     }
 
-    const { nodes: rfNodes, edges: rfEdges } = transformToRfElements(
-      vis,
-      nodeDrillState,
-      hasTrace,
-      selectedNodeId,
-      isFunctionContext,
-    );
+    if (rfNodes.length === 0) { setNodes([]); setEdges([]); return; }
 
     // Run layout
     if (!layoutRunning.current) {
       layoutRunning.current = true;
-      applyElkLayout(rfNodes, rfEdges)
+      applyElkLayout(rfNodes, rfEdges, layoutDirection)
         .then(({ nodes: laid }) => {
           setNodes(laid as Node[]);
           setEdges(rfEdges);
@@ -115,17 +134,22 @@ export default function App() {
           layoutRunning.current = false;
         });
     }
-  }, [flowData, currentLevel, viewMode, nodeDrillState, isFunctionContext, hasTrace]);
+  }, [flowData, currentLevel, viewMode, flowViewMode, dataFlowDetail, nodeDrillState, isFunctionContext, hasTrace, selectedNodeId, highlightedOriginChain]);
 
-  // Update selection highlight without re-layout
+  // Update selection + origin highlight without re-layout
+  const originSet = useMemo(() => new Set(highlightedOriginIds), [highlightedOriginIds]);
   useEffect(() => {
     setNodes((prev) =>
       prev.map((n) => ({
         ...n,
-        data: { ...n.data, isSelected: n.id === selectedNodeId },
+        data: {
+          ...n.data,
+          isSelected: n.id === selectedNodeId,
+          isOriginHighlight: originSet.has(n.id),
+        },
       })),
     );
-  }, [selectedNodeId, setNodes]);
+  }, [selectedNodeId, originSet, setNodes]);
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_event, node) => {
@@ -133,12 +157,12 @@ export default function App() {
       const isNewSelection = prevSelected !== node.id;
       selectNode(node.id);
 
-      // Advance drill state
-      if (flowData?.nodes[node.id]) {
+      // Advance drill state (only for FlowGraph nodes, not execution steps)
+      if (flowViewMode === 'callstack' && flowData?.nodes[node.id]) {
         advanceDrill(flowData.nodes[node.id], isNewSelection);
       }
     },
-    [selectNode, advanceDrill, flowData, selectedNodeId],
+    [selectNode, advanceDrill, flowData, selectedNodeId, flowViewMode],
   );
 
   const onPaneClick = useCallback(() => {
@@ -152,6 +176,11 @@ export default function App() {
     <div id="app">
       <TopBar />
       <div className="main">
+        {flowViewMode === 'brief' ? (
+          <div className="canvas-wrap" style={{ overflow: 'auto' }}>
+            <ReviewBrief />
+          </div>
+        ) : (
         <div className="canvas-wrap">
           {nodes.length === 0 && flowData ? (
             <div style={{ padding: 40, opacity: 0.5, textAlign: 'center' }}>
@@ -186,7 +215,8 @@ export default function App() {
             </ReactFlow>
           )}
         </div>
-        <DetailPanel />
+        )}
+        {flowViewMode !== 'brief' && <DetailPanel />}
       </div>
     </div>
   );

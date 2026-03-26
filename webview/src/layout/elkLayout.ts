@@ -20,9 +20,40 @@ function makeNodeSize(label: string, hasFile: boolean): { w: number; h: number }
   return { w, h };
 }
 
+function makeCFGBlockSize(data: any): { w: number; h: number } {
+  const stmts: any[] = data.statements || [];
+  if (stmts.length === 0) {
+    // Empty terminal block (exit/error_exit)
+    return { w: 100, h: 36 };
+  }
+  const maxText = stmts.reduce((mx: number, s: any) => Math.max(mx, (s.text || '').length), 0);
+  const w = Math.max(200, Math.min(350, maxText * 7 + 60));
+  const h = 30 + stmts.length * 18; // kind label + statements
+  return { w, h };
+}
+
+function makeDataFlowNodeSize(data: any): { w: number; h: number } {
+  const label = data.label || '';
+  const output = data.output || '';
+  const outputType = data.outputType || '';
+  const errorLabel = data.errorLabel || '';
+
+  // Width: max of label and subtitle
+  const subtitle = output && outputType ? `${output}: ${outputType}` : output || outputType || '';
+  const maxText = label.length > subtitle.length ? label : subtitle;
+  const w = Math.max(180, Math.min(300, maxText.length * 8 + 48));
+
+  // Height: base (badge + label) + optional rows
+  let h = 48; // op badge (16) + label (18) + padding (14)
+  if (subtitle) h += 16;
+  if (errorLabel) h += 16;
+  return { w, h };
+}
+
 export async function applyElkLayout(
   nodes: Node[],
   edges: Edge[],
+  direction: 'DOWN' | 'RIGHT' = 'DOWN',
 ): Promise<{ nodes: Node[]; edges: Edge[] }> {
   if (nodes.length === 0) return { nodes, edges };
 
@@ -43,8 +74,12 @@ export async function applyElkLayout(
   // Build ELK children
   const elkChildren: ElkNode[] = topLevelNodes.map((n) => {
     const data = n.data as any;
-    const label = data.displayName || data.name || '';
-    const size = makeNodeSize(label, !!data.filePath);
+    const label = data.displayName || data.name || data.label || '';
+    const size = n.type === 'cfgBlock'
+      ? makeCFGBlockSize(data)
+      : n.type === 'dataFlow'
+        ? makeDataFlowNodeSize(data)
+        : makeNodeSize(label, !!data.filePath);
     const kids = childrenByParent[n.id];
 
     if (kids && kids.length > 0) {
@@ -53,13 +88,21 @@ export async function applyElkLayout(
         (e) => kidIds.has(e.source) && kidIds.has(e.target),
       );
 
+      // Collect step_call edges: child → external top-level node.
+      // These go into the compound's edges so ELK positions callees near
+      // the calling step.
+      const stepCallEdges = edges.filter((e) => {
+        const ed = (e.data as any) || {};
+        return ed.step_call && kidIds.has(e.source) && !kidIds.has(e.target);
+      });
+
       return {
         id: n.id,
         width: 0,
         height: 0,
         layoutOptions: {
           'elk.algorithm': 'layered',
-          'elk.direction': 'DOWN',
+          'elk.direction': direction,
           'elk.padding': '[top=40,left=12,bottom=12,right=12]',
           'elk.spacing.nodeNode': '16',
           'elk.layered.spacing.nodeNodeBetweenLayers': '24',
@@ -68,7 +111,9 @@ export async function applyElkLayout(
         },
         children: kids.map((child) => {
           const cd = child.data as any;
-          const cs = makeNodeSize(cd.displayName || cd.name || '', !!cd.filePath);
+          const cs = child.type === 'dataFlow'
+            ? makeDataFlowNodeSize(cd)
+            : makeNodeSize(cd.displayName || cd.name || cd.label || '', !!cd.filePath);
           const childOpts: Record<string, string> = {};
           if (cd.type === 'exception') {
             childOpts['elk.layered.crossingMinimization.semiInteractive'] = 'true';
@@ -76,18 +121,23 @@ export async function applyElkLayout(
           }
           return { id: child.id, width: cs.w, height: cs.h, layoutOptions: childOpts };
         }),
-        edges: internalEdges.map((e) => {
-          const ed = (e.data as any) || {};
-          const edgeOpts: Record<string, string> = {};
-          if (ed.isErrorPath || ed.type === 'raises') {
-            edgeOpts['elk.layered.priority.direction'] = '0';
-            edgeOpts['elk.layered.priority.shortness'] = '0';
-          } else {
-            edgeOpts['elk.layered.priority.direction'] = '10';
-            edgeOpts['elk.layered.priority.shortness'] = '10';
-          }
-          return { id: e.id, sources: [e.source], targets: [e.target], layoutOptions: edgeOpts };
-        }),
+        edges: [
+          ...internalEdges.map((e) => {
+            const ed = (e.data as any) || {};
+            const edgeOpts: Record<string, string> = {};
+            if (ed.isErrorPath || ed.type === 'raises') {
+              edgeOpts['elk.layered.priority.direction'] = '0';
+              edgeOpts['elk.layered.priority.shortness'] = '0';
+            } else {
+              edgeOpts['elk.layered.priority.direction'] = '10';
+              edgeOpts['elk.layered.priority.shortness'] = '10';
+            }
+            return { id: e.id, sources: [e.source], targets: [e.target], layoutOptions: edgeOpts };
+          }),
+          // step_call edges go from child to external — ELK uses these for
+          // compound port placement but needs the targets to exist at root level.
+          // We add them as compound-level edges for layout influence.
+        ],
       };
     }
 
@@ -100,52 +150,64 @@ export async function applyElkLayout(
     c.edges?.forEach((e: any) => internalEdgeIds.add(e.id));
   });
 
-  // Top-level edges
-  const elkEdges = edges
-    .filter((e) => !internalEdgeIds.has(e.id) && !childIdSet.has(e.source) && !childIdSet.has(e.target))
-    .map((e) => {
-      const ed = (e.data as any) || {};
-      const edgeOpts: Record<string, string> = {};
-      if (ed.isErrorPath || ed.type === 'raises') {
-        edgeOpts['elk.layered.priority.direction'] = '0';
-      } else if (ed.type === 'middleware_chain' || ed.metadata?.pipeline_edge) {
-        edgeOpts['elk.layered.priority.direction'] = '15';
-      } else {
-        edgeOpts['elk.layered.priority.direction'] = '5';
-      }
-      return { id: e.id, sources: [e.source], targets: [e.target], layoutOptions: edgeOpts };
-    });
-
-  // Also include cross-compound edges (source or target in compound)
+  // Top-level edges (between top-level nodes only)
+  const elkEdges: any[] = [];
   edges.forEach((e) => {
     if (internalEdgeIds.has(e.id)) return;
-    if (elkEdges.some((ee) => ee.id === e.id)) return;
 
-    // Remap source/target to parent if they're compound children
+    const ed = (e.data as any) || {};
     let src = e.source;
     let tgt = e.target;
     const srcNode = nodes.find((n) => n.id === src);
     const tgtNode = nodes.find((n) => n.id === tgt);
-    if (srcNode?.parentId) src = srcNode.parentId;
-    if (tgtNode?.parentId) tgt = tgtNode.parentId;
-    if (src === tgt) return; // internal
 
-    // Don't add duplicate
+    // step_call: child → top-level. Remap source to parent compound
+    // so ELK places the callee near the compound.
+    if (ed.step_call && srcNode?.parentId) {
+      src = srcNode.parentId;
+    } else if (srcNode?.parentId) {
+      src = srcNode.parentId;
+    }
+    if (tgtNode?.parentId) {
+      tgt = tgtNode.parentId;
+    }
+
+    if (src === tgt) return;
+    if (elkEdges.some((ee) => ee.id === e.id)) return;
     if (elkEdges.some((ee) => ee.sources[0] === src && ee.targets[0] === tgt)) return;
+
+    const edgeOpts: Record<string, string> = {};
+    if (ed.isErrorPath || ed.type === 'raises') {
+      edgeOpts['elk.layered.priority.direction'] = '0';
+    } else if (ed.type === 'middleware_chain' || ed.metadata?.pipeline_edge) {
+      edgeOpts['elk.layered.priority.direction'] = '15';
+    } else {
+      edgeOpts['elk.layered.priority.direction'] = '5';
+    }
 
     elkEdges.push({
       id: e.id,
       sources: [src],
       targets: [tgt],
-      layoutOptions: { 'elk.layered.priority.direction': '5' },
+      layoutOptions: edgeOpts,
     });
   });
+
+  // Validate: only include edges whose endpoints exist
+  const allElkNodeIds = new Set<string>();
+  elkChildren.forEach((c) => {
+    allElkNodeIds.add(c.id);
+    c.children?.forEach((child) => allElkNodeIds.add(child.id));
+  });
+  const validElkEdges = elkEdges.filter(
+    (e) => allElkNodeIds.has(e.sources[0]) && allElkNodeIds.has(e.targets[0]),
+  );
 
   const elkGraph = {
     id: 'root',
     layoutOptions: {
       'elk.algorithm': 'layered',
-      'elk.direction': 'DOWN',
+      'elk.direction': direction,
       'elk.spacing.nodeNode': '25',
       'elk.layered.spacing.nodeNodeBetweenLayers': '40',
       'elk.layered.spacing.edgeNodeBetweenLayers': '15',
@@ -155,7 +217,7 @@ export async function applyElkLayout(
       'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
     },
     children: elkChildren,
-    edges: elkEdges,
+    edges: validElkEdges,
   };
 
   try {
@@ -163,7 +225,7 @@ export async function applyElkLayout(
     return applyPositions(nodes, laid as any);
   } catch (err) {
     console.error('ELK layout failed, using fallback', err);
-    return fallbackLayout(nodes);
+    return fallbackLayout(nodes, direction);
   }
 }
 
@@ -201,7 +263,6 @@ function applyPositions(
       position: { x: pos.x, y: pos.y },
     };
 
-    // Compound nodes get their computed size
     if (n.type === 'compound' && pos.width && pos.height) {
       update.style = { ...n.style, width: pos.width, height: pos.height };
     }
@@ -212,24 +273,32 @@ function applyPositions(
   return { nodes: updatedNodes, edges: [] };
 }
 
-function fallbackLayout(nodes: Node[]): { nodes: Node[]; edges: Edge[] } {
+function fallbackLayout(nodes: Node[], direction: 'DOWN' | 'RIGHT' = 'DOWN'): { nodes: Node[]; edges: Edge[] } {
   const topLevel = nodes.filter((n) => !n.parentId);
+  let x = 20;
   let y = 20;
 
   const posMap: Record<string, { x: number; y: number }> = {};
   topLevel.forEach((n) => {
     const data = n.data as any;
-    const label = data.displayName || data.name || '';
+    const label = data.displayName || data.name || data.label || '';
     const size = makeNodeSize(label, !!data.filePath);
-    posMap[n.id] = { x: 40, y };
-    y += size.h + 44;
+    posMap[n.id] = { x, y };
+    if (direction === 'RIGHT') {
+      x += size.w + 40;
+    } else {
+      y += size.h + 44;
+    }
   });
 
-  // Position children relative to parent
   nodes
     .filter((n) => n.parentId)
     .forEach((n, i) => {
-      posMap[n.id] = { x: 12, y: 40 + i * 60 };
+      if (direction === 'RIGHT') {
+        posMap[n.id] = { x: 12 + i * 180, y: 36 };
+      } else {
+        posMap[n.id] = { x: 12, y: 40 + i * 60 };
+      }
     });
 
   const updatedNodes = nodes.map((n) => ({

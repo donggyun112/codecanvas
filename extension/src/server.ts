@@ -331,6 +331,29 @@ export class AnalysisServer {
         }
     }
 
+    async getImpact(
+        projectPath: string,
+        opts: { diffText?: string; gitRef?: string; entryId?: string } = {},
+    ): Promise<any> {
+        if (!this.ready) { return null; }
+        try {
+            const res = await fetch(`${this.baseUrl}/impact`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_path: projectPath,
+                    diff_text: opts.diffText,
+                    git_ref: opts.gitRef,
+                    entry_id: opts.entryId,
+                }),
+            });
+            if (!res.ok) { return null; }
+            return await res.json();
+        } catch {
+            return null;
+        }
+    }
+
     stop(): void {
         this.process?.kill();
         this.process = null;

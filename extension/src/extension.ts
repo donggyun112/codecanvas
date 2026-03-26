@@ -176,15 +176,6 @@ export function activate(context: vscode.ExtensionContext) {
         }),
     );
 
-    // Auto-analyze on startup if workspace has Python files
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (workspaceFolder) {
-        vscode.workspace.findFiles('**/*.py', '**/node_modules/**', 1).then(files => {
-            if (files.length > 0) {
-                vscode.commands.executeCommand('codecanvas.analyze');
-            }
-        });
-    }
 }
 
 export function deactivate() {

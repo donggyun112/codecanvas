@@ -21,14 +21,55 @@ export default function FlowEdge({
     targetPosition,
   });
 
-  const color = (data as any)?.color || 'var(--vscode-foreground)';
-  const dashed = (data as any)?.dashed;
-  const isHit = (data as any)?.isHit;
-  const hasTrace = (data as any)?.hasTrace;
   const edgeData = data as any;
+  const baseColor = edgeData?.color || 'var(--vscode-foreground)';
+  const baseDashed = edgeData?.dashed || edgeData?.confidence === 'inferred';
+  const isHit = edgeData?.isHit;
+  const hasTrace = edgeData?.hasTrace;
+  const pathState = edgeData?.pathState || 'possible';
   const condition = edgeData?.condition;
   const edgeLabel = edgeData?.label;
   const isFunctionContext = edgeData?.isFunctionContext;
+  const isOriginTrace = edgeData?.isOriginTrace;
+
+  // 3-way path state edge styling
+  let color = baseColor;
+  let strokeWidth = 1.5;
+  let strokeOpacity = 0.5;
+  let strokeDasharray: string | undefined = baseDashed ? '6,3' : undefined;
+
+  // Origin trace edges: distinctive blue animated dashes
+  if (isOriginTrace) {
+    color = '#3498db';
+    strokeWidth = 2.5;
+    strokeOpacity = 0.85;
+    strokeDasharray = '8,4';
+  }
+
+  if (hasTrace) {
+    switch (pathState) {
+      case 'verified':
+        strokeWidth = 2.5;
+        strokeOpacity = 0.9;
+        break;
+      case 'unverified':
+        color = '#f39c12';
+        strokeWidth = 1.5;
+        strokeOpacity = 0.45;
+        strokeDasharray = '8,4';
+        break;
+      case 'runtime-only':
+        color = '#3498db';
+        strokeWidth = 1.5;
+        strokeOpacity = 0.6;
+        strokeDasharray = '3,3';
+        break;
+      default:
+        // 'possible' with trace — dimmed
+        strokeOpacity = 0.15;
+        break;
+    }
+  }
 
   let label = '';
   if (condition) {
@@ -49,9 +90,9 @@ export default function FlowEdge({
         path={edgePath}
         style={{
           stroke: color,
-          strokeWidth: isHit ? 2.5 : 1.5,
-          strokeOpacity: hasTrace ? (isHit ? 0.9 : 0.15) : 0.5,
-          strokeDasharray: dashed ? '6,3' : undefined,
+          strokeWidth,
+          strokeOpacity,
+          strokeDasharray,
         }}
         markerEnd={markerEnd}
       />

@@ -93,6 +93,70 @@ body {
   color: var(--vscode-button-foreground);
 }
 
+/* Coverage stats */
+.coverage-stats {
+  font-size: 11px;
+  margin-left: 8px;
+  opacity: 0.8;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.coverage-verified { color: #49cc90; font-weight: 600; }
+.coverage-sep { opacity: 0.4; margin: 0 1px; }
+.coverage-total { opacity: 0.6; }
+.coverage-pct { opacity: 0.5; margin-left: 3px; font-size: 10px; }
+
+/* Endpoint risk badge */
+.endpoint-risk {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: #fff;
+  margin-left: 8px;
+  letter-spacing: 0.03em;
+  cursor: help;
+}
+
+/* Review summary bar */
+.review-summary-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 11px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: rgba(255, 255, 255, 0.02);
+  align-items: center;
+}
+.flow-narrative {
+  width: 100%;
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.75;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  margin-bottom: 2px;
+}
+.review-concern {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.85;
+}
+.concern-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.review-focus {
+  opacity: 0.5;
+  margin-left: auto;
+  font-size: 10px;
+}
+
 .main { display: flex; flex: 1; overflow: hidden; }
 .canvas-wrap { flex: 1; position: relative; }
 
