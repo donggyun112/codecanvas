@@ -23,8 +23,19 @@ def _build(root: Path, method: str, path: str):
 
 
 def _get_respond_steps(d):
-    eg = d.get("executionGraph", {})
-    return [s for s in eg.get("steps", []) if s["operation"] == "respond"]
+    """Find respond exec_l4 nodes from canonical FlowGraph (L4 detail)."""
+    out = []
+    for nid, n in d.get("nodes", {}).items():
+        if not nid.startswith("exec:") or n.get("kind") != "exec_l4":
+            continue
+        m = n.get("metadata", {})
+        if m.get("operation") == "respond":
+            out.append({
+                "label": n.get("name"),
+                "operation": m.get("operation"),
+                "metadata": m,
+            })
+    return out
 
 
 class TestResponseOriginBasic:

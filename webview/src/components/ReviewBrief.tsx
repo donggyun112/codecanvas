@@ -14,68 +14,64 @@ export default function ReviewBrief() {
   const focusAreas: any[] = review.focusAreas || [];
   const riskScore = meta.risk_score;
   const riskLevel = meta.risk_level;
-  const eg = flowData.executionGraph;
-  const cfg = flowData.cfg;
+  // Project canonical nodes once for all review-brief sections.
+  // Use L4 detail (kind=exec_l4) so per-step "why"/db_query/response_origins
+  // remain available, since merge_to_l3 may collapse them.
+  const allNodes = Object.values(flowData.nodes);
+  const cfgBlocks = allNodes.filter((n) => n.kind === 'cfg_block');
+  const execSteps = allNodes.filter((n) => n.kind === 'exec_l4');
 
-  // Collect branch explanations from CFG
+  // Collect branch explanations from CFG blocks
   const branches: { condition: string; explanation: string; line?: number }[] = [];
-  if (cfg?.blocks) {
-    for (const block of cfg.blocks) {
-      const expl = block.metadata?.branch_explanation;
-      if (expl) {
-        const stmt = block.statements?.find((s: any) => s.kind === 'branch_test');
-        branches.push({
-          condition: stmt?.text || '',
-          explanation: expl,
-          line: stmt?.line,
-        });
-      }
-    }
+  for (const block of cfgBlocks) {
+    const expl = block.metadata?.branch_explanation;
+    if (!expl) continue;
+    const statements = (block.metadata?.statements as any[]) || [];
+    const stmt = statements.find((s: any) => s.kind === 'branch_test');
+    branches.push({
+      condition: stmt?.text || '',
+      explanation: expl,
+      line: stmt?.line,
+    });
   }
 
   // Collect step annotations with "why"
   const keySteps: { op: string; label: string; why: string; filePath?: string; line?: number }[] = [];
-  if (eg?.steps) {
-    for (const step of eg.steps) {
-      const why = step.metadata?.why;
-      if (why && step.operation !== 'pipeline') {
-        keySteps.push({
-          op: step.operation,
-          label: step.label,
-          why,
-          filePath: step.filePath ?? undefined,
-          line: step.lineStart ?? undefined,
-        });
-      }
+  for (const step of execSteps) {
+    const why = step.metadata?.why;
+    const op = (step.metadata?.operation as string) || '';
+    if (why && op !== 'pipeline') {
+      keySteps.push({
+        op,
+        label: step.name,
+        why,
+        filePath: step.filePath ?? undefined,
+        line: step.lineStart ?? undefined,
+      });
     }
   }
 
   // Collect response origins from respond steps
   const origins: { label: string; origins: any[] }[] = [];
-  if (eg?.steps) {
-    for (const step of eg.steps) {
-      const ro = step.metadata?.response_origins;
-      if (ro?.length && step.operation === 'respond') {
-        origins.push({ label: step.label, origins: ro });
-      }
+  for (const step of execSteps) {
+    const ro = step.metadata?.response_origins;
+    if (ro?.length && step.metadata?.operation === 'respond') {
+      origins.push({ label: step.name, origins: ro });
     }
   }
 
   // Error paths
-  const errorSteps = eg?.steps?.filter((s: any) => s.operation === 'error') || [];
+  const errorSteps = execSteps.filter((s) => s.metadata?.operation === 'error');
 
   // Data access summary: collect all DB queries across steps
   const dataAccess: { label: string; model: string; operation: string; filters: string[] }[] = [];
-  if (eg?.steps) {
-    for (const step of eg.steps) {
-      const dbq = step.metadata?.db_query;
-      if (dbq) {
-        const model = dbq.model || dbq.table || '';
-        const op = dbq.operation || '';
-        const filters = (dbq.filters || []).map((f: any) => f.column || f.expr || '').filter(Boolean);
-        dataAccess.push({ label: step.label, model, operation: op, filters });
-      }
-    }
+  for (const step of execSteps) {
+    const dbq = step.metadata?.db_query;
+    if (!dbq) continue;
+    const model = dbq.model || dbq.table || '';
+    const op = dbq.operation || '';
+    const filters = (dbq.filters || []).map((f: any) => f.column || f.expr || '').filter(Boolean);
+    dataAccess.push({ label: step.name, model, operation: op, filters });
   }
 
   const severityColor: Record<string, string> = {
@@ -154,9 +150,9 @@ export default function ReviewBrief() {
       {errorSteps.length > 0 && (
         <div className="rb-section">
           <div className="rb-section-title">Error Paths</div>
-          {errorSteps.map((s: any, i: number) => (
+          {errorSteps.map((s, i) => (
             <div key={i} className="rb-error">
-              <span className="rb-error-label">{s.label}</span>
+              <span className="rb-error-label">{s.name}</span>
               {s.metadata?.why && <span className="rb-error-why"> — {s.metadata.why}</span>}
             </div>
           ))}

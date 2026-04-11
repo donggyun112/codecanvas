@@ -6,7 +6,10 @@ to produce a multi-level flow graph.
 from __future__ import annotations
 
 import ast
+import json
 import os
+from pathlib import Path
+from typing import Any
 
 from codecanvas.graph.models import (
     Confidence,
@@ -50,12 +53,70 @@ class FlowGraphBuilder:
     def get_entrypoints(self) -> list[EntryPoint]:
         """Full entrypoint scan: APIs + scripts + function fallbacks.
 
-        Triggers full project analysis. Use get_endpoints() for the
-        lightweight sidebar listing.
+        Uses a disk cache so subsequent loads of an unchanged project
+        skip re-parsing entirely. Falls back to a full scan on miss.
         """
         if self._entrypoints is None:
-            self._entrypoints = self.entrypoint_extractor.analyze()
+            self._entrypoints = self._load_entrypoint_cache()
+            if self._entrypoints is None:
+                self._entrypoints = self.entrypoint_extractor.analyze()
+                self._save_entrypoint_cache(self._entrypoints)
         return self._entrypoints
+
+    # ------------------------------------------------------------------
+    # Entrypoint disk cache
+    # ------------------------------------------------------------------
+
+    def _ep_cache_path(self) -> Path:
+        return Path(self.project_root) / ".codecanvas" / "entrypoints.json"
+
+    def _load_entrypoint_cache(self) -> list[EntryPoint] | None:
+        from codecanvas.parser.call_graph import (
+            _iter_project_python_files,
+            _files_signature,
+        )
+        cache_path = self._ep_cache_path()
+        if not cache_path.exists():
+            return None
+        try:
+            with cache_path.open("r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return None
+        sig = _files_signature(
+            _iter_project_python_files(Path(self.project_root)),
+        )
+        if payload.get("signature") != sig:
+            return None
+        try:
+            return [_ep_from_dict(d) for d in payload["entrypoints"]]
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _save_entrypoint_cache(self, eps: list[EntryPoint]) -> None:
+        from codecanvas.parser.call_graph import (
+            _iter_project_python_files,
+            _files_signature,
+        )
+        cache_path = self._ep_cache_path()
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "version": 1,
+                "signature": _files_signature(
+                    _iter_project_python_files(Path(self.project_root)),
+                ),
+                "entrypoints": [_ep_to_dict(ep) for ep in eps],
+            }
+            tmp = cache_path.with_suffix(".json.tmp")
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            tmp.replace(cache_path)
+        except OSError:
+            pass
 
     def get_endpoints(self) -> list[EntryPoint]:
         """Lightweight API-only listing for the sidebar.
@@ -2354,3 +2415,51 @@ class FlowGraphBuilder:
                     break
 
         return collapsed
+
+
+# ------------------------------------------------------------------
+# EntryPoint JSON helpers (for disk cache)
+# ------------------------------------------------------------------
+
+def _ep_to_dict(ep: EntryPoint) -> dict[str, Any]:
+    return {
+        "kind": ep.kind,
+        "id": ep.id,
+        "group": ep.group,
+        "label": ep.label,
+        "trigger": ep.trigger,
+        "method": ep.method,
+        "path": ep.path,
+        "handler_name": ep.handler_name,
+        "handler_file": ep.handler_file,
+        "handler_line": ep.handler_line,
+        "dependencies": list(ep.dependencies),
+        "tags": list(ep.tags),
+        "response_model": ep.response_model,
+        "request_body": ep.request_body,
+        "return_type": ep.return_type,
+        "description": ep.description,
+        "metadata": ep.metadata,
+    }
+
+
+def _ep_from_dict(d: dict[str, Any]) -> EntryPoint:
+    return EntryPoint(
+        kind=d.get("kind", "api"),
+        id=d.get("id", ""),
+        group=d.get("group", ""),
+        label=d.get("label", ""),
+        trigger=d.get("trigger", ""),
+        method=d.get("method", ""),
+        path=d.get("path", ""),
+        handler_name=d.get("handler_name", ""),
+        handler_file=d.get("handler_file", ""),
+        handler_line=int(d.get("handler_line", 0)),
+        dependencies=list(d.get("dependencies", [])),
+        tags=list(d.get("tags", [])),
+        response_model=d.get("response_model"),
+        request_body=d.get("request_body"),
+        return_type=d.get("return_type"),
+        description=d.get("description", ""),
+        metadata=dict(d.get("metadata", {})),
+    )

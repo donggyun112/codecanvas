@@ -1,5 +1,11 @@
-import React from 'react';
-import { BaseEdge, getBezierPath, type EdgeProps } from '@xyflow/react';
+import React, { useMemo } from 'react';
+import {
+  BaseEdge,
+  getBezierPath,
+  type EdgeProps,
+} from '@xyflow/react';
+import { getSmartEdge } from '@jalez/react-flow-smart-edge';
+import { useAbsoluteNodes } from './SmartEdgeContext';
 
 export default function FlowEdge({
   id,
@@ -12,19 +18,44 @@ export default function FlowEdge({
   data,
   markerEnd,
 }: EdgeProps) {
-  const [edgePath, labelX, labelY] = getBezierPath({
-    sourceX,
-    sourceY,
-    sourcePosition,
-    targetX,
-    targetY,
-    targetPosition,
-  });
+  // Shared across all edges — computed once per geometry change via module cache
+  const absNodes = useAbsoluteNodes();
+
+  // Memoize smart edge path — only recompute when endpoints or obstacle map change
+  const { edgePath, labelX, labelY } = useMemo(() => {
+    const smartResult = getSmartEdge({
+      sourcePosition,
+      targetPosition,
+      sourceX,
+      sourceY,
+      targetX,
+      targetY,
+      nodes: absNodes,
+      options: { nodePadding: 8, gridRatio: 10 },
+    });
+
+    if (smartResult) {
+      return {
+        edgePath: smartResult.svgPathString,
+        labelX: smartResult.edgeCenterX,
+        labelY: smartResult.edgeCenterY,
+      };
+    }
+
+    const [bp, bx, by] = getBezierPath({
+      sourceX,
+      sourceY,
+      sourcePosition,
+      targetX,
+      targetY,
+      targetPosition,
+    });
+    return { edgePath: bp, labelX: bx, labelY: by };
+  }, [absNodes, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition]);
 
   const edgeData = data as any;
   const baseColor = edgeData?.color || 'var(--vscode-foreground)';
   const baseDashed = edgeData?.dashed || edgeData?.confidence === 'inferred';
-  const isHit = edgeData?.isHit;
   const hasTrace = edgeData?.hasTrace;
   const pathState = edgeData?.pathState || 'possible';
   const condition = edgeData?.condition;
@@ -38,7 +69,6 @@ export default function FlowEdge({
   let strokeOpacity = 0.5;
   let strokeDasharray: string | undefined = baseDashed ? '6,3' : undefined;
 
-  // Origin trace edges: distinctive blue animated dashes
   if (isOriginTrace) {
     color = '#3498db';
     strokeWidth = 2.5;
@@ -65,7 +95,6 @@ export default function FlowEdge({
         strokeDasharray = '3,3';
         break;
       default:
-        // 'possible' with trace — dimmed
         strokeOpacity = 0.15;
         break;
     }

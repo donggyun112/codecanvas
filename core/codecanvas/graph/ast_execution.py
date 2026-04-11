@@ -37,7 +37,7 @@ class ASTExecutionBuilder:
         if not func:
             return self._graph
 
-        ast_node = self.cg._ast_nodes.get(func.qualified_name)
+        ast_node = self.cg.get_ast_node(func.qualified_name)
         if not ast_node or not isinstance(ast_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return self._graph
 
@@ -441,7 +441,7 @@ class ASTExecutionBuilder:
         # Nested function call: walk its body transparently (no step for the call itself)
         is_nested = callee.qualified_name.startswith(func.qualified_name + ".")
         if is_nested:
-            ast_node = self.cg._ast_nodes.get(callee.qualified_name)
+            ast_node = self.cg.get_ast_node(callee.qualified_name)
             if ast_node and isinstance(ast_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 tail = self._walk_body(
                     ast_node.body, func=callee, scope=callee.qualified_name,
@@ -692,7 +692,7 @@ class ASTExecutionBuilder:
                 if isinstance(arg, ast.Call):
                     inner_callee = self._resolve_call_in_expr(arg, func)
                     if inner_callee and inner_callee.qualified_name.startswith(func.qualified_name + "."):
-                        inner_ast = self.cg._ast_nodes.get(inner_callee.qualified_name)
+                        inner_ast = self.cg.get_ast_node(inner_callee.qualified_name)
                         if inner_ast and isinstance(inner_ast, (ast.FunctionDef, ast.AsyncFunctionDef)):
                             prev_id = self._walk_body(
                                 inner_ast.body, func=inner_callee, scope=inner_callee.qualified_name,
@@ -1052,7 +1052,7 @@ class ASTExecutionBuilder:
             return None
         self._call_stack.append(callee.qualified_name)
 
-        ast_node = self.cg._ast_nodes.get(callee.qualified_name)
+        ast_node = self.cg.get_ast_node(callee.qualified_name)
         if not ast_node or not isinstance(ast_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             self._call_stack.pop()
             return None

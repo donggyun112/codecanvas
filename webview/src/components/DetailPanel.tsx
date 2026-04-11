@@ -59,9 +59,10 @@ export default function DetailPanel() {
 
   const node = flowData?.nodes[selectedNodeId || ''];
 
-  // Check if selected is a synthetic node (*.df.*, es.*, or bb.*)
-  const isSyntheticStep = !node && selectedNodeId != null && (selectedNodeId.includes('.df.') || selectedNodeId.startsWith('es.'));
-  const isCFGBlock = !node && selectedNodeId != null && selectedNodeId.startsWith('bb.');
+  // exec_l3 / exec_l4 / cfg_block live in canonical nodes; route by kind
+  // so the generic L0–L4 detail renderer below doesn't fall through.
+  const isSyntheticStep = node?.kind === 'exec_l3' || node?.kind === 'exec_l4';
+  const isCFGBlock = node?.kind === 'cfg_block';
   const rfNode = useFlowStore((s) => s.rfNodes.find((n) => n.id === selectedNodeId));
   const dfStepData = isSyntheticStep ? (rfNode?.data as any) : null;
   const cfgBlockData = isCFGBlock ? (rfNode?.data as any) : null;
@@ -152,12 +153,27 @@ export default function DetailPanel() {
       }
     }
 
-    // Build step connections from execution graph links
-    const eg = flowData?.executionGraph;
-    const incomingLinks = eg?.links.filter((l) => l.targetStepId === selectedNodeId) || [];
-    const outgoingLinks = eg?.links.filter((l) => l.sourceStepId === selectedNodeId) || [];
+    // Step prefix matches the selected exec_step's canonical ID prefix.
+    const stepPrefix = selectedNodeId?.startsWith('exec_l3:') ? 'exec_l3:' : 'exec:';
+
+    // Build step connections from canonical data_flow edges.
+    const incomingLinks = (flowData?.edges || []).filter(
+      (e) => e.type === 'data_flow' && e.targetId === selectedNodeId,
+    );
+    const outgoingLinks = (flowData?.edges || []).filter(
+      (e) => e.type === 'data_flow' && e.sourceId === selectedNodeId,
+    );
     const stepById: Record<string, { label: string; operation: string }> = {};
-    eg?.steps.forEach((s) => { stepById[s.id] = { label: s.label, operation: s.operation }; });
+    if (flowData) {
+      Object.values(flowData.nodes).forEach((n) => {
+        if (n.kind === 'exec_l3' || n.kind === 'exec_l4') {
+          stepById[n.id] = {
+            label: n.name,
+            operation: (n.metadata?.operation as string) || '',
+          };
+        }
+      });
+    }
 
     // Resolve callee location from FlowGraph nodes
     const calleeNode = calleeFunc && flowData
@@ -273,7 +289,7 @@ export default function DetailPanel() {
                 key={origin.stepId}
                 className="nav-link"
                 style={{ fontSize: 12, marginBottom: 3, display: 'flex', alignItems: 'center', gap: 4 }}
-                onClick={() => selectNode(origin.stepId)}
+                onClick={() => selectNode(`${stepPrefix}${origin.stepId}`)}
               >
                 <span className="origin-op-badge" data-op={origin.operation}>
                   {origin.operation.toUpperCase().slice(0, 5)}
@@ -293,17 +309,19 @@ export default function DetailPanel() {
               <div style={{ marginBottom: 6 }}>
                 <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 2 }}>Incoming</div>
                 {incomingLinks.map((l) => {
-                  const src = stepById[l.sourceStepId];
+                  const src = stepById[l.sourceId];
+                  const variable = (l.metadata?.variable as string) || '';
+                  const linkKind = (l.metadata?.data_kind as string) || 'sequence';
                   return (
                     <div
                       key={l.id}
                       className="nav-link"
                       style={{ fontSize: 12, marginBottom: 2 }}
-                      onClick={() => selectNode(l.sourceStepId)}
+                      onClick={() => selectNode(l.sourceId)}
                     >
-                      {src?.label || l.sourceStepId}
-                      {l.variable && <span style={{ opacity: 0.5 }}> ({l.variable})</span>}
-                      {l.kind !== 'sequence' && <span style={{ opacity: 0.5 }}> [{l.kind}]</span>}
+                      {src?.label || l.sourceId}
+                      {variable && <span style={{ opacity: 0.5 }}> ({variable})</span>}
+                      {linkKind !== 'sequence' && <span style={{ opacity: 0.5 }}> [{linkKind}]</span>}
                     </div>
                   );
                 })}
@@ -313,17 +331,19 @@ export default function DetailPanel() {
               <div>
                 <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 2 }}>Outgoing</div>
                 {outgoingLinks.map((l) => {
-                  const tgt = stepById[l.targetStepId];
+                  const tgt = stepById[l.targetId];
+                  const variable = (l.metadata?.variable as string) || '';
+                  const linkKind = (l.metadata?.data_kind as string) || 'sequence';
                   return (
                     <div
                       key={l.id}
                       className="nav-link"
                       style={{ fontSize: 12, marginBottom: 2 }}
-                      onClick={() => selectNode(l.targetStepId)}
+                      onClick={() => selectNode(l.targetId)}
                     >
-                      {tgt?.label || l.targetStepId}
-                      {l.variable && <span style={{ opacity: 0.5 }}> ({l.variable})</span>}
-                      {l.kind !== 'sequence' && <span style={{ opacity: 0.5 }}> [{l.kind}]</span>}
+                      {tgt?.label || l.targetId}
+                      {variable && <span style={{ opacity: 0.5 }}> ({variable})</span>}
+                      {linkKind !== 'sequence' && <span style={{ opacity: 0.5 }}> [{linkKind}]</span>}
                     </div>
                   );
                 })}
@@ -336,6 +356,12 @@ export default function DetailPanel() {
   }
 
   if (!node || !flowData) {
+    return <div className="detail-panel" />;
+  }
+
+  // exec_step / cfg_block were handled above; if rfNode wasn't ready yet,
+  // render an empty panel rather than falling through to function-detail.
+  if (isSyntheticStep || isCFGBlock) {
     return <div className="detail-panel" />;
   }
 

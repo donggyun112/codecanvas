@@ -1,10 +1,39 @@
 import type { FlowGraph, FlowNodeData, FlowEdgeData } from '../types/flow';
+import { resolveKind } from '../types/flow';
+export { resolveKind };
 
-const STRUCTURAL_TYPES: Record<string, boolean> = { file: true, module: true };
+// ---------------------------------------------------------------------------
+// Projection rules per slider level
+// ---------------------------------------------------------------------------
+
+// Non-function-context (API flows): level → which kinds to show
+// L1 includes 'function' so that handler (pipeline_phase=handler) is visible;
+// the pipeline-phase filter below further narrows which functions appear.
+const CALLSTACK_PROJECTION: Record<number, Set<string>> = {
+  0: new Set(['trigger']),
+  1: new Set(['trigger', 'pipeline', 'function']),
+  2: new Set(['trigger', 'pipeline', 'function']),
+  3: new Set(['trigger', 'pipeline', 'function', 'statement']),
+};
+
+// Function-context: different semantics per level
+// L0: only context_root, L1: function+context, L2: all functions, L3: functions+statements
+const FUNC_CTX_PROJECTION: Record<number, Set<string>> = {
+  0: new Set(['function']),
+  1: new Set(['function']),
+  2: new Set(['function']),
+  3: new Set(['function', 'statement']),
+};
+
+// L0/L1 non-function-context use pipeline_phase filter (unchanged)
 const PIPELINE_PHASES: Record<number, Record<string, boolean>> = {
   0: { trigger: true, api: true, entrypoint: true },
   1: { trigger: true, api: true, entrypoint: true, middleware: true, dependency: true, handler: true, validation: true, serialization: true },
 };
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 export interface VisibleResult {
   nodes: FlowNodeData[];
@@ -15,14 +44,17 @@ export interface VisibleResult {
 /** True for class definitions that have no L4 logic children and are not
  *  protocol/abstract (DIP binding targets). These add no flow information. */
 function isDefinitionOnlyClass(n: FlowNodeData, flowData: FlowGraph): boolean {
-  if (n.level !== 3 || n.type !== 'class') return false;
+  if (resolveKind(n) !== 'function' || n.type !== 'class') return false;
   if (n.metadata?.is_protocol || n.metadata?.is_abstract) return false;
-  // Has L4 children → not definition-only
   for (const other of Object.values(flowData.nodes)) {
-    if (other.level === 4 && other.metadata?.function_id === n.id) return false;
+    if (resolveKind(other) === 'statement' && other.metadata?.function_id === n.id) return false;
   }
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// Main visibility function
+// ---------------------------------------------------------------------------
 
 export function getVisible(
   flowData: FlowGraph,
@@ -55,7 +87,7 @@ export function getVisible(
   // Find handler node ID
   let handlerNodeId: string | null = null;
   Object.values(flowData.nodes).forEach((n) => {
-    if (!handlerNodeId && n.metadata?.pipeline_phase === 'handler' && n.level === 3) {
+    if (!handlerNodeId && n.metadata?.pipeline_phase === 'handler' && resolveKind(n) === 'function') {
       handlerNodeId = n.id;
     }
   });
@@ -66,26 +98,39 @@ export function getVisible(
   const depthThreshold = level === 2 ? 1 : Infinity;
 
   function shouldShowLocalLogic(nodeId: string): boolean {
-    // At L2+, always auto-drill the handler
     if (level >= 2 && nodeId === handlerNodeId) return true;
     return (nodeDrillState[nodeId] ?? 0) >= 1;
   }
 
+  // Choose projection set
+  const projectionKinds = isFunctionContext
+    ? FUNC_CTX_PROJECTION[level] ?? FUNC_CTX_PROJECTION[3]
+    : CALLSTACK_PROJECTION[level] ?? CALLSTACK_PROJECTION[3];
   const phases = isFunctionContext ? null : PIPELINE_PHASES[level];
 
   Object.values(flowData.nodes).forEach((n) => {
-    if (STRUCTURAL_TYPES[n.type]) return;
+    const kind = resolveKind(n);
+
+    // Merged IR nodes (cfg_block, exec_step) never shown in callstack view
+    if (!projectionKinds.has(kind) && kind !== 'statement') return;
+    // Statements handled separately via drill logic below
+    if (kind === 'statement' && !projectionKinds.has('statement')) return;
+
+    // File nodes always filtered (shown as grouping, not standalone)
+    if (kind === 'file') return;
+
     if (isFunctionContext && (n.type === 'trigger' || n.type === 'entrypoint')) return;
 
     // Hide definition-only classes at L2+
     if (level >= 2 && isDefinitionOnlyClass(n, flowData)) return;
 
     if (isFunctionContext) {
+      // Function-context specific rules
       if (level === 0) {
         if (!n.metadata?.context_root) return;
       } else if (level === 1) {
-        if (n.level > 3) return;
-        if (n.level === 3) {
+        if (kind === 'statement') return;
+        if (kind === 'function') {
           const inContext =
             n.metadata?.context_root ||
             n.metadata?.upstream_distance != null ||
@@ -99,33 +144,29 @@ export function getVisible(
           }
         }
       } else if (level === 2) {
-        if (n.level > 3) return;
-      } else {
-        if (n.level > 4) return;
+        if (kind === 'statement') return;
       }
+      // level >= 3: function + statement both allowed by projection
     } else if (phases) {
       // L0/L1: pipeline phase filter
       const phase = n.metadata?.pipeline_phase;
       if (!phase || !phases[phase]) return;
     } else if (level === 2) {
-      // L2: pipeline nodes + L3 functions filtered by depth
-      if (n.level > 3) return;
-      if (n.level === 3) {
+      // L2: pipeline nodes + functions filtered by depth
+      if (kind === 'statement') return;
+      if (kind === 'function') {
         if (isUtilityNoise(n)) return;
-        // Depth filter: only show callees within threshold
         const depth = n.metadata?.downstream_distance;
         if (depth != null && depth > depthThreshold) return;
       }
     } else {
-      // L3 (Logic): all L3 functions + L4 via drill
-      if (n.level > 4) return;
-      if (n.level === 3 && isDefinitionOnlyClass(n, flowData)) return;
+      // L3 (Logic): functions + all statements pass through
+      if (isDefinitionOnlyClass(n, flowData)) return;
     }
 
     // Runtime filter (3-way path classification)
     if (hasTrace && viewMode === 'runtime' && !n.metadata?.runtime_hit) return;
     if (hasTrace && viewMode === 'static') {
-      // 'static' = unverified paths: hide verified nodes and runtime-only nodes
       if (n.metadata?.runtime_hit) return;
       if (n.confidence === 'runtime') return;
     }
@@ -134,9 +175,9 @@ export function getVisible(
     nodeMap[n.id] = n;
   });
 
-  // Add L4 children of drilled/auto-drilled functions
+  // Add statement children of drilled/auto-drilled functions
   Object.values(flowData.nodes).forEach((n) => {
-    if (n.level !== 4) return;
+    if (resolveKind(n) !== 'statement') return;
     if (!n.metadata?.function_id) return;
     if (!nodeMap[n.metadata.function_id]) return;
     if (!shouldShowLocalLogic(n.metadata.function_id)) return;
@@ -155,4 +196,3 @@ export function getVisible(
   const edges = flowData.edges.filter((e) => ids.has(e.sourceId) && ids.has(e.targetId));
   return { nodes, edges, nodeMap };
 }
-

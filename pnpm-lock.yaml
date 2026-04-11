@@ -9,10 +9,6 @@ importers:
   .: {}
 
   extension:
-    dependencies:
-      elkjs:
-        specifier: ^0.11.1
-        version: 0.11.1
     devDependencies:
       '@types/vscode':
         specifier: ^1.85.0
@@ -29,6 +25,9 @@ importers:
 
   webview:
     dependencies:
+      '@jalez/react-flow-smart-edge':
+        specifier: ^4.0.0
+        version: 4.0.0(@xyflow/react@12.10.1(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)
       '@xyflow/react':
         specifier: ^12.6.0
         version: 12.10.1(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -511,6 +510,15 @@ packages:
   '@isaacs/cliui@9.0.0':
     resolution: {integrity: sha512-AokJm4tuBHillT+FpMtxQ60n8ObyXBatq7jD2/JA9dxbDDokKQm8KMht5ibGzLVU9IJDIKK4TPKgMHEYMn3lMg==}
     engines: {node: '>=18'}
+
+  '@jalez/react-flow-smart-edge@4.0.0':
+    resolution: {integrity: sha512-6L6QS9syf8IxMEP8AtYIwc9ZaeAz+fvzFetOkbl1/fYd3vQHXjZFFI8TosZasbUMXw5dLcBSkcB5BnvGnF6V9g==}
+    engines: {node: '>=18', npm: '>=8'}
+    peerDependencies:
+      '@xyflow/react': '>=12'
+      react: '>=17'
+      react-dom: '>=17'
+      typescript: '>=4.6'
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -1172,9 +1180,6 @@ packages:
   elkjs@0.10.2:
     resolution: {integrity: sha512-Yx3ORtbAFrXelYkAy2g0eYyVY8QG0XEmGdQXmy0eithKKjbWRfl3Xe884lfkszfBF6UKyIy4LwfcZ3AZc8oxFw==}
 
-  elkjs@0.11.1:
-    resolution: {integrity: sha512-zxxR9k+rx5ktMwT/FwyLdPCrq7xN6e4VGGHH8hA01vVYKjTFik7nHOxBnAYtrgYUB1RpAiLvA1/U2YraWxyKKg==}
-
   emoji-regex@8.0.0:
     resolution: {integrity: sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A==}
 
@@ -1340,6 +1345,9 @@ packages:
   hasown@2.0.2:
     resolution: {integrity: sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ==}
     engines: {node: '>= 0.4'}
+
+  heap@0.2.5:
+    resolution: {integrity: sha512-G7HLD+WKcrOyJP5VQwYZNC3Z6FcQ7YYjEFiFoIj8PfEr73mu421o8B1N5DKUcc8K37EsJ2XXWA8DtrDz/2dReg==}
 
   hosted-git-info@4.1.0:
     resolution: {integrity: sha512-kyCuEOWjJqZuDbRHzL8V93NzQhwIB71oFWSyzVo+KPZI+pnQPPxucdkrOZvkLRnrf5URsQM+IJ09Dw29cRALIA==}
@@ -1677,6 +1685,9 @@ packages:
 
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
+
+  pathfinding@0.4.18:
+    resolution: {integrity: sha512-R0TGEQ9GRcFCDvAWlJAWC+KGJ9SLbW4c0nuZRcioVlXVTlw+F5RvXQ8SQgSqI9KXWC1ew95vgmIiyaWTlCe9Ag==}
 
   pend@1.2.0:
     resolution: {integrity: sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg==}
@@ -2556,6 +2567,14 @@ snapshots:
 
   '@isaacs/cliui@9.0.0': {}
 
+  '@jalez/react-flow-smart-edge@4.0.0(@xyflow/react@12.10.1(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)':
+    dependencies:
+      '@xyflow/react': 12.10.1(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      pathfinding: 0.4.18
+      react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
+      typescript: 5.9.3
+
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
@@ -3241,8 +3260,6 @@ snapshots:
 
   elkjs@0.10.2: {}
 
-  elkjs@0.11.1: {}
-
   emoji-regex@8.0.0: {}
 
   encoding-sniffer@0.2.1:
@@ -3462,6 +3479,8 @@ snapshots:
   hasown@2.0.2:
     dependencies:
       function-bind: 1.1.2
+
+  heap@0.2.5: {}
 
   hosted-git-info@4.1.0:
     dependencies:
@@ -3790,6 +3809,10 @@ snapshots:
   path-type@6.0.0: {}
 
   pathe@2.0.3: {}
+
+  pathfinding@0.4.18:
+    dependencies:
+      heap: 0.2.5
 
   pend@1.2.0: {}
 

@@ -56,8 +56,12 @@ class TestAllEndpoints:
         errors = []
         for ep in self.endpoints:
             d = self.flows[ep.id]
-            cfg_data = d.get("cfg", {})
-            if not cfg_data.get("blocks"):
+            # cfg_block nodes are merged into the canonical graph; presence
+            # of any block for this endpoint means we have a CFG to validate.
+            has_cfg = any(
+                n.get("kind") == "cfg_block" for n in d.get("nodes", {}).values()
+            )
+            if not has_cfg:
                 continue
             # Rebuild CFG for validation
             b = FlowGraphBuilder(str(SAMPLE))
@@ -98,8 +102,10 @@ class TestAllEndpoints:
     def test_execution_graph_reasonable(self):
         for ep in self.endpoints:
             d = self.flows[ep.id]
-            eg = d.get("executionGraph", {})
-            steps = eg.get("steps", [])
+            steps = [
+                n for nid, n in d.get("nodes", {}).items()
+                if nid.startswith("exec:") and n.get("kind") == "exec_l4"
+            ]
             assert len(steps) <= 200, f"Too many steps ({len(steps)}) in {ep.path}"
             if ep.kind == "api":
                 assert len(steps) >= 1, f"No steps for {ep.path}"
@@ -107,12 +113,13 @@ class TestAllEndpoints:
     def test_response_origin_no_cycles(self):
         for ep in self.endpoints:
             d = self.flows[ep.id]
-            eg = d.get("executionGraph", {})
-            for s in eg.get("steps", []):
-                origins = s.get("metadata", {}).get("response_origins", [])
+            for nid, n in d.get("nodes", {}).items():
+                if not nid.startswith("exec:") or n.get("kind") != "exec_l4":
+                    continue
+                origins = n.get("metadata", {}).get("response_origins", [])
                 ids = [o["stepId"] for o in origins]
                 assert len(ids) == len(set(ids)), (
-                    f"Cycle in response origins for {s['label']} in {ep.path}"
+                    f"Cycle in response origins for {n.get('name')} in {ep.path}"
                 )
 
     def test_impact_analysis_end_to_end(self):

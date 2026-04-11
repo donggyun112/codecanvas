@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { Node, Edge } from '@xyflow/react';
 import type { FlowGraph, FlowNodeData, HistoryItem } from '../types/flow';
+import { resolveKind } from '../types/flow';
 
 interface FlowState {
   flowData: FlowGraph | null;
@@ -70,7 +71,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       if (
         !handlerNodeId &&
         node.metadata?.pipeline_phase === 'handler' &&
-        node.level === 3
+        resolveKind(node) === 'function'
       ) {
         handlerNodeId = node.id;
       }
@@ -109,12 +110,22 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     const state = get();
     let originIds: string[] = [];
     let originChain: Array<{ stepId: string; variable: string; label: string; operation: string }> = [];
-    // When selecting a respond step, compute its origin chain
-    if (id && state.flowData?.executionGraph) {
-      const step = state.flowData.executionGraph.steps.find((s) => s.id === id);
-      if (step?.operation === 'respond' && step.metadata?.response_origins) {
-        const origins = step.metadata.response_origins as any[];
-        originIds = origins.map((o) => o.stepId);
+    // When selecting a respond exec_step, compute its origin chain from
+    // canonical metadata. Origins reference raw (unprefixed) step IDs that
+    // executionTransform re-prefixes for the active L3/L4 projection.
+    if (id && state.flowData?.nodes) {
+      const node = state.flowData.nodes[id];
+      const isExecStep = node?.kind === 'exec_l3' || node?.kind === 'exec_l4';
+      if (
+        isExecStep &&
+        node.metadata?.operation === 'respond' &&
+        node.metadata?.response_origins
+      ) {
+        const origins = node.metadata.response_origins as any[];
+        // Use the same prefix as the selected node so highlightedOriginIds
+        // match canonical IDs (used by isOriginHighlight in App.tsx).
+        const prefix = id.startsWith('exec_l3:') ? 'exec_l3:' : 'exec:';
+        originIds = origins.map((o) => `${prefix}${o.stepId}`);
         originChain = origins;
       }
     }
@@ -129,7 +140,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   advanceDrill: (node, isNewSelection) => {
     const state = get();
     const children = Object.values(state.flowData?.nodes ?? {}).filter(
-      (n) => n.level === 4 && n.metadata?.function_id === node.id,
+      (n) => resolveKind(n) === 'statement' && n.metadata?.function_id === node.id,
     );
     if (children.length === 0) return false;
 

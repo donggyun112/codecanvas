@@ -381,7 +381,7 @@ class CFGBuilder:
         if not func:
             return self._cfg
 
-        ast_node = self.cg._ast_nodes.get(func.qualified_name)
+        ast_node = self.cg.get_ast_node(func.qualified_name)
         if not ast_node or not isinstance(ast_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return self._cfg
 

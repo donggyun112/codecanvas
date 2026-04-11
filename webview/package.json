@@ -9,6 +9,7 @@
     "watch": "vite build --watch"
   },
   "dependencies": {
+    "@jalez/react-flow-smart-edge": "^4.0.0",
     "@xyflow/react": "^12.6.0",
     "elkjs": "^0.10.0",
     "react": "^18.3.1",
@@ -18,8 +19,8 @@
   "devDependencies": {
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
     "typescript": "^5.6.0",
-    "vite": "^6.3.0",
-    "@vitejs/plugin-react": "^4.3.0"
+    "vite": "^6.3.0"
   }
 }

@@ -11,6 +11,58 @@ from codecanvas.graph.builder import FlowGraphBuilder
 SAMPLE_DIR = os.path.join(os.path.dirname(__file__), "..", "sample-fastapi")
 
 
+def _legacy_eg(d: dict, prefix: str = "exec:") -> dict:
+    """Reconstruct legacy executionGraph view from canonical FlowGraph nodes.
+
+    Phase 2 removed the standalone `executionGraph` key from to_dict();
+    exec_l3 / exec_l4 nodes now live in the canonical nodes/edges arrays
+    with `exec:` (L4 detail) or `exec_l3:` (L3 summary) id prefixes.
+    """
+    want_kind = "exec_l3" if prefix == "exec_l3:" else "exec_l4"
+    pn = len(prefix)
+    steps = []
+    for nid, n in d.get("nodes", {}).items():
+        if not nid.startswith(prefix) or n.get("kind") != want_kind:
+            continue
+        m = n.get("metadata", {})
+        steps.append({
+            "id": nid[pn:],
+            "label": n.get("name"),
+            "operation": m.get("operation", ""),
+            "phase": m.get("phase", ""),
+            "scope": n.get("scope", ""),
+            "depth": m.get("depth", 0),
+            "inputs": m.get("inputs", []),
+            "output": m.get("output"),
+            "outputType": m.get("output_type"),
+            "branchCondition": m.get("branch_condition"),
+            "branchId": m.get("branch_id"),
+            "errorLabel": m.get("error_label"),
+            "filePath": n.get("filePath"),
+            "lineStart": n.get("lineStart"),
+            "lineEnd": n.get("lineEnd"),
+            "calleeFunction": m.get("callee_function"),
+            "sourceNodeIds": m.get("source_node_ids", []),
+            "metadata": m,
+        })
+    edge_prefix = f"{prefix.rstrip(':')}_e:"
+    links = []
+    for e in d.get("edges", []):
+        if not e["id"].startswith(edge_prefix):
+            continue
+        em = e.get("metadata", {})
+        links.append({
+            "id": e["id"],
+            "sourceStepId": e["sourceId"][pn:],
+            "targetStepId": e["targetId"][pn:],
+            "kind": em.get("data_kind", "sequence"),
+            "variable": em.get("variable", ""),
+            "label": e.get("label", ""),
+            "isErrorPath": e.get("isErrorPath", False),
+        })
+    return {"steps": steps, "links": links}
+
+
 @pytest.fixture(scope="module")
 def builder():
     b = FlowGraphBuilder(SAMPLE_DIR)
@@ -152,20 +204,21 @@ class TestDefinitionOnlyClass:
 
 class TestExecutionGraph:
     def test_execution_graph_exists(self, login_flow):
-        assert "executionGraph" in login_flow, "executionGraph missing from to_dict()"
+        eg = _legacy_eg(login_flow)
+        assert eg["steps"], "No exec_step nodes merged into canonical graph"
 
     def test_has_pipeline_and_handler_steps(self, login_flow):
-        eg = login_flow["executionGraph"]
+        eg = _legacy_eg(login_flow)
         phases = {s["phase"] for s in eg["steps"]}
         assert "trigger" in phases or "api" in phases, "No pipeline steps"
         assert "handler" in phases, "No handler steps"
 
     def test_has_links(self, login_flow):
-        eg = login_flow["executionGraph"]
+        eg = _legacy_eg(login_flow)
         assert len(eg["links"]) >= len(eg["steps"]) - 1, "Too few links"
 
     def test_no_dangling_links(self, login_flow):
-        eg = login_flow["executionGraph"]
+        eg = _legacy_eg(login_flow)
         step_ids = {s["id"] for s in eg["steps"]}
         for link in eg["links"]:
             assert link["sourceStepId"] in step_ids, f"Dangling source: {link['sourceStepId']}"
@@ -173,13 +226,13 @@ class TestExecutionGraph:
 
     def test_handler_steps_present(self, login_flow):
         """ExecutionGraph should have handler steps."""
-        eg = login_flow["executionGraph"]
+        eg = _legacy_eg(login_flow)
         handler_steps = [s for s in eg["steps"] if s["phase"] == "handler"]
         assert len(handler_steps) >= 3, f"Expected >=3 handler steps, got {len(handler_steps)}"
 
     def test_callee_depth_recursive(self, login_flow):
         """Login: handler(0) → verify_user(1) → find_by_email(2)."""
-        eg = login_flow["executionGraph"]
+        eg = _legacy_eg(login_flow)
         depths = {s["depth"] for s in eg["steps"]}
         assert 0 in depths, "No depth-0 steps"
         assert 1 in depths, "No depth-1 callee steps"
@@ -211,7 +264,7 @@ class TestBranchPathSeparation:
 
     def test_execution_graph_branch_fork(self, login_flow):
         """Branch node should have at least 1 outgoing link."""
-        eg = login_flow["executionGraph"]
+        eg = _legacy_eg(login_flow)
         link_by_src: dict[str, list] = {}
         for l in eg["links"]:
             link_by_src.setdefault(l["sourceStepId"], []).append(l)
@@ -226,7 +279,7 @@ class TestBranchMergeProvenance:
 
     def test_merge_links_not_empty(self, login_flow):
         """Post-merge step should have incoming links from branch tail(s)."""
-        eg = login_flow["executionGraph"]
+        eg = _legacy_eg(login_flow)
         link_by_tgt: dict[str, list] = {}
         for l in eg["links"]:
             link_by_tgt.setdefault(l["targetStepId"], []).append(l)

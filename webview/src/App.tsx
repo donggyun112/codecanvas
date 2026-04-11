@@ -87,20 +87,23 @@ export default function App() {
     let layoutDirection: 'DOWN' | 'RIGHT';
 
     if (flowViewMode === 'cfg') {
-      // CFG mode: use ControlFlowGraph with optional trace overlay
-      const cfg = flowData.cfg;
-      if (!cfg?.blocks?.length) { setNodes([]); setEdges([]); return; }
-      const result = transformCFG(cfg, selectedNodeId, flowData, hasTrace, viewMode);
+      // CFG mode: project cfg_block nodes from canonical FlowGraph
+      const result = transformCFG(flowData, selectedNodeId, hasTrace, viewMode);
+      if (result.nodes.length === 0) { setNodes([]); setEdges([]); return; }
       rfNodes = result.nodes;
       rfEdges = result.edges;
       layoutDirection = 'DOWN';
     } else if (flowViewMode === 'data') {
-      // Data flow mode: use L3 summary or L4 detail
-      const eg = dataFlowDetail === 'summary' && flowData.executionGraphL3
-        ? flowData.executionGraphL3
-        : flowData.executionGraph;
-      if (!eg?.steps?.length) { setNodes([]); setEdges([]); return; }
-      const result = transformExecutionGraph(eg, selectedNodeId, flowData, hasTrace, viewMode, highlightedOriginChain);
+      // Data flow mode: project exec_step nodes (L3 summary or L4 detail)
+      const result = transformExecutionGraph(
+        flowData,
+        selectedNodeId,
+        hasTrace,
+        viewMode,
+        highlightedOriginChain,
+        dataFlowDetail,
+      );
+      if (result.nodes.length === 0) { setNodes([]); setEdges([]); return; }
       rfNodes = result.nodes;
       rfEdges = result.edges;
       layoutDirection = 'RIGHT';

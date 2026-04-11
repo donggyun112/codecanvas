@@ -1,6 +1,7 @@
 import type { Node, Edge } from '@xyflow/react';
 import type { FlowNodeData, FlowEdgeData } from '../types/flow';
 import type { VisibleResult } from './visibility';
+import { resolveKind } from './visibility';
 import { computeNodePathState, computeEdgePathState } from './pathState';
 
 const EDGE_COLORS: Record<string, string | null> = {
@@ -16,7 +17,8 @@ const EDGE_COLORS: Record<string, string | null> = {
 };
 
 function nodeTypeKey(n: FlowNodeData): string {
-  if (n.level === 4) return 'logicStep';
+  const kind = resolveKind(n);
+  if (kind === 'statement') return 'logicStep';
   switch (n.type) {
     case 'trigger':
     case 'api':
@@ -46,7 +48,7 @@ export function transformToRfElements(
   const rfNodes: Node[] = [];
   const rfEdges: Edge[] = [];
 
-  // Identify L4 nodes extracted from compounds (return_detail_edge)
+  // Identify statement nodes extracted from compounds (return_detail_edge)
   const extractedReturnIds = new Set<string>();
   vis.edges.forEach((e) => {
     if (e.metadata?.return_detail_edge) {
@@ -57,10 +59,11 @@ export function transformToRfElements(
   // Classify nodes: compound children vs top-level
   const functionChildren: Record<string, FlowNodeData[]> = {};
   const topLevelNodes: FlowNodeData[] = [];
-  const l4InCompound = new Set<string>();
+  const stmtInCompound = new Set<string>();
 
   vis.nodes.forEach((n) => {
-    if (n.level === 4 && n.metadata?.function_id) {
+    const kind = resolveKind(n);
+    if (kind === 'statement' && n.metadata?.function_id) {
       const parentId = n.metadata.function_id;
       if (vis.nodeMap[parentId]) {
         if (extractedReturnIds.has(n.id)) {
@@ -69,7 +72,7 @@ export function transformToRfElements(
         }
         if (!functionChildren[parentId]) functionChildren[parentId] = [];
         functionChildren[parentId].push(n);
-        l4InCompound.add(n.id);
+        stmtInCompound.add(n.id);
         return;
       }
     }
@@ -82,7 +85,7 @@ export function transformToRfElements(
     const isCompound = kids && kids.length > 0;
     const drillable =
       Object.values(vis.nodeMap).some(
-        (child) => child.level === 4 && child.metadata?.function_id === n.id,
+        (child) => resolveKind(child) === 'statement' && child.metadata?.function_id === n.id,
       ) || (nodeDrillState[n.id] ?? 0) > 0;
 
     if (isCompound) {
@@ -152,7 +155,7 @@ export function transformToRfElements(
     });
   });
 
-  // Pre-index step_call relationships to suppress duplicate L3→L3 edges
+  // Pre-index step_call relationships to suppress duplicate function→function edges
   const stepCallCovered = new Set<string>();
   vis.edges.forEach((e) => {
     if (!e.metadata?.step_call) return;
@@ -163,18 +166,21 @@ export function transformToRfElements(
 
   // Build edges
   vis.edges.forEach((e) => {
-    // In callstack mode: skip L3→L3 if step_call covers it
+    // In callstack mode: skip function→function if step_call covers it
     if (!e.metadata?.step_call && !e.metadata?.display_only) {
       const src = vis.nodeMap[e.sourceId];
       const tgt = vis.nodeMap[e.targetId];
-      if (src?.level === 3 && tgt?.level === 3 && stepCallCovered.has(`${e.sourceId}:${e.targetId}`)) {
+      if (
+        src && tgt &&
+        resolveKind(src) === 'function' && resolveKind(tgt) === 'function' &&
+        stepCallCovered.has(`${e.sourceId}:${e.targetId}`)
+      ) {
         return;
       }
     }
 
     // Skip cross-compound edges that don't make sense at top level
     if (!internalEdgeIds.has(e.id)) {
-      // return_detail_edge from extracted return to callee: keep
       if (e.metadata?.return_detail_edge && extractedReturnIds.has(e.sourceId)) {
         // keep
       } else if (e.metadata?.in_return && e.metadata?.return_node_id && extractedReturnIds.has(e.metadata.return_node_id)) {
@@ -183,12 +189,14 @@ export function transformToRfElements(
         const srcNode = vis.nodeMap[e.sourceId];
         const tgtNode = vis.nodeMap[e.targetId];
         if (srcNode && tgtNode) {
-          // Allow step_call (L4→L3) across compound boundary
-          if (l4InCompound.has(e.sourceId) && tgtNode.level === 3) {
+          const srcKind = resolveKind(srcNode);
+          const tgtKind = resolveKind(tgtNode);
+          // Allow step_call (statement→function) across compound boundary
+          if (stmtInCompound.has(e.sourceId) && tgtKind === 'function') {
             if (!e.metadata?.step_call) return;
           } else {
-            if (srcNode.level === 3 && l4InCompound.has(e.targetId)) return;
-            if (l4InCompound.has(e.sourceId) && extractedReturnIds.has(e.targetId)) return;
+            if (srcKind === 'function' && stmtInCompound.has(e.targetId)) return;
+            if (stmtInCompound.has(e.sourceId) && extractedReturnIds.has(e.targetId)) return;
           }
         }
       }

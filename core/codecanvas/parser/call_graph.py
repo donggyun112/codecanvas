@@ -6,9 +6,11 @@ through service layers, repositories, and external calls.
 from __future__ import annotations
 
 import ast
+import json
+import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,66 @@ from codecanvas.graph.models import (
     FlowNode,
     NodeType,
 )
+
+log = logging.getLogger(__name__)
+
+# Hard cap on the number of source files we'll analyze in one pass.
+# Beyond this we refuse rather than hanging the user — they should opt
+# in via CODECANVAS_MAX_FILES if they really mean to scan a monorepo.
+MAX_FILES_DEFAULT = 5000
+MAX_FILES = int(os.environ.get("CODECANVAS_MAX_FILES", MAX_FILES_DEFAULT))
+
+# Persistent cache: per-project disk cache of analyze_project() results.
+# Stores plain-data structures only (FunctionDef et al.) as JSON;
+# AST objects are rebuilt lazily by get_ast_node() when a flow build
+# needs them. JSON (vs pickle) avoids the cache-poisoning code-execution
+# risk if a user clones a project that ships its own .codecanvas/ dir.
+CACHE_DIR_NAME = ".codecanvas"
+CACHE_FILE_NAME = "callgraph.json"
+CACHE_FORMAT_VERSION = 1  # bump when serialized layout changes
+
+
+class ProjectTooLargeError(RuntimeError):
+    """Raised when a project exceeds CODECANVAS_MAX_FILES."""
+
+    def __init__(self, count: int, limit: int):
+        super().__init__(
+            f"Project has {count} Python files; refusing to analyze "
+            f"(limit {limit}). Set CODECANVAS_MAX_FILES to override."
+        )
+        self.count = count
+        self.limit = limit
+
+
+def _iter_project_python_files(project_root: Path) -> list[str]:
+    """List analyzable .py files (same skip rules as analyze_project)."""
+    out: list[str] = []
+    for root, dirs, files in os.walk(project_root):
+        dirs[:] = [
+            d for d in dirs
+            if d not in {".venv", "venv", "__pycache__", ".git",
+                         "node_modules", "migrations"}
+        ]
+        for f in files:
+            if f.endswith(".py"):
+                out.append(os.path.join(root, f))
+    return out
+
+
+def _files_signature(file_paths: list[str]) -> list[list]:
+    """Build a fingerprint of (rel_path, mtime_ns, size) for cache invalidation.
+
+    The cache is invalidated atomically when any file is added, removed,
+    or modified. Stored as nested lists so it round-trips through JSON.
+    """
+    sig: list[list] = []
+    for fp in sorted(file_paths):
+        try:
+            st = os.stat(fp)
+        except OSError:
+            continue
+        sig.append([fp, st.st_mtime_ns, st.st_size])
+    return sig
 
 
 @dataclass
@@ -99,6 +161,155 @@ class LogicStep:
     line: int
     line_end: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# ----------------------------------------------------------------------
+# JSON serialization helpers for the disk cache.
+#
+# Why custom helpers instead of dataclasses.asdict + cls(**d)?
+#   - CallSite/ReferenceSite have `tuple` fields (`owner_parts`) that
+#     JSON round-trips as list — we restore the tuple type.
+#   - LogicStep.node_type is a NodeType enum; JSON gets the .value, we
+#     restore the enum on load.
+#   - Forward-compat: ignore unknown keys instead of crashing if a future
+#     version adds fields and an older binary loads the cache.
+# ----------------------------------------------------------------------
+
+
+def _function_to_dict(func: "FunctionDef") -> dict[str, Any]:
+    return {
+        "name": func.name,
+        "qualified_name": func.qualified_name,
+        "file_path": func.file_path,
+        "line_start": func.line_start,
+        "line_end": func.line_end,
+        "is_async": func.is_async,
+        "class_name": func.class_name,
+        "decorators": list(func.decorators),
+        "calls": [_callsite_to_dict(c) for c in func.calls],
+        "references": [_refsite_to_dict(r) for r in func.references],
+        "docstring": func.docstring,
+        "params": list(func.params),
+        "return_annotation": func.return_annotation,
+        "definition_type": func.definition_type,
+        "class_qname": func.class_qname,
+        "local_types": dict(func.local_types),
+        "logic_steps": [_logic_to_dict(ls) for ls in func.logic_steps],
+        "bases": list(func.bases),
+        "is_protocol": func.is_protocol,
+        "is_abstract": func.is_abstract,
+    }
+
+
+def _function_from_dict(d: dict[str, Any]) -> "FunctionDef":
+    return FunctionDef(
+        name=d["name"],
+        qualified_name=d["qualified_name"],
+        file_path=d["file_path"],
+        line_start=int(d["line_start"]),
+        line_end=int(d["line_end"]),
+        is_async=bool(d.get("is_async", False)),
+        class_name=d.get("class_name"),
+        decorators=list(d.get("decorators", [])),
+        calls=[_callsite_from_dict(c) for c in d.get("calls", [])],
+        references=[_refsite_from_dict(r) for r in d.get("references", [])],
+        docstring=d.get("docstring", ""),
+        params=list(d.get("params", [])),
+        return_annotation=d.get("return_annotation"),
+        definition_type=d.get("definition_type", "function"),
+        class_qname=d.get("class_qname"),
+        local_types=dict(d.get("local_types", {})),
+        logic_steps=[_logic_from_dict(ls) for ls in d.get("logic_steps", [])],
+        bases=list(d.get("bases", [])),
+        is_protocol=bool(d.get("is_protocol", False)),
+        is_abstract=bool(d.get("is_abstract", False)),
+    )
+
+
+def _callsite_to_dict(c: "CallSite") -> dict[str, Any]:
+    return {
+        "func_name": c.func_name,
+        "line": c.line,
+        "is_await": c.is_await,
+        "in_branch": c.in_branch,
+        "branch_condition": c.branch_condition,
+        "is_db_call": c.is_db_call,
+        "is_http_call": c.is_http_call,
+        "db_detail": c.db_detail,
+        "http_detail": c.http_detail,
+        "is_raise": c.is_raise,
+        "raise_status": c.raise_status,
+        "owner_parts": list(c.owner_parts),
+        "is_attribute_call": c.is_attribute_call,
+        "iteration_kind": c.iteration_kind,
+        "loop_target": c.loop_target,
+        "loop_iterator": c.loop_iterator,
+        "in_return": c.in_return,
+    }
+
+
+def _callsite_from_dict(d: dict[str, Any]) -> "CallSite":
+    return CallSite(
+        func_name=d["func_name"],
+        line=int(d["line"]),
+        is_await=bool(d.get("is_await", False)),
+        in_branch=d.get("in_branch"),
+        branch_condition=d.get("branch_condition"),
+        is_db_call=bool(d.get("is_db_call", False)),
+        is_http_call=bool(d.get("is_http_call", False)),
+        db_detail=d.get("db_detail"),
+        http_detail=d.get("http_detail"),
+        is_raise=bool(d.get("is_raise", False)),
+        raise_status=d.get("raise_status"),
+        owner_parts=tuple(d.get("owner_parts", [])),
+        is_attribute_call=bool(d.get("is_attribute_call", False)),
+        iteration_kind=d.get("iteration_kind"),
+        loop_target=d.get("loop_target"),
+        loop_iterator=d.get("loop_iterator"),
+        in_return=bool(d.get("in_return", False)),
+    )
+
+
+def _refsite_to_dict(r: "ReferenceSite") -> dict[str, Any]:
+    return {
+        "func_name": r.func_name,
+        "line": r.line,
+        "container_name": r.container_name,
+        "owner_parts": list(r.owner_parts),
+        "is_attribute_ref": r.is_attribute_ref,
+    }
+
+
+def _refsite_from_dict(d: dict[str, Any]) -> "ReferenceSite":
+    return ReferenceSite(
+        func_name=d["func_name"],
+        line=int(d["line"]),
+        container_name=d.get("container_name", ""),
+        owner_parts=tuple(d.get("owner_parts", [])),
+        is_attribute_ref=bool(d.get("is_attribute_ref", False)),
+    )
+
+
+def _logic_to_dict(ls: "LogicStep") -> dict[str, Any]:
+    return {
+        "node_type": ls.node_type.value,
+        "display_name": ls.display_name,
+        "description": ls.description,
+        "line": ls.line,
+        "line_end": ls.line_end,
+        "metadata": ls.metadata,
+    }
+
+
+def _logic_from_dict(d: dict[str, Any]) -> "LogicStep":
+    return LogicStep(
+        node_type=NodeType(d["node_type"]),
+        display_name=d.get("display_name", ""),
+        description=d.get("description", ""),
+        line=int(d["line"]),
+        line_end=d.get("line_end"),
+        metadata=dict(d.get("metadata", {})),
+    )
 
 
 # Heuristic patterns for detecting DB and external API calls
@@ -277,30 +488,181 @@ class CallGraphBuilder:
         self._caller_index: dict[str, list[CallerReference]] | None = None
         self._ast_nodes: dict[str, ast.AST] = {}  # qualified_name -> AST node
         self._analyzed = False
+        # Cache + lazy AST: tracks which files have been parsed for AST so
+        # repeated get_ast_node() lookups against the same file are cheap.
+        self._lazy_ast_files: set[str] = set()
 
     def analyze_project(self) -> None:
-        """Analyze all Python files in the project."""
+        """Analyze all Python files in the project.
+
+        Tries the on-disk cache first; falls back to a full walk + parse
+        on cache miss or signature mismatch. Always drops the heavy
+        per-module AST objects after analysis — function-level AST nodes
+        are rebuilt lazily on demand by `get_ast_node()`.
+        """
         if self._analyzed:
             return
-        for root, dirs, files in os.walk(self.project_root):
-            dirs[:] = [d for d in dirs
-                       if d not in {".venv", "venv", "__pycache__", ".git",
-                                    "node_modules", "migrations"}]
-            for f in files:
-                if f.endswith(".py"):
-                    fpath = os.path.join(root, f)
-                    self._analyze_file(fpath)
+
+        py_files = _iter_project_python_files(self.project_root)
+        if len(py_files) > MAX_FILES:
+            raise ProjectTooLargeError(len(py_files), MAX_FILES)
+
+        signature = _files_signature(py_files)
+
+        if self._load_cache(signature):
+            self._analyzed = True
+            log.info(
+                "call_graph: loaded %d functions from cache",
+                len(self._functions),
+            )
+            return
+
+        for fpath in py_files:
+            self._analyze_file(fpath)
         self._enrich_logic_step_calls()
         self._infer_param_types_from_callers()
         self._analyzed = True
+
+        # Save cache and free heavy module-level AST trees. Function-level
+        # AST nodes stay in `_ast_nodes` for the rest of this process —
+        # the lazy reparse path only kicks in after a fresh process loads
+        # from cache (where _ast_nodes starts empty).
+        self._save_cache(signature)
+        self._file_asts.clear()
+
+    # ------------------------------------------------------------------
+    # Cache I/O
+    # ------------------------------------------------------------------
+
+    def _cache_path(self) -> Path:
+        return self.project_root / CACHE_DIR_NAME / CACHE_FILE_NAME
+
+    def _load_cache(self, signature: list[list]) -> bool:
+        """Try to populate state from disk cache. Returns True on success."""
+        cache_path = self._cache_path()
+        if not cache_path.exists():
+            return False
+        try:
+            with cache_path.open("r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, json.JSONDecodeError) as e:
+            log.warning("call_graph cache unreadable, ignoring: %s", e)
+            return False
+
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("version") != CACHE_FORMAT_VERSION:
+            return False
+        if payload.get("signature") != signature:
+            return False
+
+        try:
+            self._functions = {
+                qname: _function_from_dict(d)
+                for qname, d in payload["functions"].items()
+            }
+            self._name_index = {
+                k: list(v) for k, v in payload["name_index"].items()
+            }
+            self._module_map = dict(payload["module_map"])
+            self._class_attr_types = {
+                k: dict(v) for k, v in payload["class_attr_types"].items()
+            }
+        except (KeyError, TypeError, ValueError) as e:
+            log.warning("call_graph cache malformed, discarding: %s", e)
+            self._functions.clear()
+            self._name_index.clear()
+            self._module_map.clear()
+            self._class_attr_types.clear()
+            return False
+        return True
+
+    def _save_cache(self, signature: list[list]) -> None:
+        """Persist analyzed state to disk. Best-effort; failure is non-fatal."""
+        cache_path = self._cache_path()
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "version": CACHE_FORMAT_VERSION,
+                "signature": signature,
+                "functions": {
+                    qname: _function_to_dict(func)
+                    for qname, func in self._functions.items()
+                },
+                "name_index": self._name_index,
+                "module_map": self._module_map,
+                "class_attr_types": self._class_attr_types,
+            }
+            tmp = cache_path.with_suffix(".json.tmp")
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            tmp.replace(cache_path)
+        except OSError as e:
+            log.warning("call_graph cache save failed: %s", e)
 
     def get_function(self, qualified_name: str) -> FunctionDef | None:
         """Public accessor for a function definition by qualified name."""
         return self._functions.get(qualified_name)
 
     def get_ast_node(self, qualified_name: str) -> ast.AST | None:
-        """Public accessor for a function's AST node."""
+        """Public accessor for a function's AST node.
+
+        Re-parses the containing source file on demand if the AST is not
+        already cached. This lets analyze_project() drop module-level AST
+        trees (and the cache to avoid storing them at all) without
+        breaking flow builds that walk function bodies.
+        """
+        if qualified_name in self._ast_nodes:
+            return self._ast_nodes[qualified_name]
+        func = self._functions.get(qualified_name)
+        if func is None or not func.file_path:
+            return None
+        if func.file_path not in self._lazy_ast_files:
+            self._reparse_file_for_ast(func.file_path)
         return self._ast_nodes.get(qualified_name)
+
+    def _reparse_file_for_ast(self, file_path: str) -> None:
+        """Re-parse one source file and rebind its function-level AST nodes
+        into `_ast_nodes`. Used by the lazy path after a cache load.
+        """
+        self._lazy_ast_files.add(file_path)
+        try:
+            with open(file_path, "r", encoding="utf-8") as fh:
+                source = fh.read()
+            tree = ast.parse(source, filename=file_path)
+        except (OSError, SyntaxError, UnicodeDecodeError) as e:
+            log.debug("lazy reparse failed for %s: %s", file_path, e)
+            return
+
+        # Walk the file and bind every (Async)FunctionDef body whose
+        # qualified name we already know about. Names follow the same
+        # convention used by _visit_definitions: namespace + class + name.
+        module_name = self._module_map.get(file_path)
+        if not module_name:
+            rel = os.path.relpath(file_path, self.project_root)
+            module_name = (
+                rel.replace(os.sep, ".").removesuffix(".py").removesuffix(".__init__")
+            )
+
+        def _bind(scope_qname: str, body: list[ast.stmt]) -> None:
+            for node in body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    qname = f"{scope_qname}.{node.name}"
+                    if qname in self._functions:
+                        self._ast_nodes[qname] = node
+                    # Nested defs at any depth (mirrors _visit_definitions)
+                    for child in ast.walk(node):
+                        if child is node:
+                            continue
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            nested_qname = f"{qname}.{child.name}"
+                            if nested_qname in self._functions:
+                                self._ast_nodes[nested_qname] = child
+                elif isinstance(node, ast.ClassDef):
+                    class_qname = f"{scope_qname}.{node.name}"
+                    _bind(class_qname, node.body)
+
+        _bind(module_name, tree.body)
 
     def classify_function(self, func: FunctionDef) -> NodeType:
         """Public accessor for function type classification."""
@@ -1728,7 +2090,7 @@ class CallGraphBuilder:
                 return same_pkg[0].name
 
         # 3. Check if caller has a Depends() default that returns a specific impl
-        caller_ast = self._ast_nodes.get(caller.qualified_name)
+        caller_ast = self.get_ast_node(caller.qualified_name)
         if caller_ast and isinstance(caller_ast, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for default in list(caller_ast.args.defaults) + list(caller_ast.args.kw_defaults):
                 if default is None:
@@ -1952,7 +2314,7 @@ class CallGraphBuilder:
         """Infer a concrete class returned by a dependency/provider function."""
         if provider_func is None:
             return None
-        node = self._ast_nodes.get(provider_func.qualified_name)
+        node = self.get_ast_node(provider_func.qualified_name)
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return None
 
@@ -1984,7 +2346,7 @@ class CallGraphBuilder:
         """
         if provider_func is None:
             return None
-        node = self._ast_nodes.get(provider_func.qualified_name)
+        node = self.get_ast_node(provider_func.qualified_name)
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return None
 
@@ -2057,7 +2419,7 @@ class CallGraphBuilder:
                 inferred_types: set[str] = set()
                 for caller_func, call_site in callers:
                     # Find the AST call node to get the actual argument
-                    caller_ast = self._ast_nodes.get(caller_func.qualified_name)
+                    caller_ast = self.get_ast_node(caller_func.qualified_name)
                     if not caller_ast:
                         continue
                     # Search for the call at the right line
