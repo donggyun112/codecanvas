@@ -602,6 +602,7 @@ class ASTExecutionBuilder:
             label=self._compact(condition), operation="branch", phase=phase,
             scope=scope, depth=depth, branch_condition=condition,
             file_path=func.file_path, line_start=stmt.lineno,
+            line_end=getattr(stmt, 'end_lineno', None),
             metadata=step_meta if step_meta else None,
         )
         self._link_seq(prev_id, branch_step.id)
@@ -787,6 +788,7 @@ class ASTExecutionBuilder:
             callee_function=callee.qualified_name if callee else None,
             branch_id=branch_id,
             file_path=func.file_path, line_start=stmt.lineno,
+            line_end=getattr(stmt, 'end_lineno', None),
             confidence=conf,
         )
         self._link_seq(prev_id, step.id)
