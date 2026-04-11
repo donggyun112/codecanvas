@@ -21,6 +21,20 @@ from codecanvas.graph.builder import FlowGraphBuilder
 from codecanvas.parser.call_graph import ProjectTooLargeError
 
 app = FastAPI(title="CodeCanvas Analysis Server")
+
+
+@app.exception_handler(ProjectTooLargeError)
+async def _handle_too_large(request, exc: ProjectTooLargeError):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=413,
+        content={
+            "error": "project_too_large",
+            "file_count": exc.count,
+            "limit": exc.limit,
+            "message": str(exc),
+        },
+    )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,16 +66,6 @@ def _get_or_create_builder(project_path: str) -> FlowGraphBuilder:
     return builder
 
 
-def _too_large_response(e: ProjectTooLargeError) -> HTTPException:
-    return HTTPException(
-        status_code=413,
-        detail={
-            "error": "project_too_large",
-            "file_count": e.count,
-            "limit": e.limit,
-            "message": str(e),
-        },
-    )
 
 
 class AnalyzeRequest(BaseModel):
@@ -109,12 +113,11 @@ async def analyze_project(req: AnalyzeRequest):
         raise HTTPException(404, f"Directory not found: {project_path}")
 
     builder = _get_or_create_builder(project_path)
-    try:
-        entrypoints = builder.get_entrypoints()
-    except ProjectTooLargeError as e:
-        # 413 Payload Too Large — machine-readable refusal so the webview
-        # can show a useful message instead of a generic 500.
-        raise _too_large_response(e)
+    entrypoints = builder.get_entrypoints()
+    # Ensure extractor has run its full analysis (middleware + exception
+    # handlers) even when entrypoints come from cache; these collections
+    # are only populated by extractor.analyze(), not by the cache load.
+    builder.extractor.analyze()
 
     return {
         "project_path": project_path,
@@ -173,10 +176,7 @@ async def analyze_project(req: AnalyzeRequest):
 async def build_flow(req: FlowRequest):
     """Build flow graph for a specific entrypoint."""
     builder = _get_or_create_builder(req.project_path)
-    try:
-        entrypoints = builder.get_entrypoints()
-    except ProjectTooLargeError as e:
-        raise _too_large_response(e)
+    entrypoints = builder.get_entrypoints()
     target = None
     for entry in entrypoints:
         if entry.id == req.entry_id:
@@ -200,10 +200,7 @@ async def build_flow_from_location(req: LocationFlowRequest):
     builder = _builders.get(req.project_path)
     if builder is None:
         builder = FlowGraphBuilder(req.project_path)
-        try:
-            builder.get_entrypoints()
-        except ProjectTooLargeError as e:
-            raise _too_large_response(e)
+        builder.get_entrypoints()
         _builders[req.project_path] = builder
 
     target = builder.entrypoint_extractor.locate_function_entrypoint(
