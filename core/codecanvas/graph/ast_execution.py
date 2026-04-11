@@ -1108,7 +1108,7 @@ class ASTExecutionBuilder:
         # Generate semantic explanation
         why = self._generate_why(kwargs)
         if why:
-            meta = kwargs.get("metadata", {})
+            meta = kwargs.get("metadata") or {}
             meta["why"] = why
             kwargs["metadata"] = meta
         step = ExecutionStep(id=f"es.{self._step_counter}", **kwargs)
