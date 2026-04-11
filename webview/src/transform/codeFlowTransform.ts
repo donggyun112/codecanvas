@@ -24,29 +24,57 @@ interface CodeStatement {
 // CFG cross-reference helpers
 // ---------------------------------------------------------------------------
 
-/** Map line → cfg_block node ID for fast lookup. */
-function buildLineToCfgBlock(flowData: FlowGraph): Map<number, string> {
-  const map = new Map<number, string>();
+/**
+ * Build line → CodeStatement[] index from all cfg_block nodes.
+ * Also returns line → cfg_block_id for grouping.
+ */
+function buildCfgIndex(flowData: FlowGraph): {
+  lineToStmts: Map<number, CodeStatement[]>;
+  lineToCfgBlock: Map<number, string>;
+} {
+  const lineToStmts = new Map<number, CodeStatement[]>();
+  const lineToCfgBlock = new Map<number, string>();
   for (const n of Object.values(flowData.nodes)) {
     if (n.kind !== 'cfg_block') continue;
     const stmts = (n.metadata?.statements as CodeStatement[]) ?? [];
     for (const s of stmts) {
-      map.set(s.line, n.id);
+      lineToCfgBlock.set(s.line, n.id);
+      const existing = lineToStmts.get(s.line);
+      if (existing) {
+        if (!existing.some((e) => e.text === s.text)) existing.push(s);
+      } else {
+        lineToStmts.set(s.line, [s]);
+      }
     }
   }
-  return map;
+  return { lineToStmts, lineToCfgBlock };
 }
 
-/** Collect all code statements from a cfg_block node. */
-function getCfgBlockStatements(
-  flowData: FlowGraph,
-  cfgBlockId: string,
+/**
+ * Find all code statements within a line range across ALL cfg_blocks.
+ * This handles cases where a compound statement (for/if) spans multiple
+ * CFG basic blocks.
+ */
+function collectStatementsInRange(
+  lineStart: number | null,
+  lineEnd: number | null,
+  lineToStmts: Map<number, CodeStatement[]>,
 ): CodeStatement[] {
-  const n = flowData.nodes[cfgBlockId];
-  if (!n) return [];
-  return ((n.metadata?.statements as CodeStatement[]) ?? []).sort(
-    (a, b) => a.line - b.line,
-  );
+  if (!lineStart) return [];
+  const end = lineEnd ?? lineStart;
+  const result: CodeStatement[] = [];
+  const seen = new Set<number>();
+  for (let line = lineStart; line <= end; line++) {
+    const stmts = lineToStmts.get(line);
+    if (!stmts) continue;
+    for (const s of stmts) {
+      if (!seen.has(s.line)) {
+        seen.add(s.line);
+        result.push(s);
+      }
+    }
+  }
+  return result.sort((a, b) => a.line - b.line);
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +159,7 @@ export function transformCodeFlow(
 
   if (projection.nodes.length === 0) return { nodes, edges };
 
-  const lineToCfg = buildLineToCfgBlock(flowData);
+  const { lineToStmts, lineToCfgBlock } = buildCfgIndex(flowData);
 
   // Runtime hit lookup
   const runtimeHitNodes = new Set<string>();
@@ -167,7 +195,7 @@ export function transformCodeFlow(
     }
     pathStateOf[node.id] = pathState;
 
-    const cfgBlockId = node.lineStart ? (lineToCfg.get(node.lineStart) ?? null) : null;
+    const cfgBlockId = node.lineStart ? (lineToCfgBlock.get(node.lineStart) ?? null) : null;
     passedNodes.push({ node, cfgBlockId });
   }
 
@@ -189,23 +217,30 @@ export function transformCodeFlow(
       stepToGroupId[s.id] = groupId;
     }
 
-    // Collect all code statements for the group
+    // Collect all code statements for the group.
+    // For grouped steps: union of all steps' line ranges across cfg blocks.
+    // For single steps: full lineStart..lineEnd range (catches for-loop body
+    // that spans multiple cfg blocks).
     let codeStatements: CodeStatement[] = [];
-    if (group.cfgBlockId) {
-      codeStatements = getCfgBlockStatements(flowData, group.cfgBlockId);
-    } else if (group.steps.length === 1) {
-      // Single ungrouped step: try line-level match
-      if (primary.lineStart) {
-        const blockId = lineToCfg.get(primary.lineStart);
-        if (blockId) {
-          const allStmts = getCfgBlockStatements(flowData, blockId);
-          codeStatements = allStmts.filter(
-            (s) =>
-              s.line >= (primary.lineStart ?? 0) &&
-              s.line <= (primary.lineEnd ?? primary.lineStart ?? 0),
-          );
+    if (group.steps.length > 1) {
+      // Merged group: collect from all steps' line ranges
+      const seen = new Set<number>();
+      for (const s of group.steps) {
+        for (const stmt of collectStatementsInRange(s.lineStart, s.lineEnd, lineToStmts)) {
+          if (!seen.has(stmt.line)) {
+            seen.add(stmt.line);
+            codeStatements.push(stmt);
+          }
         }
       }
+      codeStatements.sort((a, b) => a.line - b.line);
+    } else {
+      // Single step: use full line range
+      codeStatements = collectStatementsInRange(
+        primary.lineStart,
+        primary.lineEnd ?? primary.lineStart,
+        lineToStmts,
+      );
     }
 
     // Merge operation labels for grouped steps

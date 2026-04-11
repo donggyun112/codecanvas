@@ -380,6 +380,29 @@ class FlowGraph:
                 if cfg.blocks:
                     _merge_cfg_into(all_nodes, all_edges, cfg)
 
+                # Build CFGs for inlined callees so Code Flow view can
+                # show their source code in nodes. Collect unique callee
+                # functions referenced by exec_l4 steps.
+                seen_callees: set[str] = set()
+                for step in eg.steps:
+                    callee_fn = step.callee_function
+                    if not callee_fn or callee_fn in seen_callees:
+                        continue
+                    seen_callees.add(callee_fn)
+                    callee_func = cg.get_function(callee_fn)
+                    if not callee_func:
+                        continue
+                    callee_cfg = cfg_builder.build(
+                        callee_func.name,
+                        callee_func.file_path,
+                        callee_func.line_start,
+                    )
+                    if callee_cfg.blocks:
+                        _merge_cfg_into(
+                            all_nodes, all_edges, callee_cfg,
+                            prefix=f"cfg_{callee_fn}",
+                        )
+
         # Serialize snapshot (original self unchanged)
         result["nodes"] = {nid: self._serialize_node(n) for nid, n in all_nodes.items()}
         result["edges"] = [self._serialize_edge(e) for e in all_edges]
@@ -395,11 +418,12 @@ def _merge_cfg_into(
     nodes: dict[str, FlowNode],
     edges: list[FlowEdge],
     cfg: Any,
+    prefix: str = "cfg",
 ) -> None:
     """Merge ControlFlowGraph blocks/edges into snapshot dicts."""
     existing_edge_ids = {e.id for e in edges}
     for block in cfg.blocks:
-        nid = f"cfg:{block.id}"
+        nid = f"{prefix}:{block.id}"
         if nid in nodes:
             continue
         nodes[nid] = FlowNode(
@@ -422,14 +446,14 @@ def _merge_cfg_into(
             },
         )
     for edge in cfg.edges:
-        eid = f"cfg_e:{edge.id}"
+        eid = f"{prefix}_e:{edge.id}"
         if eid in existing_edge_ids:
             continue
         existing_edge_ids.add(eid)
         edges.append(FlowEdge(
             id=eid,
-            source_id=f"cfg:{edge.source_block_id}",
-            target_id=f"cfg:{edge.target_block_id}",
+            source_id=f"{prefix}:{edge.source_block_id}",
+            target_id=f"{prefix}:{edge.target_block_id}",
             edge_type=EdgeType.CFG_FLOW,
             label=edge.label,
             condition=edge.condition,
