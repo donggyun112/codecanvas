@@ -19,6 +19,7 @@ import { getVisible } from './transform/visibility';
 import { transformToRfElements } from './transform';
 import { transformExecutionGraph } from './transform/executionTransform';
 import { transformCFG } from './transform/cfgTransform';
+import { transformCodeFlow } from './transform/codeFlowTransform';
 import { applyElkLayout } from './layout/elkLayout';
 import TopBar from './components/TopBar';
 import DetailPanel from './components/DetailPanel';
@@ -89,6 +90,13 @@ export default function App() {
     if (flowViewMode === 'cfg') {
       // CFG mode: project cfg_block nodes from canonical FlowGraph
       const result = transformCFG(flowData, selectedNodeId, hasTrace, viewMode);
+      if (result.nodes.length === 0) { setNodes([]); setEdges([]); return; }
+      rfNodes = result.nodes;
+      rfEdges = result.edges;
+      layoutDirection = 'DOWN';
+    } else if (flowViewMode === 'codeflow') {
+      // Code Flow mode: exec_l4 + inline code from cfg_blocks
+      const result = transformCodeFlow(flowData, selectedNodeId, hasTrace, viewMode);
       if (result.nodes.length === 0) { setNodes([]); setEdges([]); return; }
       rfNodes = result.nodes;
       rfEdges = result.edges;

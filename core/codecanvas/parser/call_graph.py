@@ -621,6 +621,31 @@ class CallGraphBuilder:
             self._reparse_file_for_ast(func.file_path)
         return self._ast_nodes.get(qualified_name)
 
+    def _resolve_by_name(self, simple_name: str, from_file: str | None = None) -> FunctionDef | None:
+        """Resolve a simple function name to its FunctionDef.
+
+        Prefers functions in the same file/package, falls back to the
+        name index. Used by exec builder to resolve Depends() targets.
+        """
+        candidates = self._name_index.get(simple_name, [])
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return self._functions.get(candidates[0])
+        # Prefer same file
+        if from_file:
+            module = self._module_map.get(from_file, "")
+            for qname in candidates:
+                if qname.startswith(module + "."):
+                    return self._functions.get(qname)
+            # Same package
+            pkg = module.rsplit(".", 1)[0] if "." in module else ""
+            if pkg:
+                for qname in candidates:
+                    if qname.startswith(pkg + "."):
+                        return self._functions.get(qname)
+        return self._functions.get(candidates[0])
+
     def _reparse_file_for_ast(self, file_path: str) -> None:
         """Re-parse one source file and rebind its function-level AST nodes
         into `_ast_nodes`. Used by the lazy path after a cache load.

@@ -5,6 +5,7 @@ import ResourceNode from './ResourceNode';
 import CompoundNode from './CompoundNode';
 import DataFlowNode from './DataFlowNode';
 import CFGBlockNode from './CFGBlockNode';
+import CodeFlowNode from './CodeFlowNode';
 
 export const nodeTypes = {
   pipeline: PipelineNode,
@@ -14,4 +15,5 @@ export const nodeTypes = {
   compound: CompoundNode,
   dataFlow: DataFlowNode,
   cfgBlock: CFGBlockNode,
+  codeFlow: CodeFlowNode,
 };

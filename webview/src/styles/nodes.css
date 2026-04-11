@@ -405,3 +405,121 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ============================================
+   Code Flow Node
+   ============================================ */
+.cf-node {
+  position: relative;
+  border: 1.5px solid #666;
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  padding: 0;
+  min-width: 200px;
+  max-width: 400px;
+  font-size: 12px;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.cf-node.selected {
+  border-width: 2px;
+  border-color: var(--vscode-focusBorder);
+}
+.cf-node.hit { box-shadow: 0 0 8px rgba(39, 174, 96, 0.5); }
+.cf-node.cf-unverified { opacity: 0.5; border-style: dashed; }
+.cf-node.cf-runtime-only { border-color: #3498db !important; border-style: dashed; }
+
+.cf-color-bar {
+  position: absolute;
+  top: 0; left: 0;
+  width: 4px;
+  height: 100%;
+  border-radius: 6px 0 0 6px;
+}
+
+.cf-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px 2px 12px;
+  gap: 6px;
+}
+.cf-op {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.cf-branch-path { font-weight: 400; opacity: 0.7; }
+.cf-depth { font-size: 9px; opacity: 0.4; margin-left: 4px; }
+.cf-unknown {
+  background: #f39c12;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  border-radius: 50%;
+  width: 14px; height: 14px;
+  display: flex; align-items: center; justify-content: center;
+}
+
+.cf-label {
+  padding: 0 10px 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--vscode-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cf-condition {
+  padding: 0 10px 4px 12px;
+  font-size: 11px;
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.cf-code {
+  border-top: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
+  padding: 4px 0;
+  margin: 0 4px;
+  font-family: var(--vscode-editor-font-family, 'Menlo', monospace);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.cf-stmt {
+  display: flex;
+  gap: 8px;
+  padding: 0 6px;
+  white-space: pre;
+}
+.cf-stmt:hover { background: rgba(255, 255, 255, 0.04); }
+.cf-line-num {
+  color: var(--vscode-editorLineNumber-foreground, rgba(255,255,255,0.25));
+  min-width: 24px;
+  text-align: right;
+  user-select: none;
+}
+.cf-line-text { color: var(--vscode-editor-foreground); }
+.cf-stmt-branch_test .cf-line-text { color: #f39c12; }
+.cf-stmt-return .cf-line-text { color: #27ae60; }
+.cf-stmt-raise .cf-line-text { color: #e74c3c; }
+
+.cf-file-ref {
+  padding: 2px 10px 4px 12px;
+  font-size: 10px;
+  opacity: 0.5;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.cf-output {
+  padding: 2px 10px 4px 12px;
+  font-size: 11px;
+  color: #3498db;
+}
+.cf-error {
+  padding: 2px 10px 4px 12px;
+  font-size: 11px;
+  color: #e74c3c;
+  font-weight: 600;
+}

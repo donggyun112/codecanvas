@@ -8,7 +8,7 @@ interface FlowState {
   historyTrail: HistoryItem[];
   currentLevel: number;
   viewMode: 'all' | 'runtime' | 'static';
-  flowViewMode: 'data' | 'callstack' | 'cfg' | 'brief';
+  flowViewMode: 'data' | 'callstack' | 'cfg' | 'codeflow' | 'brief';
   dataFlowDetail: 'summary' | 'detail';
   selectedNodeId: string | null;
   highlightedOriginIds: string[];
@@ -25,7 +25,7 @@ interface FlowState {
   setFlowData: (data: FlowGraph, history: HistoryItem[]) => void;
   setLevel: (level: number) => void;
   setViewMode: (mode: 'all' | 'runtime' | 'static') => void;
-  setFlowViewMode: (mode: 'data' | 'callstack' | 'cfg' | 'brief') => void;
+  setFlowViewMode: (mode: 'data' | 'callstack' | 'cfg' | 'codeflow' | 'brief') => void;
   setDataFlowDetail: (detail: 'summary' | 'detail') => void;
   selectNode: (id: string | null) => void;
   setDrillState: (nodeId: string, depth: number) => void;

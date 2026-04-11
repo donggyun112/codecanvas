@@ -47,7 +47,7 @@ class ASTExecutionBuilder:
 
         # AST-based pipeline: derive pre-handler steps from entrypoint + handler signature
         entrypoint = flow_graph.entrypoint if flow_graph else None
-        prev_id = self._add_ast_pipeline_steps(ast_node, func, entrypoint)
+        prev_id = self._add_ast_pipeline_steps(ast_node, func, entrypoint, max_depth)
 
         handler_tail = self._walk_body(
             ast_node.body,
@@ -102,6 +102,7 @@ class ASTExecutionBuilder:
         ast_node: ast.FunctionDef | ast.AsyncFunctionDef,
         func: FunctionDef,
         entrypoint: Any | None,
+        max_depth: int | None = None,
     ) -> str | None:
         """Build pre-handler pipeline steps from AST and entrypoint metadata.
 
@@ -153,43 +154,36 @@ class ASTExecutionBuilder:
             prev_id = step.id
 
         # 3. Dependency injection from Depends() parameters
-        for arg in ast_node.args.args + ast_node.args.kwonlyargs:
-            if not arg.annotation:
-                continue
-            dep_name = self._extract_depends_name(arg.annotation)
-            if dep_name:
-                step = self._emit_step(
-                    label=f"Depends({dep_name})",
-                    operation="pipeline",
-                    phase="dependency",
-                    file_path=func.file_path,
-                    line_start=arg.lineno if hasattr(arg, 'lineno') else func.line_start,
-                    confidence="definite",
-                    evidence=f"FastAPI Depends() parameter: {arg.arg}",
-                )
-                if prev_id:
-                    self._link_seq(prev_id, step.id)
-                prev_id = step.id
+        #    Emit a pipeline step AND inline the dependency function's body
+        #    so that its internal logic (DB queries, auth checks, branches)
+        #    appears in the execution flow.
+        dep_names = self._collect_depends_names(ast_node)
+        for dep_name, dep_line in dep_names:
+            dep_func = self.cg._resolve_by_name(dep_name, func.file_path)
+            step = self._emit_step(
+                label=f"Depends({dep_name})",
+                operation="pipeline",
+                phase="dependency",
+                file_path=func.file_path,
+                line_start=dep_line or func.line_start,
+                callee_function=dep_func.qualified_name if dep_func else None,
+                confidence="definite",
+                evidence=f"FastAPI Depends() parameter",
+            )
+            if prev_id:
+                self._link_seq(prev_id, step.id)
+            prev_id = step.id
 
-        # Also check defaults for Depends()
-        defaults = list(ast_node.args.defaults) + list(ast_node.args.kw_defaults)
-        for default in defaults:
-            if default is None:
-                continue
-            dep_name = self._extract_depends_name(default)
-            if dep_name:
-                step = self._emit_step(
-                    label=f"Depends({dep_name})",
-                    operation="pipeline",
-                    phase="dependency",
-                    file_path=func.file_path,
-                    line_start=default.lineno if hasattr(default, 'lineno') else func.line_start,
-                    confidence="definite",
-                    evidence=f"FastAPI Depends() default parameter",
+            # Inline the dependency's body so its logic is visible
+            if dep_func and max_depth is not None:
+                tail = self._inline_callee(
+                    dep_func, step.id,
+                    parent_scope=dep_func.qualified_name,
+                    depth=1,
+                    max_depth=max_depth,
                 )
-                if prev_id:
-                    self._link_seq(prev_id, step.id)
-                prev_id = step.id
+                if tail:
+                    prev_id = tail
 
         # 4. Request body validation from type-annotated params (Pydantic models)
         request_body = entrypoint.request_body if entrypoint else None
@@ -268,6 +262,37 @@ class ASTExecutionBuilder:
             detail = ", ".join(args_strs)
             return name, detail
         return "", ""
+
+    def _collect_depends_names(
+        self,
+        ast_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> list[tuple[str, int | None]]:
+        """Extract all Depends() function names from handler parameters.
+
+        Returns (dep_name, line_number) tuples — combines both type-annotation
+        based Depends and default-value based Depends, deduplicated.
+        """
+        result: list[tuple[str, int | None]] = []
+        seen: set[str] = set()
+
+        for arg in ast_node.args.args + ast_node.args.kwonlyargs:
+            if not arg.annotation:
+                continue
+            name = self._extract_depends_name(arg.annotation)
+            if name and name not in seen:
+                seen.add(name)
+                result.append((name, arg.lineno if hasattr(arg, 'lineno') else None))
+
+        defaults = list(ast_node.args.defaults) + list(ast_node.args.kw_defaults)
+        for default in defaults:
+            if default is None:
+                continue
+            name = self._extract_depends_name(default)
+            if name and name not in seen:
+                seen.add(name)
+                result.append((name, default.lineno if hasattr(default, 'lineno') else None))
+
+        return result
 
     @staticmethod
     def _extract_depends_name(node: ast.expr) -> str | None:

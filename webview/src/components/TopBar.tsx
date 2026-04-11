@@ -86,6 +86,7 @@ export default function TopBar() {
         <span className="view-toggle">
           {([
             ['brief', 'Brief'],
+            ['codeflow', 'Code Flow'],
             ['data', 'Data Flow'],
             ['callstack', 'Call Stack'],
             ['cfg', 'CFG'],

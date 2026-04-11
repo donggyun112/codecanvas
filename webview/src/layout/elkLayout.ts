@@ -32,6 +32,35 @@ function makeCFGBlockSize(data: any): { w: number; h: number } {
   return { w, h };
 }
 
+function makeCodeFlowNodeSize(data: any): { w: number; h: number } {
+  const label = data.label || '';
+  const stmts: any[] = data.codeStatements || [];
+  const output = data.output || '';
+  const outputType = data.outputType || '';
+  const errorLabel = data.errorLabel || '';
+  const subtitle = output && outputType ? `${output}: ${outputType}` : output || outputType || '';
+
+  // Width driven by code lines (if present) or label
+  let maxTextLen = label.length;
+  for (const s of stmts) {
+    maxTextLen = Math.max(maxTextLen, (s.text || '').length + 6); // +6 for line number
+  }
+  if (subtitle) maxTextLen = Math.max(maxTextLen, subtitle.length);
+  const w = Math.max(220, Math.min(400, maxTextLen * 7 + 48));
+
+  // Height: header(24) + label(18) + code lines + optional output/error
+  let h = 42; // header + label + padding
+  if (stmts.length > 0) {
+    h += 4 + stmts.length * 18; // code block
+  } else if (data.filePath) {
+    h += 16; // file reference line
+  }
+  if (subtitle) h += 16;
+  if (errorLabel) h += 16;
+  if (data.branchCondition) h += 16;
+  return { w, h };
+}
+
 function makeDataFlowNodeSize(data: any): { w: number; h: number } {
   const label = data.label || '';
   const output = data.output || '';
@@ -77,9 +106,11 @@ export async function applyElkLayout(
     const label = data.displayName || data.name || data.label || '';
     const size = n.type === 'cfgBlock'
       ? makeCFGBlockSize(data)
-      : n.type === 'dataFlow'
-        ? makeDataFlowNodeSize(data)
-        : makeNodeSize(label, !!data.filePath);
+      : n.type === 'codeFlow'
+        ? makeCodeFlowNodeSize(data)
+        : n.type === 'dataFlow'
+          ? makeDataFlowNodeSize(data)
+          : makeNodeSize(label, !!data.filePath);
     const kids = childrenByParent[n.id];
 
     if (kids && kids.length > 0) {
