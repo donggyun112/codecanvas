@@ -1,13 +1,17 @@
 /**
- * Code Flow view: function-level call graph with inline source code.
+ * Code Flow view: execution-order nodes with inline source code.
  *
- * Like callstack view (function → function), but each function node
- * displays its full source code from cfg_block statements. Depth-0
- * is the handler, depth-1 are direct callees (dependencies, services).
+ * Groups consecutive exec_l4 steps that share the same CFG basic block
+ * into a single node, producing large code-visible nodes similar to CFG
+ * blocks but with semantic operation annotations and cross-function flow.
+ *
+ * Steps that don't map to any CFG block (callees, pipeline) remain as
+ * individual compact nodes with their semantic label.
  */
 import type { Node, Edge } from '@xyflow/react';
 import type { FlowGraph, FlowNodeData } from '../types/flow';
 import type { PathState } from './pathState';
+import { projectByKind } from './projection';
 
 interface CodeStatement {
   line: number;
@@ -16,53 +20,126 @@ interface CodeStatement {
   kind: string;
 }
 
-/**
- * Collect all cfg_block statements belonging to a function scope.
- * Sorts by line number for display order.
- */
-function collectFunctionCode(
-  flowData: FlowGraph,
-  scope: string,
-): CodeStatement[] {
-  const stmts: CodeStatement[] = [];
-  const seen = new Set<number>();
+// ---------------------------------------------------------------------------
+// CFG cross-reference helpers
+// ---------------------------------------------------------------------------
 
+/**
+ * Build line → CodeStatement[] index from all cfg_block nodes.
+ * Also returns line → cfg_block_id for grouping.
+ */
+function buildCfgIndex(flowData: FlowGraph): {
+  lineToStmts: Map<number, CodeStatement[]>;
+  lineToCfgBlock: Map<number, string>;
+} {
+  const lineToStmts = new Map<number, CodeStatement[]>();
+  const lineToCfgBlock = new Map<number, string>();
   for (const n of Object.values(flowData.nodes)) {
     if (n.kind !== 'cfg_block') continue;
-    if (n.scope !== scope) continue;
-    const blockStmts = (n.metadata?.statements as CodeStatement[]) ?? [];
-    for (const s of blockStmts) {
-      if (!seen.has(s.line)) {
-        seen.add(s.line);
-        stmts.push(s);
+    const stmts = (n.metadata?.statements as CodeStatement[]) ?? [];
+    for (const s of stmts) {
+      lineToCfgBlock.set(s.line, n.id);
+      const existing = lineToStmts.get(s.line);
+      if (existing) {
+        if (!existing.some((e) => e.text === s.text)) existing.push(s);
+      } else {
+        lineToStmts.set(s.line, [s]);
       }
     }
   }
-  return stmts.sort((a, b) => a.line - b.line);
+  return { lineToStmts, lineToCfgBlock };
 }
 
 /**
- * Build a map of function scope → exec_l4 operations for annotations.
+ * Find all code statements within a line range across ALL cfg_blocks.
+ * This handles cases where a compound statement (for/if) spans multiple
+ * CFG basic blocks.
  */
-function collectFunctionOps(
-  flowData: FlowGraph,
-): Map<string, Array<{ operation: string; label: string; line: number | null }>> {
-  const ops = new Map<string, Array<{ operation: string; label: string; line: number | null }>>();
-  for (const n of Object.values(flowData.nodes)) {
-    if (n.kind !== 'exec_l4') continue;
-    const m = n.metadata ?? {};
-    const scope = n.scope || '';
-    if (!scope) continue;
-    const list = ops.get(scope) ?? [];
-    list.push({
-      operation: (m.operation as string) ?? 'process',
-      label: n.name,
-      line: n.lineStart,
-    });
-    ops.set(scope, list);
+function collectStatementsInRange(
+  lineStart: number | null,
+  lineEnd: number | null,
+  lineToStmts: Map<number, CodeStatement[]>,
+): CodeStatement[] {
+  if (!lineStart) return [];
+  const end = lineEnd ?? lineStart;
+  const result: CodeStatement[] = [];
+  const seen = new Set<number>();
+  for (let line = lineStart; line <= end; line++) {
+    const stmts = lineToStmts.get(line);
+    if (!stmts) continue;
+    for (const s of stmts) {
+      if (!seen.has(s.line)) {
+        seen.add(s.line);
+        result.push(s);
+      }
+    }
   }
-  return ops;
+  return result.sort((a, b) => a.line - b.line);
 }
+
+// ---------------------------------------------------------------------------
+// Grouping: consecutive exec_steps sharing a CFG block → one merged node
+// ---------------------------------------------------------------------------
+
+interface ExecItem {
+  node: FlowNodeData;
+  cfgBlockId: string | null; // null = no CFG match (callee/pipeline)
+}
+
+interface MergedGroup {
+  /** The node IDs of exec_l4 steps in this group. */
+  stepIds: string[];
+  /** The original exec_l4 nodes. */
+  steps: FlowNodeData[];
+  /** Shared CFG block id (null for ungrouped). */
+  cfgBlockId: string | null;
+}
+
+/**
+ * Group consecutive exec_l4 steps by their containing CFG block.
+ * - Steps in the same CFG block that appear consecutively → merge.
+ * - Steps with no CFG block → standalone (1 step per group).
+ * - Branch/error steps always stay standalone (they're semantic anchors).
+ */
+function groupByCfgBlock(
+  items: ExecItem[],
+): MergedGroup[] {
+  const groups: MergedGroup[] = [];
+  let current: MergedGroup | null = null;
+
+  const BREAK_OPS = new Set(['branch', 'error', 'respond']);
+
+  for (const item of items) {
+    const op = (item.node.metadata?.operation as string) ?? '';
+    const forceBreak =
+      !item.cfgBlockId ||
+      BREAK_OPS.has(op) ||
+      (item.node.metadata?.depth ?? 0) > 0;
+
+    if (
+      !forceBreak &&
+      current &&
+      current.cfgBlockId === item.cfgBlockId
+    ) {
+      // Extend current group
+      current.stepIds.push(item.node.id);
+      current.steps.push(item.node);
+    } else {
+      // Start new group
+      current = {
+        stepIds: [item.node.id],
+        steps: [item.node],
+        cfgBlockId: forceBreak ? null : item.cfgBlockId,
+      };
+      groups.push(current);
+    }
+  }
+  return groups;
+}
+
+// ---------------------------------------------------------------------------
+// Main transform
+// ---------------------------------------------------------------------------
 
 export function transformCodeFlow(
   flowData: FlowGraph,
@@ -73,183 +150,241 @@ export function transformCodeFlow(
   const nodes: Node[] = [];
   const edges: Edge[] = [];
 
-  // ---------------------------------------------------------------
-  // Step 1: Find handler + direct callee functions
-  // ---------------------------------------------------------------
-
-  // Handler node: pipeline_phase=handler OR context_root (any kind)
-  const handlerNode = Object.values(flowData.nodes).find(
-    (n) => n.metadata?.pipeline_phase === 'handler' || n.metadata?.context_root,
+  // Project exec_l4 nodes + data_flow edges
+  const projection = projectByKind(
+    flowData,
+    new Set(['exec_l4']),
+    new Set(['data_flow']),
   );
 
-  if (!handlerNode) return { nodes, edges };
+  if (projection.nodes.length === 0) return { nodes, edges };
 
-  // Collect callable nodes to show: handler + depth-1 callees
-  const functionScopes = new Map<string, FlowNodeData>();
-  const callerOf = new Map<string, string>();
+  const { lineToStmts, lineToCfgBlock } = buildCfgIndex(flowData);
 
-  // Index all callable nodes (function, pipeline with handler phase, etc.)
-  const nodeById = new Map<string, FlowNodeData>();
-  for (const n of Object.values(flowData.nodes)) {
-    nodeById.set(n.id, n);
-  }
-
-  // Start with handler
-  functionScopes.set(handlerNode.id, handlerNode);
-
-  // Find callees from exec_l4 callee_function references
-  for (const n of Object.values(flowData.nodes)) {
-    if (n.kind !== 'exec_l4') continue;
-    const m = n.metadata ?? {};
-    const callee = m.callee_function as string | undefined;
-    if (!callee) continue;
-
-    const calleeNode = nodeById.get(callee);
-    if (calleeNode && !functionScopes.has(calleeNode.id)) {
-      functionScopes.set(calleeNode.id, calleeNode);
-      callerOf.set(calleeNode.id, handlerNode.id);
+  // Runtime hit lookup
+  const runtimeHitNodes = new Set<string>();
+  if (hasTrace) {
+    for (const n of Object.values(flowData.nodes)) {
+      if (n.metadata?.runtime_hit) runtimeHitNodes.add(n.id);
     }
   }
 
-  // Find callees from calls/depends_on/injects edges originating from handler
-  for (const e of flowData.edges) {
-    if (e.type !== 'calls' && e.type !== 'depends_on' && e.type !== 'injects') continue;
-    if (e.sourceId !== handlerNode.id) continue;
-    const target = flowData.nodes[e.targetId];
-    if (target && (target.kind === 'function' || target.kind === 'pipeline') &&
-        !functionScopes.has(target.id)) {
-      functionScopes.set(target.id, target);
-      callerOf.set(target.id, handlerNode.id);
+  // --- Step 1: Classify each exec_l4 and compute pathState ---
+  const pathStateOf: Record<string, PathState> = {};
+  const passedNodes: ExecItem[] = [];
+
+  for (const node of projection.nodes) {
+    const m = node.metadata ?? {};
+    const sourceNodeIds = (m.source_node_ids as string[]) ?? [];
+    const hasSourceIds = sourceNodeIds.length > 0;
+    const hitKnown = hasTrace && hasSourceIds;
+    const isHit = hitKnown
+      ? sourceNodeIds.some((id) => runtimeHitNodes.has(id))
+      : false;
+
+    if (hasTrace && viewMode === 'static') {
+      if (hitKnown && isHit) continue;
+      if (node.confidence === 'runtime') continue;
     }
-  }
+    if (hasTrace && viewMode === 'runtime' && hitKnown && !isHit) continue;
 
-  // ---------------------------------------------------------------
-  // Step 2: Build RF nodes — one per function with full code
-  // ---------------------------------------------------------------
-
-  const funcOps = collectFunctionOps(flowData);
-
-  for (const [scope, funcNode] of functionScopes) {
-    const codeStatements = collectFunctionCode(flowData, scope);
-    const ops = funcOps.get(scope) ?? [];
-
-    // Determine primary operation for the color
-    const opCounts: Record<string, number> = {};
-    for (const op of ops) {
-      opCounts[op.operation] = (opCounts[op.operation] ?? 0) + 1;
-    }
-    const primaryOp = Object.entries(opCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'process';
-
-    const isHandler = funcNode.metadata?.pipeline_phase === 'handler' || funcNode.metadata?.context_root;
-    const pipelinePhase = (funcNode.metadata?.pipeline_phase as string) ?? '';
-    const phase = isHandler ? 'handler' : pipelinePhase || 'callee';
-
-    // Runtime hit
-    const isHit = hasTrace && !!funcNode.metadata?.runtime_hit;
     let pathState: PathState = 'possible';
     if (hasTrace) {
-      if (funcNode.confidence === 'runtime') pathState = 'runtime-only';
-      else pathState = isHit ? 'verified' : 'unverified';
+      if (node.confidence === 'runtime') pathState = 'runtime-only';
+      else if (hitKnown) pathState = isHit ? 'verified' : 'unverified';
+    }
+    pathStateOf[node.id] = pathState;
+
+    const cfgBlockId = node.lineStart ? (lineToCfgBlock.get(node.lineStart) ?? null) : null;
+    passedNodes.push({ node, cfgBlockId });
+  }
+
+  // --- Step 2: Group by CFG block ---
+  const groups = groupByCfgBlock(passedNodes);
+
+  // Map: original exec_l4 id → merged group node id (for edge remapping)
+  const stepToGroupId: Record<string, string> = {};
+
+  for (const group of groups) {
+    const primary = group.steps[0];
+    const m = primary.metadata ?? {};
+    const groupId =
+      group.steps.length === 1
+        ? primary.id
+        : `cfgroup:${group.steps.map((s) => s.id).join('+')}`;
+
+    for (const s of group.steps) {
+      stepToGroupId[s.id] = groupId;
     }
 
-    if (hasTrace && viewMode === 'runtime' && pathState === 'unverified') continue;
-    if (hasTrace && viewMode === 'static' && pathState === 'verified') continue;
+    // Collect all code statements for the group.
+    // For grouped steps: union of all steps' line ranges across cfg blocks.
+    // For single steps: full lineStart..lineEnd range (catches for-loop body
+    // that spans multiple cfg blocks).
+    let codeStatements: CodeStatement[] = [];
+    if (group.steps.length > 1) {
+      // Merged group: collect from all steps' line ranges
+      const seen = new Set<number>();
+      for (const s of group.steps) {
+        for (const stmt of collectStatementsInRange(s.lineStart, s.lineEnd, lineToStmts)) {
+          if (!seen.has(stmt.line)) {
+            seen.add(stmt.line);
+            codeStatements.push(stmt);
+          }
+        }
+      }
+      codeStatements.sort((a, b) => a.line - b.line);
+    } else {
+      // Single step: use full line range
+      codeStatements = collectStatementsInRange(
+        primary.lineStart,
+        primary.lineEnd ?? primary.lineStart,
+        lineToStmts,
+      );
+    }
+
+    // Merge operation labels for grouped steps
+    const operations = group.steps.map(
+      (s) => (s.metadata?.operation as string) ?? 'process',
+    );
+    const primaryOp = operations[0];
+    const label =
+      group.steps.length === 1
+        ? primary.name
+        : group.steps.map((s) => s.name).join(' → ');
+
+    // Aggregate pathState: worst wins
+    const groupPathStates = group.steps.map((s) => pathStateOf[s.id]);
+    let groupPathState: PathState = 'possible';
+    if (groupPathStates.includes('verified')) groupPathState = 'verified';
+    if (groupPathStates.includes('unverified')) groupPathState = 'unverified';
+    if (!hasTrace) groupPathState = 'possible';
+
+    const isHitAny = group.steps.some((s) => {
+      const sids = (s.metadata?.source_node_ids as string[]) ?? [];
+      return sids.some((id) => runtimeHitNodes.has(id));
+    });
+
+    const depth = (m.depth as number) ?? 0;
+    const output = (m.output as string | null) ?? null;
+    const outputType = (m.output_type as string | null) ?? null;
+    const errorLabel = (m.error_label as string | null) ?? null;
+    const branchCondition = (m.branch_condition as string | null) ?? null;
+    const branchId = (m.branch_id as string | null) ?? null;
+
+    // For multi-step groups, collect all outputs
+    const allOutputs = group.steps
+      .map((s) => s.metadata?.output as string)
+      .filter(Boolean);
+    const groupOutput =
+      group.steps.length === 1
+        ? output
+        : allOutputs.length > 0
+          ? allOutputs.join(', ')
+          : null;
+    const lastStep = group.steps[group.steps.length - 1];
+    const groupOutputType =
+      group.steps.length === 1
+        ? outputType
+        : (lastStep.metadata?.output_type as string | null) ?? null;
 
     nodes.push({
-      id: funcNode.id,
+      id: groupId,
       type: 'codeFlow',
       position: { x: 0, y: 0 },
       data: {
-        id: funcNode.id,
-        label: funcNode.displayName || funcNode.name,
-        operation: isHandler ? 'handler' : primaryOp,
-        phase,
-        output: null,
-        outputType: null,
-        errorLabel: null,
-        branchCondition: null,
-        branchId: null,
-        depth: isHandler ? 0 : 1,
-        filePath: funcNode.filePath,
-        lineStart: funcNode.lineStart,
-        lineEnd: funcNode.lineEnd,
+        id: groupId,
+        label,
+        operation: primaryOp,
+        operations: operations.length > 1 ? operations : undefined,
+        output: groupOutput,
+        outputType: groupOutputType,
+        errorLabel,
+        branchCondition,
+        branchId,
+        depth,
+        filePath: primary.filePath,
+        lineStart: primary.lineStart,
+        lineEnd: lastStep.lineEnd ?? lastStep.lineStart,
         codeStatements,
         hasCode: codeStatements.length > 0,
-        stepCount: ops.length,
-        operations: ops.map((o) => o.operation),
-        metadata: funcNode.metadata,
-        isSelected: funcNode.id === selectedNodeId,
-        isHit,
-        hitUnknown: false,
-        pathState,
+        stepCount: group.steps.length,
+        metadata: m,
+        isSelected: group.stepIds.includes(selectedNodeId ?? ''),
+        isHit: hasTrace && isHitAny,
+        hitUnknown:
+          hasTrace &&
+          group.steps.every(
+            (s) => ((s.metadata?.source_node_ids as string[]) ?? []).length === 0,
+          ),
+        pathState: groupPathState,
         hasTrace,
       },
     });
   }
 
-  if (nodes.length === 0) return { nodes, edges };
-
-  // ---------------------------------------------------------------
-  // Step 3: Build edges — function-to-function calls
-  // ---------------------------------------------------------------
-
-  const visibleIds = new Set(nodes.map((n) => n.id));
-
-  // From callstack graph edges (type=calls)
+  // --- Step 3: Remap edges to group IDs ---
+  const visibleGroupIds = new Set(nodes.map((n) => n.id));
   const seenEdges = new Set<string>();
-  for (const e of flowData.edges) {
-    if (e.type !== 'calls' && e.type !== 'depends_on' && e.type !== 'injects') continue;
-    if (!visibleIds.has(e.sourceId) || !visibleIds.has(e.targetId)) continue;
-    const key = `${e.sourceId}→${e.targetId}`;
-    if (seenEdges.has(key)) continue;
-    seenEdges.add(key);
 
+  for (const edge of projection.edges) {
+    const srcGroup = stepToGroupId[edge.sourceId];
+    const tgtGroup = stepToGroupId[edge.targetId];
+    if (!srcGroup || !tgtGroup) continue;
+    if (srcGroup === tgtGroup) continue; // internal to same group
+
+    const edgeKey = `${srcGroup}→${tgtGroup}`;
+    if (seenEdges.has(edgeKey)) continue; // deduplicate merged edges
+    seenEdges.add(edgeKey);
+
+    if (!visibleGroupIds.has(srcGroup) || !visibleGroupIds.has(tgtGroup)) continue;
+
+    const variable = (edge.metadata?.variable as string) ?? '';
+    let edgeLabel = edge.label || variable || '';
+
+    // Branch label resolution
+    const srcNode = projection.nodeMap[edge.sourceId];
+    const tgtNode = projection.nodeMap[edge.targetId];
+    if (srcNode?.metadata?.operation === 'branch' && tgtNode?.metadata?.branch_id) {
+      const path = (tgtNode.metadata.branch_id as string).split(':').pop() || '';
+      if (path === 'if') edgeLabel = 'yes';
+      else if (path === 'else') edgeLabel = 'no';
+      else if (path) edgeLabel = path;
+    }
+
+    const kind = (edge.metadata?.data_kind as string) || 'sequence';
     let color: string | undefined;
     let dashed = false;
-    let label = e.label || '';
-    if (e.type === 'depends_on' || e.type === 'injects') {
-      color = '#3498db';
+    if (kind === 'error' || edge.isErrorPath) {
+      color = '#e74c3c';
       dashed = true;
-      label = label || 'Depends';
+    } else if (kind === 'data') {
+      color = '#3498db';
+    } else if (kind === 'branch') {
+      color = '#f39c12';
+    }
+
+    const srcPS = pathStateOf[edge.sourceId] ?? 'possible';
+    const tgtPS = pathStateOf[edge.targetId] ?? 'possible';
+    const edgeHit = hasTrace && srcPS === 'verified' && tgtPS === 'verified';
+    let edgePathState: PathState = 'possible';
+    if (hasTrace) {
+      edgePathState = edgeHit ? 'verified' : 'unverified';
     }
 
     edges.push({
-      id: `cfe:${key}`,
-      source: e.sourceId,
-      target: e.targetId,
+      id: `cfe:${edgeKey}`,
+      source: srcGroup,
+      target: tgtGroup,
       type: 'flowEdge',
       data: {
         color,
         dashed,
-        label,
+        label: edgeLabel,
         hasTrace,
-        isHit: false,
-        pathState: 'possible' as PathState,
-        kind: e.type,
-      },
-    });
-  }
-
-  // Also add edges from callerOf map (for deps discovered via exec_l4)
-  for (const [calleeId, callerId] of callerOf) {
-    if (!visibleIds.has(calleeId) || !visibleIds.has(callerId)) continue;
-    const key = `${callerId}→${calleeId}`;
-    if (seenEdges.has(key)) continue;
-    seenEdges.add(key);
-
-    edges.push({
-      id: `cfe:${key}`,
-      source: callerId,
-      target: calleeId,
-      type: 'flowEdge',
-      data: {
-        color: '#3498db',
-        dashed: true,
-        label: 'calls',
-        hasTrace,
-        isHit: false,
-        pathState: 'possible' as PathState,
-        kind: 'calls',
+        isHit: edgeHit,
+        pathState: edgePathState,
+        kind,
       },
     });
   }

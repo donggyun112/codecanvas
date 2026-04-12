@@ -35,23 +35,29 @@ function makeCFGBlockSize(data: any): { w: number; h: number } {
 function makeCodeFlowNodeSize(data: any): { w: number; h: number } {
   const label = data.label || '';
   const stmts: any[] = data.codeStatements || [];
+  const output = data.output || '';
+  const outputType = data.outputType || '';
+  const errorLabel = data.errorLabel || '';
+  const subtitle = output && outputType ? `${output}: ${outputType}` : output || outputType || '';
 
-  // Width driven by longest code line or function name
-  let maxTextLen = label.length + 12; // +12 for phase badge
+  // Width driven by code lines (if present) or label
+  let maxTextLen = label.length;
   for (const s of stmts) {
-    maxTextLen = Math.max(maxTextLen, (s.text || '').length + 6);
+    maxTextLen = Math.max(maxTextLen, (s.text || '').length + 6); // +6 for line number
   }
-  const w = Math.max(280, Math.min(500, maxTextLen * 7 + 48));
+  if (subtitle) maxTextLen = Math.max(maxTextLen, subtitle.length);
+  const w = Math.max(220, Math.min(400, maxTextLen * 7 + 48));
 
-  // Height: header(28) + file ref(16) + code lines + padding
-  let h = 28; // header
-  if (data.filePath) h += 16; // file reference
+  // Height: header(24) + label(18) + code lines + optional output/error
+  let h = 42; // header + label + padding
   if (stmts.length > 0) {
-    h += 8 + stmts.length * 18; // code block with border
-  } else {
-    h += 28; // "No CFG data" placeholder
+    h += 4 + stmts.length * 18; // code block
+  } else if (data.filePath) {
+    h += 16; // file reference line
   }
-  h += 8; // bottom padding
+  if (subtitle) h += 16;
+  if (errorLabel) h += 16;
+  if (data.branchCondition) h += 16;
   return { w, h };
 }
 
