@@ -269,7 +269,11 @@ class ImpactAnalyzer:
         return results
 
     def _find_reachable(self, root_qname: str, max_depth: int = 10) -> set[str]:
-        """BFS: find all functions reachable from root via calls."""
+        """BFS: find all functions reachable from root via calls + Depends().
+
+        Follows both explicit function calls and FastAPI Depends() parameters
+        so that dependency-injected functions are counted as reachable.
+        """
         visited: set[str] = set()
         frontier = {root_qname}
         for _ in range(max_depth):
@@ -281,15 +285,47 @@ class ImpactAnalyzer:
                 func = self.cg._functions.get(qn)
                 if not func:
                     continue
+                # Follow explicit calls
                 for call in func.calls:
                     target = self.cg._resolve_call(call, func)
                     if target and target.qualified_name not in visited:
                         next_frontier.add(target.qualified_name)
+                # Follow Depends() parameters
+                for dep_qn in self._get_depends_targets(func):
+                    if dep_qn not in visited:
+                        next_frontier.add(dep_qn)
             frontier = next_frontier
         return visited
 
+    def _get_depends_targets(self, func) -> list[str]:
+        """Extract Depends() function qualified names from handler parameters."""
+        import ast
+        ast_node = self.cg.get_ast_node(func.qualified_name)
+        if not ast_node or not isinstance(ast_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return []
+
+        from codecanvas.graph.ast_execution import ASTExecutionBuilder
+        results = []
+        # Check annotations + defaults for Depends()
+        for arg in ast_node.args.args + ast_node.args.kwonlyargs:
+            if arg.annotation:
+                name = ASTExecutionBuilder._extract_depends_name(arg.annotation)
+                if name:
+                    resolved = self.cg._resolve_by_name(name, func.file_path)
+                    if resolved:
+                        results.append(resolved.qualified_name)
+        for default in list(ast_node.args.defaults) + list(ast_node.args.kw_defaults):
+            if default is None:
+                continue
+            name = ASTExecutionBuilder._extract_depends_name(default)
+            if name:
+                resolved = self.cg._resolve_by_name(name, func.file_path)
+                if resolved:
+                    results.append(resolved.qualified_name)
+        return results
+
     def _call_depth(self, from_qn: str, to_qn: str, max_depth: int = 10) -> int:
-        """BFS depth from from_qn to to_qn."""
+        """BFS depth from from_qn to to_qn (follows calls + Depends)."""
         if from_qn == to_qn:
             return 0
         visited: set[str] = set()
@@ -300,13 +336,18 @@ class ImpactAnalyzer:
                 func = self.cg._functions.get(qn)
                 if not func:
                     continue
+                targets: set[str] = set()
                 for call in func.calls:
                     target = self.cg._resolve_call(call, func)
                     if target:
-                        if target.qualified_name == to_qn:
-                            return depth
-                        if target.qualified_name not in visited:
-                            next_frontier.add(target.qualified_name)
+                        targets.add(target.qualified_name)
+                for dep_qn in self._get_depends_targets(func):
+                    targets.add(dep_qn)
+                for tqn in targets:
+                    if tqn == to_qn:
+                        return depth
+                    if tqn not in visited:
+                        next_frontier.add(tqn)
             visited |= frontier
             frontier = next_frontier
         return max_depth
