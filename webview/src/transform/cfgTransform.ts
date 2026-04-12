@@ -61,11 +61,13 @@ export function transformCFG(
   const nodes: Node[] = [];
   const edges: Edge[] = [];
 
-  // Project canonical graph: cfg_block nodes + cfg_flow edges
+  // Project canonical graph: handler's cfg_block nodes only (prefix "cfg:")
+  // Callee CFGs (prefix "cfg_<qname>:") are for Code Flow view, not CFG view.
   const projection = projectByKind(
     flowData,
     new Set(['cfg_block']),
     new Set(['cfg_flow']),
+    (n) => n.id.startsWith('cfg:'),
   );
 
   if (projection.nodes.length === 0) return { nodes, edges };

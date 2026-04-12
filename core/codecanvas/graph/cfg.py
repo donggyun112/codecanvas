@@ -374,6 +374,12 @@ class CFGBuilder:
         handler_file: str,
         handler_line: int | None = None,
     ) -> ControlFlowGraph:
+        # Fresh CFG per build call — prevents block accumulation across
+        # multiple build() invocations on the same CFGBuilder instance.
+        self._cfg = ControlFlowGraph()
+        self._block_counter = 0
+        self._edge_counter = 0
+
         # Register project-specific exception classes for hierarchy matching
         register_project_exceptions(self.cg)
 
