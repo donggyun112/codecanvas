@@ -322,71 +322,81 @@ function applyPositions(
 }
 
 /**
- * Post-layout pass: center branch children under their parent node.
+ * Post-layout pass: nudge branch parent nodes horizontally so they
+ * sit above the midpoint of their direct children.
  *
- * ELK's layered algorithm doesn't guarantee that a branch node's
- * true/false children are symmetric around the parent center. This
- * pass finds branch points (nodes with 2+ outgoing edges to the
- * same next layer) and shifts the children group so their midpoint
- * aligns with the parent center.
+ * Instead of moving children (which cascades and breaks downstream),
+ * we move the **parent** to center above its children. This is safe
+ * because the parent's own parent (if any) will be adjusted in a
+ * later top-down pass.
+ *
+ * Processes top-down so outer branches settle first.
  */
 function centerBranchChildren(
   nodes: Node[],
   edges: Edge[],
 ): { nodes: Node[]; edges: Edge[] } {
   const nodeById = new Map<string, Node>();
-  for (const n of nodes) nodeById.set(n.id, n);
+  for (const n of nodes) {
+    if (!n.parentId) nodeById.set(n.id, n);
+  }
 
-  // Find nodes that have 2+ outgoing edges (branch points)
+  // Outgoing adjacency
   const outgoing: Record<string, string[]> = {};
   for (const e of edges) {
+    if (!nodeById.has(e.source) || !nodeById.has(e.target)) continue;
     if (!outgoing[e.source]) outgoing[e.source] = [];
     outgoing[e.source].push(e.target);
   }
 
-  for (const [parentId, childIds] of Object.entries(outgoing)) {
-    if (childIds.length < 2) continue;
-    const parent = nodeById.get(parentId);
-    if (!parent || parent.parentId) continue; // skip compound children
+  // Branch nodes sorted top-down (lowest Y first)
+  const branchNodes = Object.entries(outgoing)
+    .filter(([, children]) => children.length >= 2)
+    .map(([id]) => nodeById.get(id)!)
+    .filter(Boolean)
+    .sort((a, b) => a.position.y - b.position.y);
 
-    const children = childIds
+  for (const parent of branchNodes) {
+    const childIds = outgoing[parent.id] ?? [];
+    const directChildren = childIds
       .map((id) => nodeById.get(id))
-      .filter((n): n is Node => !!n && !n.parentId);
-    if (children.length < 2) continue;
+      .filter(Boolean) as Node[];
+    if (directChildren.length < 2) continue;
 
-    // Only adjust children that are in the next layer (same Y band for DOWN)
-    const parentY = parent.position.y;
-    const nextLayerChildren = children.filter(
-      (c) => c.position.y > parentY + 10,
-    );
-    if (nextLayerChildren.length < 2) continue;
-
-    // Check they're roughly on the same Y (same layer)
-    const ys = nextLayerChildren.map((c) => c.position.y);
-    const ySpread = Math.max(...ys) - Math.min(...ys);
-    if (ySpread > 50) continue; // not same layer
-
-    const parentW = (parent.style?.width as number) ?? 200;
-    const parentCenter = parent.position.x + parentW / 2;
-
-    // Current midpoint of children group
-    const childCenters = nextLayerChildren.map((c) => {
-      const w = (c.style?.width as number) ?? 200;
-      return c.position.x + w / 2;
+    // Midpoint of direct children centers
+    const childCenters = directChildren.map((c) => {
+      const cw = (c.style?.width as number) ?? 200;
+      return c.position.x + cw / 2;
     });
-    const currentMidpoint =
-      childCenters.reduce((s, x) => s + x, 0) / childCenters.length;
+    const midpoint = childCenters.reduce((s, x) => s + x, 0) / childCenters.length;
 
-    const shift = parentCenter - currentMidpoint;
-    if (Math.abs(shift) < 5) continue; // already centered enough
+    const pw = (parent.style?.width as number) ?? 200;
+    const desiredX = midpoint - pw / 2;
+    const shift = desiredX - parent.position.x;
 
-    // Shift all children in this branch group
-    for (const child of nextLayerChildren) {
-      child.position = {
-        x: child.position.x + shift,
-        y: child.position.y,
-      };
-    }
+    if (Math.abs(shift) < 5) continue;
+
+    // Move parent to center above children
+    parent.position = { x: desiredX, y: parent.position.y };
+  }
+
+  // Second pass: repeat to settle cascading adjustments
+  for (const parent of branchNodes) {
+    const childIds = outgoing[parent.id] ?? [];
+    const directChildren = childIds
+      .map((id) => nodeById.get(id))
+      .filter(Boolean) as Node[];
+    if (directChildren.length < 2) continue;
+
+    const childCenters = directChildren.map((c) => {
+      const cw = (c.style?.width as number) ?? 200;
+      return c.position.x + cw / 2;
+    });
+    const midpoint = childCenters.reduce((s, x) => s + x, 0) / childCenters.length;
+    const pw = (parent.style?.width as number) ?? 200;
+    const desiredX = midpoint - pw / 2;
+    if (Math.abs(desiredX - parent.position.x) < 5) continue;
+    parent.position = { x: desiredX, y: parent.position.y };
   }
 
   return { nodes, edges: [] };
