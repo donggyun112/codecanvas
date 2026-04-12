@@ -61,7 +61,7 @@ Send an actual HTTP request from the sidebar and see which code paths were execu
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - A FastAPI project (other frameworks coming soon)
 
 ## Feedback & Issues

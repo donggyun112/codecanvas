@@ -41,7 +41,7 @@ extension/          VS Code host (TypeScript, tsup)
   ├─ src/flowPanel.ts    Webview panel (flow rendering)
   └─ src/sidebar.ts      Sidebar (endpoint list + Impact Analysis)
 
-webview/            React Flow canvas (React 19, Vite)
+webview/            React Flow canvas (React 18, Vite)
   ├─ src/App.tsx         Main canvas + view switching
   ├─ src/transform/      Per-view data transforms
   │   ├─ projection.ts       Kind-based projection utility
@@ -97,8 +97,11 @@ Use `projectByKind(flowData, kinds, edgeTypes)` to extract nodes/edges for any v
 ## Getting Started
 
 ```bash
-# Install dependencies
+# Install JS dependencies
 pnpm install
+
+# Install Python dependencies
+cd core && pip install -e ".[dev]" && cd ..
 
 # Build (webview + extension)
 pnpm -r run build
@@ -108,12 +111,13 @@ pnpm -r run build
 
 # Run tests
 python3 -m pytest tests/
+# Note: some tracer tests require httpx (pip install httpx)
 ```
 
 ### Requirements
 
 - Node.js 18+
-- Python 3.9+
+- Python 3.10+
 - pnpm
 
 ## VS Code Commands
