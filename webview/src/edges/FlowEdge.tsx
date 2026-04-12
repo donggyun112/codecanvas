@@ -63,10 +63,15 @@ export default function FlowEdge({
   const isFunctionContext = edgeData?.isFunctionContext;
   const isOriginTrace = edgeData?.isOriginTrace;
 
+  // Sequence edges (just "next step") are visually demoted so meaningful
+  // edges (data flow, branch, error) stand out.
+  const edgeKind = edgeData?.kind || '';
+  const isSequence = edgeKind === 'sequence' || edgeKind === 'fall_through';
+
   // 3-way path state edge styling
   let color = baseColor;
-  let strokeWidth = 1.5;
-  let strokeOpacity = 0.5;
+  let strokeWidth = isSequence ? 1 : 1.5;
+  let strokeOpacity = isSequence ? 0.15 : 0.5;
   let strokeDasharray: string | undefined = baseDashed ? '6,3' : undefined;
 
   if (isOriginTrace) {
