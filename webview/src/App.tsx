@@ -114,7 +114,7 @@ export default function App() {
       if (result.nodes.length === 0) { setNodes([]); setEdges([]); return; }
       rfNodes = result.nodes;
       rfEdges = result.edges;
-      layoutDirection = 'RIGHT';
+      layoutDirection = 'DOWN';
     } else {
       // Callstack mode: use FlowGraph with visibility
       const vis = getVisible(flowData, currentLevel, viewMode, isFunctionContext, hasTrace, nodeDrillState);
