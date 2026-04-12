@@ -39,6 +39,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             } else if (msg.type === 'loadPresets') {
                 const presets = this.presets[msg.entryId] || [];
                 this.view?.webview.postMessage({ type: 'presetsLoaded', presets });
+            } else if (msg.type === 'analyzeImpact') {
+                await this.handleImpact(msg.gitRef);
             }
         });
     }
@@ -84,6 +86,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (flow) {
             vscode.commands.executeCommand('codecanvas.showFlowData', flow);
         }
+    }
+
+    private async handleImpact(gitRef?: string) {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!workspaceFolder) return;
+
+        await this.server.ensureRunning();
+        this.view?.webview.postMessage({ type: 'impactLoading' });
+
+        const result = await this.server.getImpact(
+            workspaceFolder.uri.fsPath,
+            { gitRef: gitRef || 'HEAD' },
+        );
+
+        this.view?.webview.postMessage({
+            type: 'impactResult',
+            data: result,
+        });
     }
 
     private savePreset(entryId: string, preset: RequestPreset) {
@@ -191,9 +211,28 @@ function buildSidebarHtml(nonce: string, dataBase64: string): string {
     .schema-info { font-size: 10px; opacity: 0.5; margin-top: 2px; }
     h3 { margin: 0 0 8px 0; font-size: 12px; text-transform: uppercase; opacity: 0.6; }
     .empty { opacity: 0.5; text-align: center; padding: 20px; }
+    .impact-section { margin-bottom: 16px; border-bottom: 1px solid var(--vscode-widget-border); padding-bottom: 12px; }
+    .impact-btn { width: 100%; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);
+                  border: none; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-bottom: 8px; }
+    .impact-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .impact-result { font-size: 11px; }
+    .impact-summary { opacity: 0.7; margin-bottom: 6px; }
+    .impact-ep { padding: 4px 0; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .impact-ep:hover { opacity: 0.8; }
+    .impact-method { font-weight: bold; font-size: 10px; }
+    .impact-path { font-size: 11px; }
+    .impact-risk { font-size: 9px; padding: 1px 4px; border-radius: 8px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+    .impact-func { font-size: 10px; opacity: 0.5; margin-left: 20px; }
+    .impact-loading { opacity: 0.5; font-style: italic; font-size: 11px; }
+    .impact-empty { opacity: 0.4; font-size: 11px; }
 </style>
 </head>
 <body>
+    <div class="impact-section">
+        <h3>Change Impact</h3>
+        <button id="impactBtn" class="impact-btn">🔍 Analyze Uncommitted Changes</button>
+        <div id="impactResult"></div>
+    </div>
     <h3>Entry Points</h3>
     <div id="list"></div>
     <script nonce="${nonce}">
@@ -211,9 +250,112 @@ function buildSidebarHtml(nonce: string, dataBase64: string): string {
         var activeEntryId = null;
         var formRefs = {};
 
+        // Impact analysis
+        var impactBtn = document.getElementById('impactBtn');
+        var impactResult = document.getElementById('impactResult');
+        impactBtn.addEventListener('click', function() {
+            vscode.postMessage({ type: 'analyzeImpact', gitRef: 'HEAD' });
+        });
+
+        function clearNode(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+
         window.addEventListener('message', function(event) {
             if (event.data.type === 'presetsLoaded') renderPresets(event.data.presets);
+            else if (event.data.type === 'impactLoading') {
+                clearNode(impactResult);
+                var loading = document.createElement('div');
+                loading.className = 'impact-loading';
+                loading.textContent = 'Analyzing changes...';
+                impactResult.appendChild(loading);
+            }
+            else if (event.data.type === 'impactResult') {
+                renderImpact(event.data.data);
+            }
         });
+
+        function renderImpact(data) {
+            clearNode(impactResult);
+            if (!data || !data.affectedEndpoints) {
+                var empty = document.createElement('div');
+                empty.className = 'impact-empty';
+                empty.textContent = 'No Python changes detected';
+                impactResult.appendChild(empty);
+                return;
+            }
+            var summary = document.createElement('div');
+            summary.className = 'impact-summary';
+            summary.textContent = data.summary || 'Analysis complete';
+            impactResult.appendChild(summary);
+
+            if (data.affectedFunctions && data.affectedFunctions.length > 0) {
+                var funcTitle = document.createElement('div');
+                funcTitle.style.cssText = 'font-size:10px;opacity:0.5;margin:6px 0 3px;text-transform:uppercase;';
+                funcTitle.textContent = 'Changed Functions';
+                impactResult.appendChild(funcTitle);
+                data.affectedFunctions.forEach(function(f) {
+                    var fd = document.createElement('div');
+                    fd.className = 'impact-func';
+                    fd.style.marginLeft = '0';
+                    fd.textContent = f.name + ' (' + f.filePath.split('/').slice(-2).join('/') + ')';
+                    if (f.riskScore > 0) {
+                        var badge = document.createElement('span');
+                        badge.className = 'impact-risk';
+                        badge.textContent = 'risk ' + f.riskScore;
+                        fd.appendChild(document.createTextNode(' '));
+                        fd.appendChild(badge);
+                    }
+                    impactResult.appendChild(fd);
+                });
+            }
+
+            if (data.affectedEndpoints.length === 0) {
+                var noEp = document.createElement('div');
+                noEp.className = 'impact-empty';
+                noEp.textContent = 'No endpoints affected';
+                impactResult.appendChild(noEp);
+                return;
+            }
+
+            var epTitle = document.createElement('div');
+            epTitle.style.cssText = 'font-size:10px;opacity:0.5;margin:8px 0 3px;text-transform:uppercase;';
+            epTitle.textContent = 'Affected Endpoints';
+            impactResult.appendChild(epTitle);
+
+            data.affectedEndpoints.forEach(function(ep) {
+                var row = document.createElement('div');
+                row.className = 'impact-ep';
+                row.addEventListener('click', function() {
+                    vscode.postMessage({ type: 'selectEntryPoint', entryId: ep.endpointId });
+                });
+
+                var meth = document.createElement('span');
+                meth.className = 'impact-method';
+                meth.style.color = methodColors[ep.method] || '#999';
+                meth.textContent = ep.method;
+
+                var path = document.createElement('span');
+                path.className = 'impact-path';
+                path.textContent = ep.path;
+
+                var risk = document.createElement('span');
+                risk.className = 'impact-risk';
+                risk.textContent = 'depth=' + ep.maxDepth + (ep.aggregateRisk ? ' risk=' + ep.aggregateRisk : '');
+
+                row.appendChild(meth);
+                row.appendChild(path);
+                row.appendChild(risk);
+                impactResult.appendChild(row);
+
+                if (ep.affectedFunctions) {
+                    ep.affectedFunctions.forEach(function(fn) {
+                        var fnDiv = document.createElement('div');
+                        fnDiv.className = 'impact-func';
+                        fnDiv.textContent = 'via ' + fn.split('.').slice(-2).join('.');
+                        impactResult.appendChild(fnDiv);
+                    });
+                }
+            });
+        }
 
         function renderPresets(presets) {
             if (!activePresetBar || !activeEntryId) return;
