@@ -399,6 +399,30 @@ function centerBranchChildren(
     parent.position = { x: desiredX, y: parent.position.y };
   }
 
+  // Final pass: resolve overlaps introduced by centering.
+  // Group top-level nodes by Y band, sort by X, push apart if overlapping.
+  const topLevel = [...nodeById.values()];
+  const yBands = new Map<number, Node[]>();
+  for (const n of topLevel) {
+    const band = Math.round(n.position.y / 20) * 20;
+    if (!yBands.has(band)) yBands.set(band, []);
+    yBands.get(band)!.push(n);
+  }
+  const gap = 25;
+  for (const band of yBands.values()) {
+    if (band.length < 2) continue;
+    band.sort((a, b) => a.position.x - b.position.x);
+    for (let i = 1; i < band.length; i++) {
+      const prev = band[i - 1];
+      const curr = band[i];
+      const prevRight = prev.position.x + ((prev.style?.width as number) ?? 200);
+      const needed = prevRight + gap;
+      if (curr.position.x < needed) {
+        curr.position = { x: needed, y: curr.position.y };
+      }
+    }
+  }
+
   return { nodes, edges: [] };
 }
 
