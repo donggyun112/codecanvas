@@ -517,8 +517,13 @@ class CallGraphBuilder:
             )
             return
 
-        for fpath in py_files:
+        import time
+        batch_size = int(os.environ.get("CODECANVAS_BATCH_SIZE", "50"))
+        sleep_ms = int(os.environ.get("CODECANVAS_THROTTLE_MS", "10"))
+        for i, fpath in enumerate(py_files):
             self._analyze_file(fpath)
+            if sleep_ms > 0 and (i + 1) % batch_size == 0:
+                time.sleep(sleep_ms / 1000.0)
         self._enrich_logic_step_calls()
         self._infer_param_types_from_callers()
         self._analyzed = True
