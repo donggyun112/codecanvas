@@ -1,9 +1,9 @@
 {
-  "name": "codecanvas",
-  "displayName": "CodeCanvas",
+  "name": "pyflowlens",
+  "displayName": "PyFlowLens",
   "description": "Python code flow explainer - visualize API, script, and function entrypoints through your code",
   "version": "0.1.0",
-  "publisher": "codecanvas",
+  "publisher": "dongkseo",
   "engines": {
     "vscode": "^1.85.0"
   },
