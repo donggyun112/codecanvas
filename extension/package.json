@@ -2,7 +2,7 @@
   "name": "pyflowlens",
   "displayName": "PyFlowLens",
   "description": "Visualize Python API execution flows, call graphs, CFG, and data flow. Static analysis + runtime tracing + change impact analysis for FastAPI projects.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "dongkseo",
   "repository": {
     "type": "git",

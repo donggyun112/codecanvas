@@ -41,6 +41,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.view?.webview.postMessage({ type: 'presetsLoaded', presets });
             } else if (msg.type === 'analyzeImpact') {
                 await this.handleImpact(msg.gitRef);
+            } else if (msg.type === 'analyzeProject') {
+                vscode.commands.executeCommand('codecanvas.analyze');
             }
         });
     }
@@ -506,7 +508,19 @@ function buildSidebarHtml(nonce: string, dataBase64: string): string {
         if (data.length === 0) {
             var empty = document.createElement('div');
             empty.className = 'empty';
-            empty.textContent = 'Run "CodeCanvas: Analyze Project" to discover entry points';
+            var analyzeBtn = document.createElement('button');
+            analyzeBtn.className = 'impact-btn';
+            analyzeBtn.style.marginBottom = '8px';
+            analyzeBtn.textContent = 'Analyze Project';
+            analyzeBtn.addEventListener('click', function() {
+                vscode.postMessage({ type: 'analyzeProject' });
+            });
+            empty.appendChild(analyzeBtn);
+            var hint = document.createElement('div');
+            hint.style.fontSize = '11px';
+            hint.style.opacity = '0.5';
+            hint.textContent = 'Discover API endpoints, scripts, and functions';
+            empty.appendChild(hint);
             list.appendChild(empty);
         } else {
             var groups = new Map();
