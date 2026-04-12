@@ -269,7 +269,8 @@ export async function applyElkLayout(
 
   try {
     const laid = await elk.layout(elkGraph as any);
-    return applyPositions(nodes, laid as any);
+    const positioned = applyPositions(nodes, laid as any);
+    return centerBranchChildren(positioned.nodes, edges);
   } catch (err) {
     console.error('ELK layout failed, using fallback', err);
     return fallbackLayout(nodes, direction);
@@ -318,6 +319,77 @@ function applyPositions(
   });
 
   return { nodes: updatedNodes, edges: [] };
+}
+
+/**
+ * Post-layout pass: center branch children under their parent node.
+ *
+ * ELK's layered algorithm doesn't guarantee that a branch node's
+ * true/false children are symmetric around the parent center. This
+ * pass finds branch points (nodes with 2+ outgoing edges to the
+ * same next layer) and shifts the children group so their midpoint
+ * aligns with the parent center.
+ */
+function centerBranchChildren(
+  nodes: Node[],
+  edges: Edge[],
+): { nodes: Node[]; edges: Edge[] } {
+  const nodeById = new Map<string, Node>();
+  for (const n of nodes) nodeById.set(n.id, n);
+
+  // Find nodes that have 2+ outgoing edges (branch points)
+  const outgoing: Record<string, string[]> = {};
+  for (const e of edges) {
+    if (!outgoing[e.source]) outgoing[e.source] = [];
+    outgoing[e.source].push(e.target);
+  }
+
+  for (const [parentId, childIds] of Object.entries(outgoing)) {
+    if (childIds.length < 2) continue;
+    const parent = nodeById.get(parentId);
+    if (!parent || parent.parentId) continue; // skip compound children
+
+    const children = childIds
+      .map((id) => nodeById.get(id))
+      .filter((n): n is Node => !!n && !n.parentId);
+    if (children.length < 2) continue;
+
+    // Only adjust children that are in the next layer (same Y band for DOWN)
+    const parentY = parent.position.y;
+    const nextLayerChildren = children.filter(
+      (c) => c.position.y > parentY + 10,
+    );
+    if (nextLayerChildren.length < 2) continue;
+
+    // Check they're roughly on the same Y (same layer)
+    const ys = nextLayerChildren.map((c) => c.position.y);
+    const ySpread = Math.max(...ys) - Math.min(...ys);
+    if (ySpread > 50) continue; // not same layer
+
+    const parentW = (parent.style?.width as number) ?? 200;
+    const parentCenter = parent.position.x + parentW / 2;
+
+    // Current midpoint of children group
+    const childCenters = nextLayerChildren.map((c) => {
+      const w = (c.style?.width as number) ?? 200;
+      return c.position.x + w / 2;
+    });
+    const currentMidpoint =
+      childCenters.reduce((s, x) => s + x, 0) / childCenters.length;
+
+    const shift = parentCenter - currentMidpoint;
+    if (Math.abs(shift) < 5) continue; // already centered enough
+
+    // Shift all children in this branch group
+    for (const child of nextLayerChildren) {
+      child.position = {
+        x: child.position.x + shift,
+        y: child.position.y,
+      };
+    }
+  }
+
+  return { nodes, edges: [] };
 }
 
 function fallbackLayout(nodes: Node[], direction: 'DOWN' | 'RIGHT' = 'DOWN'): { nodes: Node[]; edges: Edge[] } {
