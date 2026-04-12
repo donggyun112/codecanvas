@@ -1,15 +1,34 @@
 {
   "name": "pyflowlens",
   "displayName": "PyFlowLens",
-  "description": "Python code flow explainer - visualize API, script, and function entrypoints through your code",
-  "version": "0.1.0",
+  "description": "Visualize Python API execution flows, call graphs, CFG, and data flow. Static analysis + runtime tracing + change impact analysis for FastAPI projects.",
+  "version": "0.2.0",
   "publisher": "dongkseo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/donggyun112/codecanvas"
+  },
+  "bugs": {
+    "url": "https://github.com/donggyun112/codecanvas/issues"
+  },
+  "homepage": "https://github.com/donggyun112/codecanvas#readme",
+  "keywords": [
+    "python",
+    "fastapi",
+    "visualization",
+    "call-graph",
+    "control-flow",
+    "data-flow",
+    "static-analysis",
+    "code-review",
+    "impact-analysis"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
     "Visualization",
-    "Other"
+    "Programming Languages"
   ],
   "activationEvents": [
     "onCommand:codecanvas.analyze",
