@@ -528,6 +528,50 @@ class CFGBuilder:
     # Compound statement handlers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _human_branch_labels(test_node) -> tuple[str, str]:
+        """Derive readable true/false branch labels from an if-test AST node.
+
+        For `if not X:` → true="not X", false="X" (removes double-negation).
+        For `if X is None:` → true="None", false="exists".
+        For simple `if X:` → true="yes", false="no".
+        """
+        try:
+            cond = ast.unparse(test_node) if hasattr(ast, "unparse") else ""
+        except Exception:
+            cond = ""
+
+        # `if not X:` → true branch means X is falsy
+        if isinstance(test_node, ast.UnaryOp) and isinstance(test_node.op, ast.Not):
+            inner = ast.unparse(test_node.operand) if hasattr(ast, "unparse") else "X"
+            inner = inner[:30]
+            return (f"not {inner}", inner)
+
+        # `if X is None:` / `if X is not None:`
+        if isinstance(test_node, ast.Compare) and len(test_node.comparators) == 1:
+            op = test_node.ops[0]
+            right = test_node.comparators[0]
+            if isinstance(right, ast.Constant) and right.value is None:
+                left = ast.unparse(test_node.left) if hasattr(ast, "unparse") else "X"
+                left = left[:30]
+                if isinstance(op, ast.Is):
+                    return (f"{left} is None", f"{left} exists")
+                if isinstance(op, ast.IsNot):
+                    return (f"{left} exists", f"{left} is None")
+
+        # `if X == value:` / `if X != value:`
+        if isinstance(test_node, ast.Compare) and len(test_node.comparators) == 1:
+            op = test_node.ops[0]
+            if isinstance(op, (ast.Eq, ast.NotEq)):
+                left = ast.unparse(test_node.left) if hasattr(ast, "unparse") else ""
+                right_str = ast.unparse(test_node.comparators[0]) if hasattr(ast, "unparse") else ""
+                if len(left) + len(right_str) < 40:
+                    if isinstance(op, ast.Eq):
+                        return (f"{left}=={right_str}", f"{left}!={right_str}")
+                    return (f"{left}!={right_str}", f"{left}=={right_str}")
+
+        return ("yes", "no")
+
     def _handle_if(self, stmt, ctx: _Ctx, block_id: str) -> list[str]:
         condition = self._unparse(stmt.test)
         explanation = self._explain_branch(stmt.test, stmt.body, stmt.orelse)
@@ -538,13 +582,15 @@ class CFGBuilder:
         if explanation:
             block.metadata["branch_explanation"] = explanation
 
+        true_label, false_label = self._human_branch_labels(stmt.test)
+
         true_block = self._new_block(
             label=f"if {self._compact(condition)}", kind="block",
             file_path=ctx.func.file_path,
             line_start=stmt.body[0].lineno if stmt.body else stmt.lineno,
         )
         self._add_edge(block_id, true_block.id, kind="true",
-                       condition=condition, label="yes")
+                       condition=condition, label=true_label)
         true_tails = self._walk_body(stmt.body, ctx, true_block.id)
 
         if stmt.orelse:
@@ -554,13 +600,13 @@ class CFGBuilder:
                 line_start=stmt.orelse[0].lineno,
             )
             self._add_edge(block_id, false_block.id, kind="false",
-                           condition=condition, label="no")
+                           condition=condition, label=false_label)
             false_tails = self._walk_body(stmt.orelse, ctx, false_block.id)
         else:
             merge = self._new_block(label="merge", kind="merge",
                                     file_path=ctx.func.file_path)
             self._add_edge(block_id, merge.id, kind="false",
-                           condition=condition, label="no")
+                           condition=condition, label=false_label)
             false_tails = [merge.id]
 
         all_tails = true_tails + false_tails
