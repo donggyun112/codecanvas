@@ -22,3 +22,9 @@ def test_get_builder_is_cached():
 def test_get_builder_missing_dir_raises():
     with pytest.raises(ProjectNotFoundError):
         get_builder("/no/such/dir/xyz")
+
+
+def test_get_builder_normalizes_path():
+    b1 = get_builder(str(SAMPLE))
+    b2 = get_builder(str(SAMPLE) + "/")   # trailing slash, same dir
+    assert b1 is b2

@@ -79,3 +79,20 @@ def test_analyze_impact_no_changes_message():
     out = queries.analyze_impact(_b(), diff_text="not a diff")
     assert "summary" in out
     assert out["changed_functions"] == []
+
+
+def test_analyze_impact_rejects_option_injection_ref(tmp_path):
+    sentinel = tmp_path / "pwned.txt"
+    out = queries.analyze_impact(_b(), git_ref=f"--output={sentinel}")
+    assert "error" in out, out
+    assert not sentinel.exists(), "git must not have written the sentinel file"
+
+
+def test_is_safe_git_ref():
+    from codecanvas.graph.impact import _is_safe_git_ref
+    assert _is_safe_git_ref("HEAD~1..HEAD")
+    assert _is_safe_git_ref("main...feature/x")
+    assert _is_safe_git_ref("abc123")
+    assert not _is_safe_git_ref("--output=/tmp/x")
+    assert not _is_safe_git_ref("HEAD..--output=/tmp/x")
+    assert not _is_safe_git_ref("")

@@ -23,13 +23,15 @@ def get_builder(project_path: str) -> FlowGraphBuilder:
     if not Path(project_path).is_dir():
         raise ProjectNotFoundError(f"Directory not found: {project_path}")
 
-    if project_path in _builders:
-        _builders.move_to_end(project_path)
-        return _builders[project_path]
+    key = str(Path(project_path).resolve())
+
+    if key in _builders:
+        _builders.move_to_end(key)
+        return _builders[key]
 
     builder = FlowGraphBuilder(project_path)
     builder.call_graph.analyze_project()  # idempotent; warm via disk cache
-    _builders[project_path] = builder
+    _builders[key] = builder
     while len(_builders) > _MAX_BUILDERS:
         _builders.popitem(last=False)
     return builder

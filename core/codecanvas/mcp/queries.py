@@ -161,6 +161,12 @@ def analyze_impact(builder, diff_text: str | None = None,
     """
     from codecanvas.graph.impact import ImpactAnalyzer
 
+    if not diff_text and git_ref is not None:
+        from codecanvas.graph.impact import _is_safe_git_ref
+        if not _is_safe_git_ref(git_ref):
+            return {"error": f"Invalid git_ref: {git_ref!r}. "
+                             f"Expected a git revision or range like 'HEAD~1..HEAD'."}
+
     analyzer = ImpactAnalyzer(
         builder.call_graph, builder.project_root,
         entrypoints=builder.get_entrypoints(), flow_builder=None,

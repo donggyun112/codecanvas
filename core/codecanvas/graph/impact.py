@@ -111,8 +111,25 @@ def parse_unified_diff(diff_text: str) -> list[ChangedHunk]:
     return hunks
 
 
+_SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_./~^@{}-]+(\.\.\.?[A-Za-z0-9_./~^@{}-]+)?$")
+
+
+def _is_safe_git_ref(ref_range: str) -> bool:
+    """Reject option-injection: no part may start with '-', and the whole
+    value must match a conservative revision/range allowlist."""
+    if not ref_range or not _SAFE_GIT_REF.match(ref_range):
+        return False
+    # Split on '..' / '...' and ensure no component looks like an option flag.
+    for part in re.split(r"\.\.\.?", ref_range):
+        if part.startswith("-"):
+            return False
+    return True
+
+
 def get_git_diff(project_root: str, ref_range: str = "HEAD~1..HEAD") -> str:
     """Get unified diff from git."""
+    if not _is_safe_git_ref(ref_range):
+        return ""
     try:
         result = subprocess.run(
             ["git", "diff", "--unified=0", ref_range],
