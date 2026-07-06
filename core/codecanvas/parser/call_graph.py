@@ -601,6 +601,8 @@ class CallGraphBuilder:
             return False
         if payload.get("version") != CACHE_FORMAT_VERSION:
             return False
+        if payload.get("analyzer") != _analyzer_fingerprint():
+            return False
         if payload.get("signature") != signature:
             return False
 
@@ -632,6 +634,7 @@ class CallGraphBuilder:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "version": CACHE_FORMAT_VERSION,
+                "analyzer": _analyzer_fingerprint(),
                 "signature": signature,
                 "functions": {
                     qname: _function_to_dict(func)

@@ -138,6 +138,24 @@ class TestCallGraphCache:
         d = b2.build_flow(ep2).to_dict()
         assert len(d["nodes"]) > 0
 
+    def test_callgraph_cache_rejects_stale_analyzer(self, tmp_path, monkeypatch):
+        from pathlib import Path
+        proj = _make_project(tmp_path)
+
+        # Cold build writes callgraph.json with the real fingerprint.
+        b1 = FlowGraphBuilder(proj)
+        ep = next(e for e in b1.get_entrypoints() if e.kind == "api")
+        b1.build_flow(ep)
+
+        # Simulate an analyzer whose source changed.
+        monkeypatch.setattr(cg_mod, "_analyzer_fingerprint", lambda: "STALE")
+
+        b2 = FlowGraphBuilder(proj)
+        sig = cg_mod._files_signature(
+            cg_mod._iter_project_python_files(Path(proj))
+        )
+        assert b2.call_graph._load_cache(sig) is False
+
 
 class TestLazyAST:
     def test_ast_nodes_populated_from_cache(self, tmp_path):
