@@ -381,3 +381,117 @@ def function_flow(builder, function: str) -> dict:
     if truncated:
         out["note"] = f"outline truncated at {len(lines)} lines"
     return out
+
+
+def _cyclomatic(node) -> int:
+    """Approximate McCabe complexity: 1 + count of decision points."""
+    import ast
+    count = 1
+    for n in ast.walk(node):
+        if isinstance(n, (ast.If, ast.For, ast.AsyncFor, ast.While,
+                          ast.ExceptHandler, ast.IfExp)):
+            count += 1
+        elif isinstance(n, ast.BoolOp):
+            count += len(n.values) - 1
+        elif isinstance(n, ast.comprehension):
+            count += 1 + len(n.ifs)
+        elif hasattr(ast, "match_case") and isinstance(n, ast.match_case):
+            count += 1
+    return count
+
+
+def reaching_conditions(builder, function: str, target=None) -> dict:
+    """Guard conditions under which each outcome (return/raise) is reached.
+
+    This re-expresses control-flow-graph reasoning as *facts* an agent can
+    act on, instead of a node/edge graph. For each outcome it reports the
+    *lexically enclosing* branch guards (if/elif/else, except, loop) — enough
+    to spot asymmetries like an error-path ``return`` that skips a guard the
+    success path enforces (e.g. "payment saved" returned from an except).
+
+    ``target``:
+    - ``None`` (default): every return/raise with its guards.
+    - ``"return"`` / ``"raise"``: only that kind.
+    - ``"line:N"``: the guards enclosing the statement at line N.
+
+    Also returns approximate cyclomatic complexity and any statements that
+    are unreachable (follow an unconditional return/raise/break in the same
+    block). Guards are lexical, not full path conditions.
+    """
+    import ast
+    from codecanvas.mcp import outline
+
+    func, err = resolve_function(builder, function)
+    if err is not None:
+        return err
+    node = builder.call_graph.get_ast_node(func.qualified_name)
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return {
+            "error": f"No function body available for '{func.qualified_name}' "
+                     f"(it may be a class or an unparsed definition).",
+        }
+
+    outcomes: list[dict] = []
+    line_guards: dict[int, list[str]] = {}
+    dead: list[int] = []
+    try_types = (ast.Try, ast.TryStar) if hasattr(ast, "TryStar") else (ast.Try,)
+
+    def walk(stmts, guards):
+        terminated = False
+        for s in stmts:
+            if terminated:
+                dead.append(s.lineno)
+            line_guards.setdefault(s.lineno, list(guards))
+            if isinstance(s, ast.Return):
+                outcomes.append({"at": s.lineno, "kind": "return",
+                                 "detail": outline._return_val(s.value),
+                                 "guards": list(guards)})
+                terminated = True
+            elif isinstance(s, ast.Raise):
+                outcomes.append({"at": s.lineno, "kind": "raise",
+                                 "detail": outline._raise_txt(s.exc),
+                                 "guards": list(guards)})
+                terminated = True
+            elif isinstance(s, (ast.Break, ast.Continue)):
+                terminated = True
+            elif isinstance(s, ast.If):
+                cond = outline._expr(s.test)
+                walk(s.body, guards + [cond])
+                if s.orelse:
+                    walk(s.orelse, guards + [f"not ({cond})"])
+            elif isinstance(s, try_types):
+                walk(s.body, guards)
+                for h in s.handlers:
+                    typ = outline._expr(h.type) if h.type else ""
+                    walk(h.body, guards + [f"except {typ}".strip()])
+                walk(s.orelse, guards)
+                walk(s.finalbody, guards)
+            elif isinstance(s, (ast.For, ast.AsyncFor, ast.While)):
+                walk(s.body, guards + ["loop"])
+                walk(s.orelse, guards)
+            elif isinstance(s, (ast.With, ast.AsyncWith)):
+                walk(s.body, guards)
+
+    walk(node.body, [])
+
+    if target is None:
+        selected = outcomes
+    elif target in ("return", "raise"):
+        selected = [o for o in outcomes if o["kind"] == target]
+    elif target.startswith("line:") and target[5:].isdigit():
+        ln = int(target[5:])
+        g = line_guards.get(ln)
+        selected = [{"at": ln, "kind": "line", "guards": g}] if g is not None else []
+    else:
+        return {"error": f"Invalid target {target!r}. "
+                         f"Use 'return', 'raise', or 'line:N'."}
+
+    out = {
+        "function": func.qualified_name,
+        "location": _location(func),
+        "outcomes": selected,
+        "cyclomatic": _cyclomatic(node),
+    }
+    if dead:
+        out["dead_code"] = sorted(set(dead))
+    return out

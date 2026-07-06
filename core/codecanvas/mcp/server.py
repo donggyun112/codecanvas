@@ -84,6 +84,22 @@ def function_flow(project_path: str, function: str) -> dict:
     return _with_builder(project_path, lambda b: queries.function_flow(b, function))
 
 
+@mcp.tool()
+def reaching_conditions(project_path: str, function: str,
+                        target: str | None = None) -> dict:
+    """Guards under which each return/raise in a function is reached.
+
+    Re-expresses control-flow reasoning as facts: for each outcome, the
+    lexically enclosing branch conditions (if/elif/else, except, loop).
+    Surfaces error-path vs success-path asymmetries (e.g. a success response
+    returned from an except handler), plus cyclomatic complexity and any
+    unreachable statements. `target`: omit for all return/raise; or
+    "return" / "raise" / "line:N" to focus. `function` = qualified name,
+    bare name, or file:line."""
+    return _with_builder(
+        project_path, lambda b: queries.reaching_conditions(b, function, target))
+
+
 def main() -> None:
     """Console entry point: run the stdio MCP server."""
     mcp.run()

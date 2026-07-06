@@ -265,3 +265,66 @@ def test_analyze_impact_mixed_diff_reports_both():
     changed = [c["function"] for c in out["changed_functions"]]
     assert any(name.endswith(".verify_user") for name in changed), changed
     assert out["skipped_files"] == ["README.md"]
+
+
+REACH_APP = {
+    "svc.py": """
+        def save():
+            pass
+
+        def charge(ok, force):
+            if not ok:
+                raise ValueError("bad")
+            try:
+                save()
+            except Exception:
+                return {"saved": False}
+            if force:
+                return {"forced": True}
+            return {"ok": True}
+    """,
+}
+
+
+def test_reaching_conditions_returns_guarded_outcomes(tmp_path):
+    out = queries.reaching_conditions(_tmp_builder(tmp_path, REACH_APP), "charge")
+    kinds = {(o["kind"], tuple(o["guards"])) for o in out["outcomes"]}
+    # raise is guarded by `not ok`
+    assert any(k == "raise" and any("ok" in g for g in guards)
+               for k, guards in kinds), out["outcomes"]
+    # error-path return is under the except handler
+    assert any(k == "return" and any("except" in g for g in guards)
+               for k, guards in kinds), out["outcomes"]
+
+
+def test_reaching_conditions_success_path_is_unguarded(tmp_path):
+    out = queries.reaching_conditions(_tmp_builder(tmp_path, REACH_APP), "charge")
+    # the final `return {"ok": True}` is the fallthrough: no enclosing guard
+    ok_returns = [o for o in out["outcomes"]
+                  if o["kind"] == "return" and "ok" in o["detail"]]
+    assert ok_returns and ok_returns[0]["guards"] == [], ok_returns
+
+
+def test_reaching_conditions_target_raise_filters(tmp_path):
+    out = queries.reaching_conditions(
+        _tmp_builder(tmp_path, REACH_APP), "charge", target="raise")
+    assert out["outcomes"]
+    assert all(o["kind"] == "raise" for o in out["outcomes"])
+
+
+def test_reaching_conditions_reports_cyclomatic(tmp_path):
+    out = queries.reaching_conditions(_tmp_builder(tmp_path, REACH_APP), "charge")
+    # if + try/except + if  → complexity clearly above 1
+    assert out["cyclomatic"] >= 3, out["cyclomatic"]
+
+
+def test_reaching_conditions_detects_dead_code(tmp_path):
+    out = queries.reaching_conditions(_tmp_builder(tmp_path, {
+        "d.py": """
+            def f(x):
+                return x
+                y = x + 1
+                return y
+        """,
+    }), "f")
+    assert out.get("dead_code"), out
