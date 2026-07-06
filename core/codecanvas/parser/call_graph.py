@@ -377,6 +377,28 @@ def _chain_root_name(node: ast.expr) -> str | None:
         return None
 
 
+def _is_test_path(fp: str) -> bool:
+    """True if a file path looks like test code (dir segment or filename)."""
+    parts = (fp or "").replace("\\", "/").split("/")
+    if any(seg in ("tests", "test") for seg in parts):
+        return True
+    base = parts[-1] if parts else ""
+    return base.startswith("test_") or base.endswith("_test.py")
+
+
+def _prefer_non_test(candidates: list, caller_file: str | None) -> list:
+    """Drop test-path candidates when resolving from production code.
+
+    A production call binding to a same-named test fixture is almost always
+    a name-collision misresolution. If the caller is itself test code, or if
+    every candidate is test code, the list is returned unchanged.
+    """
+    if _is_test_path(caller_file or ""):
+        return candidates
+    non_test = [f for f in candidates if not _is_test_path(f.file_path or "")]
+    return non_test or candidates
+
+
 def _chain_has_any(node: ast.expr, hints: set[str]) -> bool:
     """Check if any attribute in a method chain matches the hint set."""
     current = node
@@ -1866,6 +1888,10 @@ class CallGraphBuilder:
             self._last_resolve_confidence = None
             return None
         resolved_candidates = [self._functions[qname] for qname in candidates]
+        # A production caller resolving to a same-named test fixture is a
+        # name-collision misresolution; prefer non-test candidates. This also
+        # makes the ambiguous fallback deterministic w.r.t. filesystem order.
+        resolved_candidates = _prefer_non_test(resolved_candidates, caller.file_path)
 
         # Exact: local nested function
         local_nested = [

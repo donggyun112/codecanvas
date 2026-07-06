@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -537,6 +538,40 @@ class TestMongoDbDetection:
         )
         signals = CallGraphBuilder._aggregate_review_signals(handler)
         assert "db_write" in signals, signals
+
+
+class TestResolverPrefersNonTest:
+    """A production call must not bind to a same-named test fixture.
+
+    The bug is order-dependent (the ambiguous fallback returned the first
+    candidate, whose order follows filesystem walk order), so the fix is
+    tested via its deterministic helper rather than a flaky walk-order repro.
+    """
+
+    def _cand(self, path):
+        return SimpleNamespace(file_path=path, qualified_name=path)
+
+    def test_prefer_non_test_drops_test_candidates_for_prod_caller(self) -> None:
+        from codecanvas.parser.call_graph import _prefer_non_test
+        real = self._cand("src/core.py")
+        fake = self._cand("tests/fixtures.py")
+        # test candidate first (simulating adverse walk order)
+        out = _prefer_non_test([fake, real], caller_file="src/api.py")
+        assert out == [real], out
+
+    def test_prefer_non_test_keeps_all_when_only_test_candidates(self) -> None:
+        from codecanvas.parser.call_graph import _prefer_non_test
+        fake = self._cand("tests/fixtures.py")
+        out = _prefer_non_test([fake], caller_file="src/api.py")
+        assert out == [fake]
+
+    def test_prefer_non_test_noop_for_test_caller(self) -> None:
+        from codecanvas.parser.call_graph import _prefer_non_test
+        real = self._cand("src/core.py")
+        fake = self._cand("tests/fixtures.py")
+        # caller is itself test code → test candidates stay eligible
+        out = _prefer_non_test([fake, real], caller_file="tests/a.py")
+        assert out == [fake, real]
 
 
 class TestLlmSdkDetection:
