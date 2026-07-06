@@ -377,6 +377,24 @@ def _chain_root_name(node: ast.expr) -> str | None:
         return None
 
 
+def _param_names(args: ast.arguments) -> list[str]:
+    """All parameter names in source order, across every argument kind.
+
+    Covers positional-only, positional, ``*args``, keyword-only, and
+    ``**kwargs`` (bare ``ast.args.args`` misses all but plain positional).
+    The leading ``self``/``cls`` receiver is dropped.
+    """
+    names: list[str] = []
+    names.extend(a.arg for a in getattr(args, "posonlyargs", []))
+    names.extend(a.arg for a in args.args)
+    if args.vararg:
+        names.append("*" + args.vararg.arg)
+    names.extend(a.arg for a in args.kwonlyargs)
+    if args.kwarg:
+        names.append("**" + args.kwarg.arg)
+    return [n for n in names if n not in ("self", "cls")]
+
+
 def _is_test_path(fp: str) -> bool:
     """True if a file path looks like test code (dir segment or filename)."""
     parts = (fp or "").replace("\\", "/").split("/")
@@ -861,7 +879,7 @@ class CallGraphBuilder:
                     calls=self._extract_calls(node),
                     references=self._extract_references(node),
                     docstring=ast.get_docstring(node) or "",
-                    params=[a.arg for a in node.args.args if a.arg != "self"],
+                    params=_param_names(node.args),
                     return_annotation=self._annotation_str(node.returns),
                     class_qname=class_qname,
                     is_protocol=bool(enclosing and enclosing.is_protocol),
@@ -893,7 +911,7 @@ class CallGraphBuilder:
                                 class_name=class_name,
                                 calls=self._extract_calls(child),
                                 docstring=ast.get_docstring(child) or "",
-                                params=[a.arg for a in child.args.args if a.arg != "self"],
+                                params=_param_names(child.args),
                                 return_annotation=self._annotation_str(child.returns),
                                 class_qname=class_qname,
                                 local_types=nested_local_types,
@@ -935,7 +953,7 @@ class CallGraphBuilder:
                     decorators=[self._decorator_name(d) for d in node.decorator_list],
                     calls=self._extract_calls(init_node) if init_node else [],
                     docstring=ast.get_docstring(node) or "",
-                    params=[a.arg for a in init_node.args.args if a.arg != "self"] if init_node else [],
+                    params=_param_names(init_node.args) if init_node else [],
                     return_annotation=node.name,
                     definition_type="schema" if is_schema else "class",
                     class_qname=child_class_qname,

@@ -540,6 +540,31 @@ class TestMongoDbDetection:
         assert "db_write" in signals, signals
 
 
+class TestParamExtraction:
+    """Signature extraction must capture all argument kinds, not just plain
+    positional (posonly / *args / kwonly / **kwargs)."""
+
+    def test_captures_all_arg_kinds(self, tmp_path: Path) -> None:
+        _write_files(
+            tmp_path,
+            {"m.py": "def f(a, b, /, c, *args, d, e=1, **kwargs):\n    return a\n"},
+        )
+        cg = CallGraphBuilder(str(tmp_path))
+        cg.analyze_project()
+        fn = cg._find_function("f", str(tmp_path / "m.py"))
+        assert fn.params == ["a", "b", "c", "*args", "d", "e", "**kwargs"], fn.params
+
+    def test_drops_self_keeps_keyword_only(self, tmp_path: Path) -> None:
+        _write_files(
+            tmp_path,
+            {"m.py": "class C:\n    def m(self, x, *, y):\n        return x\n"},
+        )
+        cg = CallGraphBuilder(str(tmp_path))
+        cg.analyze_project()
+        fn = cg._find_function("m", str(tmp_path / "m.py"))
+        assert fn.params == ["x", "y"], fn.params
+
+
 class TestResolverPrefersNonTest:
     """A production call must not bind to a same-named test fixture.
 
