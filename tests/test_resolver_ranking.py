@@ -133,3 +133,28 @@ def test_miss_returns_suggestions(tmp_path):
     func, err = queries.resolve_function(b, "kompute")
     assert func is None
     assert "suggestions" in err and isinstance(err["suggestions"], list)
+
+
+def test_file_line_single_resolves(tmp_path):
+    b = _resolved(tmp_path, {
+        "app/only.py":
+            "def alpha():\n"
+            "    return 1\n",
+    })
+    func, err = queries.resolve_function(b, "app/only.py:1")
+    assert err is None
+    assert func is not None and func.name == "alpha"
+
+
+def test_file_line_multiple_returns_candidates(tmp_path):
+    b = _resolved(tmp_path, {
+        "pkg_a/svc.py":
+            "def run():\n"
+            "    return 1\n",
+        "pkg_b/svc.py":
+            "def go():\n"
+            "    return 2\n",
+    })
+    func, err = queries.resolve_function(b, "svc.py:1")
+    assert func is None
+    assert "candidates" in err and len(err["candidates"]) == 2

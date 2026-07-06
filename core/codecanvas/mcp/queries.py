@@ -25,9 +25,21 @@ def _is_test_path(fp: str) -> bool:
 
 
 def _rank_key(cg, f) -> tuple:
-    """Ranking key, higher is better: (non_test, concrete, fan_in)."""
+    """Ranking key, higher is better: (non_test, concrete, fan_in).
+
+    is_protocol/is_abstract are set on a class's own FunctionDef, not on
+    its methods' FunctionDefs (see call_graph.py's ast.ClassDef handling
+    vs. _visit_definitions). A method inherits its class's interface-ness
+    via class_qname, so fall back to looking up the class definition when
+    the method itself doesn't carry the flags.
+    """
+    is_protocol, is_abstract = f.is_protocol, f.is_abstract
+    if f.class_qname and not (is_protocol or is_abstract):
+        cls = cg.get_function(f.class_qname)
+        if cls is not None:
+            is_protocol, is_abstract = cls.is_protocol, cls.is_abstract
     non_test = not _is_test_path(f.file_path or "")
-    concrete = not (f.is_protocol or f.is_abstract)
+    concrete = not (is_protocol or is_abstract)
     fan_in = len(cg.get_callers(f.qualified_name))
     return (non_test, concrete, fan_in)
 
@@ -87,12 +99,17 @@ def resolve_function(builder, ref: str):
         path_part, _, line_part = ref.rpartition(":")
         if line_part.isdigit():
             line = int(line_part)
+            matches = []
             for f in funcs:
                 fp = f.file_path or ""
                 same = fp.endswith(path_part) or path_part.endswith(os.path.basename(fp))
                 end = f.line_end or f.line_start
                 if same and f.line_start <= line <= end:
-                    return f, None
+                    matches.append(f)
+            if len(matches) == 1:
+                return matches[0], None
+            if len(matches) > 1:
+                return _rank_and_select(cg, ref, matches)
 
     # 3. Bare name or dot-boundary suffix (Class.method / module.Class.method).
     cands = [f for f in funcs
