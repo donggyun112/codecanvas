@@ -61,9 +61,29 @@ def resolve_function(builder, ref: str):
     }
 
 
-def list_entrypoints(builder) -> dict:
-    """List discovered entrypoints (APIs + scripts + functions)."""
+def list_entrypoints(builder, filter=None, kind=None) -> dict:
+    """List discovered entrypoints (APIs + scripts + functions).
+
+    Optional narrowing, applied BEFORE the output cap so a target in a
+    large project is not hidden by truncation:
+    - ``kind``: keep only entrypoints of this kind (e.g. "api", "script").
+    - ``filter``: case-insensitive substring matched against the method,
+      path, handler, id, and tags.
+    """
     eps = builder.get_entrypoints()
+
+    if kind:
+        eps = [e for e in eps if e.kind == kind]
+    if filter:
+        needle = filter.lower()
+        eps = [
+            e for e in eps
+            if needle in (
+                f"{e.method} {e.path} {e.handler_name} {e.id} "
+                f"{' '.join(e.tags or [])}"
+            ).lower()
+        ]
+
     rows = [
         {
             "id": e.id,

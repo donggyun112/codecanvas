@@ -17,6 +17,28 @@ def test_list_entrypoints_finds_login_route():
     assert any(m == "POST" and p.endswith("/login") for m, p in paths), paths
 
 
+def test_list_entrypoints_filter_narrows_to_login():
+    out = queries.list_entrypoints(_b(), filter="login")
+    assert out["count"] >= 1
+    for e in out["entrypoints"]:
+        hay = f"{e['method']} {e['path']} {e['handler']} {e['id']} {' '.join(e['tags'])}".lower()
+        assert "login" in hay, e
+    assert any(e["path"].endswith("/login") for e in out["entrypoints"])
+
+
+def test_list_entrypoints_kind_filters_to_api():
+    out = queries.list_entrypoints(_b(), kind="api")
+    assert out["count"] >= 1
+    assert all(e["kind"] == "api" for e in out["entrypoints"])
+
+
+def test_list_entrypoints_filter_no_match_is_empty():
+    out = queries.list_entrypoints(_b(), filter="zzz_no_such_route_zzz")
+    assert out["count"] == 0
+    assert out["entrypoints"] == []
+
+
+
 def test_resolve_by_bare_name():
     func, err = queries.resolve_function(_b(), "verify_user")
     assert err is None

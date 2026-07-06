@@ -26,9 +26,18 @@ def _with_builder(project_path: str, fn):
 
 
 @mcp.tool()
-def list_entrypoints(project_path: str) -> dict:
-    """List API/script/function entrypoints discovered in the project."""
-    return _with_builder(project_path, queries.list_entrypoints)
+def list_entrypoints(project_path: str, filter: str | None = None,
+                     kind: str | None = None) -> dict:
+    """List API/script/function entrypoints discovered in the project.
+
+    On large projects the result is capped, so narrow it: `filter` is a
+    case-insensitive substring matched over method/path/handler/id/tags
+    (e.g. "login"), and `kind` keeps one kind ("api", "script", "function").
+    """
+    return _with_builder(
+        project_path,
+        lambda b: queries.list_entrypoints(b, filter=filter, kind=kind),
+    )
 
 
 @mcp.tool()
