@@ -481,7 +481,31 @@ DB_PATTERNS = {
     "scalar", "scalars", "all", "first", "one", "one_or_none", "get",
     "filter", "filter_by", "where", "select", "insert", "update",
 }
-DB_OBJECT_HINTS = {"session", "db", "database", "conn", "connection", "cursor", "engine", "supabase"}
+DB_OBJECT_HINTS = {"session", "db", "database", "conn", "connection", "cursor", "engine", "supabase", "collection"}
+
+# MongoDB (pymongo / motor / beanie) collection methods. The suffixed forms
+# (`_one`, `_many`, `_documents`, `_and_`, `bulk_write`) are distinctive enough
+# to classify by method name alone; generic names need a collection-like object.
+MONGO_WRITE_METHODS = {
+    "insert_one", "insert_many", "update_one", "update_many", "replace_one",
+    "delete_one", "delete_many", "find_one_and_update", "find_one_and_delete",
+    "find_one_and_replace", "bulk_write",
+}
+MONGO_READ_METHODS = {
+    "find_one", "count_documents", "estimated_document_count", "aggregate",
+}
+MONGO_METHODS = MONGO_WRITE_METHODS | MONGO_READ_METHODS
+# Names that are DB ops only when the receiver looks like a collection
+# (e.g. `payments_collection.find(...)`), since they collide with stdlib.
+MONGO_GENERIC_METHODS = {"find", "distinct"}
+
+
+def _is_db_object_name(name: str | None) -> bool:
+    """True if a receiver name looks like a DB session/collection object."""
+    if not name:
+        return False
+    low = name.lower()
+    return low in DB_OBJECT_HINTS or low.endswith("_collection")
 
 HTTP_PATTERNS = {
     "get", "post", "put", "delete", "patch", "head", "options",
@@ -3109,7 +3133,7 @@ class CallGraphBuilder:
         """
         DB_WRITE_OPS = {"add", "delete", "merge", "insert", "update", "execute",
                         "commit", "flush", "remove", "bulk_save_objects",
-                        "bulk_insert_mappings", "bulk_update_mappings"}
+                        "bulk_insert_mappings", "bulk_update_mappings"} | MONGO_WRITE_METHODS
         signals: set[str] = set()
         for call in func.calls:
             if call.is_raise:
@@ -3739,11 +3763,19 @@ class CallGraphBuilder:
         - select(User).where(...) (SQLAlchemy 2.0 style)
         - client.table("users").insert({...}).execute() (Supabase)
         - client.from_("users").select("*").execute() (Supabase)
+        - payments_collection.insert_one({...}) (pymongo / motor)
         """
         if isinstance(node.func, ast.Attribute):
+            # MongoDB: distinctive collection methods classify on name alone;
+            # generic ones (find/distinct) require a collection-like receiver.
+            if node.func.attr in MONGO_METHODS:
+                return True
+            if node.func.attr in MONGO_GENERIC_METHODS:
+                if _is_db_object_name(_chain_root_name(node.func.value)):
+                    return True
             if node.func.attr in DB_PATTERNS:
                 root = _chain_root_name(node.func.value)
-                if root is not None and root.lower() in DB_OBJECT_HINTS:
+                if _is_db_object_name(root):
                     return True
                 # Chain calls like client.table().insert().execute():
                 # if intermediate methods are DB-specific, it's a DB call.

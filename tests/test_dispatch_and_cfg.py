@@ -472,6 +472,73 @@ class TestChainCallDecomposition:
         assert len(db_calls) >= 1
 
 
+class TestMongoDbDetection:
+    """pymongo / motor collection calls should be detected as DB effects."""
+
+    def _handler_calls(self, tmp_path: Path, body: str, name: str):
+        _write_files(
+            tmp_path,
+            {
+                "app.py": f"""
+                    from fastapi import FastAPI
+                    from src.infrastructure.db import payments_collection, orgs_collection
+
+                    app = FastAPI()
+
+                    @app.post("/x")
+                    async def {name}(data: dict):
+{body}
+                """,
+            },
+        )
+        cg = CallGraphBuilder(str(tmp_path))
+        cg.analyze_project()
+        handler = cg._find_function(name, str(tmp_path / "app.py"))
+        assert handler is not None
+        return handler
+
+    def test_insert_one_is_db_write(self, tmp_path: Path) -> None:
+        handler = self._handler_calls(
+            tmp_path,
+            "                        await payments_collection.insert_one(data)\n"
+            "                        return {}",
+            "create_payment",
+        )
+        db_calls = [c for c in handler.calls if c.is_db_call]
+        assert len(db_calls) >= 1, [c.func_name for c in handler.calls]
+        assert db_calls[0].db_detail.get("operation") == "insert_one"
+
+    def test_find_one_is_db_call(self, tmp_path: Path) -> None:
+        handler = self._handler_calls(
+            tmp_path,
+            "                        org = await orgs_collection.find_one({'_id': 1})\n"
+            "                        return org",
+            "get_org",
+        )
+        assert any(c.is_db_call for c in handler.calls), [c.func_name for c in handler.calls]
+
+    def test_find_on_collection_object(self, tmp_path: Path) -> None:
+        # Generic method name 'find' only counts on a collection-like object.
+        handler = self._handler_calls(
+            tmp_path,
+            "                        rows = payments_collection.find({})\n"
+            "                        return list(rows)",
+            "list_payments",
+        )
+        assert any(c.is_db_call for c in handler.calls), [c.func_name for c in handler.calls]
+
+    def test_write_vs_read_signal(self, tmp_path: Path) -> None:
+        # insert_one must be classified as db_write, not db_read.
+        handler = self._handler_calls(
+            tmp_path,
+            "                        await payments_collection.insert_one(data)\n"
+            "                        return {}",
+            "write_payment",
+        )
+        signals = CallGraphBuilder._aggregate_review_signals(handler)
+        assert "db_write" in signals, signals
+
+
 # -----------------------------------------------------------------------
 # 5. CFG correctness for nested structures
 # -----------------------------------------------------------------------
