@@ -358,6 +358,31 @@ def test_call_tree_tags_effects(tmp_path):
     assert "http" in leaf["effects"], leaf
 
 
+TESTNODE_APP = {
+    "svc.py": """
+        def handler():
+            return helper()
+    """,
+    "tests/helpers.py": """
+        def helper():
+            return 1
+    """,
+}
+
+
+def test_call_tree_excludes_test_path_nodes_by_default(tmp_path):
+    out = queries.call_tree(_tmp_builder(tmp_path, TESTNODE_APP), "handler")
+    locs = [n["location"] for n in out["nodes"]]
+    assert not any("/tests/" in loc for loc in locs), out["nodes"]
+
+
+def test_call_tree_include_tests_keeps_test_nodes(tmp_path):
+    out = queries.call_tree(
+        _tmp_builder(tmp_path, TESTNODE_APP), "handler", include_tests=True)
+    names = [n["function"].rsplit(".", 1)[-1] for n in out["nodes"]]
+    assert "helper" in names, out["nodes"]
+
+
 def test_call_tree_handles_recursion(tmp_path):
     out = queries.call_tree(_tmp_builder(tmp_path, {
         "rec.py": """

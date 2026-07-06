@@ -509,7 +509,8 @@ def _effect_tags(func) -> list[str]:
     return tags
 
 
-def call_tree(builder, function: str, depth: int = 2, filter=None) -> dict:
+def call_tree(builder, function: str, depth: int = 2, filter=None,
+              include_tests=False) -> dict:
     """Forward transitive call tree: what this function reaches, N hops down.
 
     Complements ``who_calls`` (reverse). Instead of hopping node-by-node,
@@ -519,6 +520,11 @@ def call_tree(builder, function: str, depth: int = 2, filter=None) -> dict:
     library/builtin calls are surfaced as the parent's effect tags, not
     walked. Breadth-first with dedup by qualified name, so recursion/cycles
     terminate and no function appears twice.
+
+    ``include_tests``: callees resolving into a test path (``tests/`` dir,
+    ``test_*.py``) are dropped by default — a production function reaching
+    test code is almost always a name-collision misresolution. Set True to
+    keep them (e.g. when tracing test code itself).
 
     ``filter`` is a case-insensitive substring over function/location/via,
     applied before the output cap.
@@ -540,6 +546,8 @@ def call_tree(builder, function: str, depth: int = 2, filter=None) -> dict:
             for call in caller.calls:
                 callee = cg._resolve_call(call, caller)
                 if callee is None or callee.qualified_name in visited:
+                    continue
+                if not include_tests and _is_test_path(callee.file_path or ""):
                     continue
                 visited.add(callee.qualified_name)
                 nodes.append({
