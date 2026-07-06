@@ -1,3 +1,4 @@
+import textwrap
 from pathlib import Path
 
 from codecanvas.mcp.session import get_builder
@@ -8,6 +9,14 @@ SAMPLE = Path(__file__).parent.parent / "sample-fastapi"
 
 def _b():
     return get_builder(str(SAMPLE))
+
+
+def _tmp_builder(tmp_path, files: dict[str, str]):
+    for rel, content in files.items():
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(textwrap.dedent(content).strip() + "\n", encoding="utf-8")
+    return get_builder(str(tmp_path))
 
 
 def test_list_entrypoints_finds_login_route():
@@ -118,3 +127,114 @@ def test_is_safe_git_ref():
     assert not _is_safe_git_ref("--output=/tmp/x")
     assert not _is_safe_git_ref("HEAD..--output=/tmp/x")
     assert not _is_safe_git_ref("")
+
+
+FIXTURE_APP = {
+    "app.py": """
+        from fastapi import FastAPI
+        app = FastAPI()
+
+        @app.get("/real")
+        def real_route():
+            return {"ok": True}
+    """,
+    "tests/test_routes.py": """
+        from fastapi import FastAPI
+        app = FastAPI()
+
+        @app.post("/fixture")
+        def fixture_route():
+            return {"ok": True}
+    """,
+}
+
+
+def test_list_entrypoints_excludes_test_fixtures_by_default(tmp_path):
+    out = queries.list_entrypoints(_tmp_builder(tmp_path, FIXTURE_APP))
+    paths = [e["path"] for e in out["entrypoints"]]
+    assert "/real" in paths, paths
+    assert "/fixture" not in paths, paths
+    assert "test" in out.get("note", "").lower(), out.get("note")
+
+
+def test_list_entrypoints_include_tests_keeps_fixtures(tmp_path):
+    out = queries.list_entrypoints(
+        _tmp_builder(tmp_path, FIXTURE_APP), include_tests=True)
+    paths = [e["path"] for e in out["entrypoints"]]
+    assert "/real" in paths, paths
+    assert "/fixture" in paths, paths
+
+
+CALL_CHAIN = {
+    "chain.py": """
+        def leaf():
+            return 1
+
+        def mid():
+            return leaf()
+
+        def top():
+            return mid()
+    """,
+}
+
+
+def test_who_calls_default_depth_is_direct_only(tmp_path):
+    out = queries.who_calls(_tmp_builder(tmp_path, CALL_CHAIN), "leaf")
+    names = [c["caller"] for c in out["callers"]]
+    assert any(n.endswith("mid") for n in names), names
+    assert not any(n.endswith("top") for n in names), names
+
+
+def test_who_calls_depth_2_traces_transitive_callers(tmp_path):
+    out = queries.who_calls(_tmp_builder(tmp_path, CALL_CHAIN), "leaf", depth=2)
+    by_name = {c["caller"].rsplit(".", 1)[-1]: c for c in out["callers"]}
+    assert "mid" in by_name and "top" in by_name, out["callers"]
+    assert by_name["mid"]["depth"] == 1
+    assert by_name["top"]["depth"] == 2
+    assert by_name["mid"]["callee"].endswith("leaf")
+    assert by_name["top"]["callee"].endswith("mid")
+
+
+def test_who_calls_depth_handles_recursion(tmp_path):
+    out = queries.who_calls(_tmp_builder(tmp_path, {
+        "rec.py": """
+            def a():
+                return b()
+
+            def b():
+                return a()
+        """,
+    }), "a", depth=5)
+    names = [c["caller"] for c in out["callers"]]
+    assert len(names) == len(set(names)), names
+
+
+NON_PY_DIFF = """\
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,1 +1,2 @@
++docs change
+"""
+
+
+def test_analyze_impact_reports_skipped_non_python_files():
+    out = queries.analyze_impact(_b(), diff_text=NON_PY_DIFF)
+    assert out["changed_functions"] == []
+    assert out["skipped_files"] == ["README.md"]
+    assert "non-python" in out["summary"].lower(), out["summary"]
+
+
+def test_analyze_impact_no_diff_has_no_skipped_files_key():
+    out = queries.analyze_impact(_b(), diff_text="not a diff")
+    assert "skipped_files" not in out
+    assert out["summary"] == "No Python changes detected."
+
+
+def test_analyze_impact_mixed_diff_reports_both():
+    mixed = NON_PY_DIFF + VERIFY_USER_DIFF
+    out = queries.analyze_impact(_b(), diff_text=mixed)
+    changed = [c["function"] for c in out["changed_functions"]]
+    assert any(name.endswith(".verify_user") for name in changed), changed
+    assert out["skipped_files"] == ["README.md"]
