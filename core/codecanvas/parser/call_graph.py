@@ -609,6 +609,21 @@ class CallGraphBuilder:
         """Public accessor for a function definition by qualified name."""
         return self._functions.get(qualified_name)
 
+    def all_functions(self) -> list["FunctionDef"]:
+        """Public snapshot of all discovered function definitions."""
+        return list(self._functions.values())
+
+    def get_callers(self, qualified_name: str) -> list[tuple["FunctionDef", "CallerReference"]]:
+        """Public reverse-call lookup: who calls the given function.
+
+        Returns one representative call per distinct caller. Empty list if
+        the target is unknown.
+        """
+        target = self._functions.get(qualified_name)
+        if target is None:
+            return []
+        return self._get_callers(target)
+
     def get_ast_node(self, qualified_name: str) -> ast.AST | None:
         """Public accessor for a function's AST node.
 
