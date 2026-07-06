@@ -2189,6 +2189,17 @@ class CallGraphBuilder:
             )
         ]
 
+        # Structural typing is a pure duck-typing guess, so be strict: a
+        # production caller must never bind to a test fixture's method (an
+        # external `client.post()` would otherwise grab a `_FakeClient.post`).
+        # Drop test-path methods; if that leaves nothing, don't guess.
+        if not _is_test_path(caller.file_path or ""):
+            class_methods = [
+                f for f in class_methods if not _is_test_path(f.file_path or "")
+            ]
+            if not class_methods:
+                return None
+
         # Single match — strong signal
         if len(class_methods) == 1:
             return class_methods[0]

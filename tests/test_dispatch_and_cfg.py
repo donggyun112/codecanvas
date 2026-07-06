@@ -573,6 +573,29 @@ class TestResolverPrefersNonTest:
         out = _prefer_non_test([fake, real], caller_file="tests/a.py")
         assert out == [fake, real]
 
+    def test_structural_typing_skips_test_only_method(self, tmp_path: Path) -> None:
+        # client.post() on an untyped receiver falls to structural typing; a
+        # production caller must not duck-bind to a test fixture's post().
+        from codecanvas.parser.call_graph import _is_test_path
+        _write_files(
+            tmp_path,
+            {
+                "api.py": "def handler(client):\n    return client.post('/x')\n",
+                "tests/fake.py": (
+                    "class _FakeClient:\n"
+                    "    def post(self, u):\n"
+                    "        return 1\n"
+                ),
+            },
+        )
+        cg = CallGraphBuilder(str(tmp_path))
+        cg.analyze_project()
+        handler = cg._find_function("handler", str(tmp_path / "api.py"))
+        assert handler is not None
+        call = next(c for c in handler.calls if "post" in c.func_name)
+        resolved = cg._resolve_call(call, handler)
+        assert resolved is None or not _is_test_path(resolved.file_path), resolved
+
 
 class TestLlmSdkDetection:
     """LLM provider SDK calls are external network (http) effects."""
