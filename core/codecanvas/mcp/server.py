@@ -1,24 +1,27 @@
 """CodeCanvas MCP server (stdio).
 
-Exposes precision static-analysis tools to coding agents. Every tool takes
-a project_path and returns a compact dict; engine errors become error dicts
-rather than raised exceptions so the agent gets an actionable message.
+Exposes precision static-analysis tools to coding agents. Tools return a
+compact dict; engine errors become error dicts rather than raised exceptions
+so the agent gets an actionable message. `project_path` may be passed once
+and is remembered for later calls in the session (see session.resolve_project).
 """
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
 from codecanvas.mcp import queries
-from codecanvas.mcp.session import get_builder, ProjectNotFoundError
+from codecanvas.mcp.session import (
+    get_builder, resolve_project, ProjectNotFoundError, NoDefaultProjectError,
+)
 from codecanvas.parser.call_graph import ProjectTooLargeError
 
 mcp = FastMCP("codecanvas")
 
 
-def _with_builder(project_path: str, fn):
+def _with_builder(project_path, fn):
     try:
-        builder = get_builder(project_path)
-    except ProjectNotFoundError as e:
+        builder = get_builder(resolve_project(project_path))
+    except (ProjectNotFoundError, NoDefaultProjectError) as e:
         return {"error": str(e)}
     except ProjectTooLargeError as e:
         return {"error": f"Project too large: {e}"}
@@ -26,7 +29,7 @@ def _with_builder(project_path: str, fn):
 
 
 @mcp.tool()
-def list_entrypoints(project_path: str, filter: str | None = None,
+def list_entrypoints(project_path: str | None = None, filter: str | None = None,
                      kind: str | None = None,
                      include_tests: bool = False) -> dict:
     """List API/script/function entrypoints discovered in the project.
@@ -45,7 +48,7 @@ def list_entrypoints(project_path: str, filter: str | None = None,
 
 
 @mcp.tool()
-def who_calls(project_path: str, function: str, depth: int = 1,
+def who_calls(function: str, project_path: str | None = None, depth: int = 1,
               filter: str | None = None) -> dict:
     """Find callers of a function (qualified name, bare name, or file:line).
 
@@ -60,13 +63,13 @@ def who_calls(project_path: str, function: str, depth: int = 1,
 
 
 @mcp.tool()
-def what_does(project_path: str, function: str) -> dict:
+def what_does(function: str, project_path: str | None = None) -> dict:
     """Summarize a function: signature, docstring, db/http/raise effects, risk."""
     return _with_builder(project_path, lambda b: queries.what_does(b, function))
 
 
 @mcp.tool()
-def analyze_impact(project_path: str, diff_text: str | None = None,
+def analyze_impact(project_path: str | None = None, diff_text: str | None = None,
                    git_ref: str | None = None) -> dict:
     """Given a diff or git ref, list changed functions and affected endpoints."""
     return _with_builder(
@@ -76,7 +79,7 @@ def analyze_impact(project_path: str, diff_text: str | None = None,
 
 
 @mcp.tool()
-def function_flow(project_path: str, function: str) -> dict:
+def function_flow(function: str, project_path: str | None = None) -> dict:
     """Control-flow outline of a function: branch/loop/try nesting, early
     returns (with dict-key shape), raises, and meaningful calls, de-noised
     (no logging/docstrings). Use to grasp complex logic without reading the
@@ -85,7 +88,7 @@ def function_flow(project_path: str, function: str) -> dict:
 
 
 @mcp.tool()
-def reaching_conditions(project_path: str, function: str,
+def reaching_conditions(function: str, project_path: str | None = None,
                         target: str | None = None) -> dict:
     """Guards under which each return/raise in a function is reached.
 
