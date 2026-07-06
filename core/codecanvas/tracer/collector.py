@@ -91,8 +91,11 @@ class TraceCollector:
         self._request_context_var = request_context_var
         self._request_id = request_id
 
-        # Coroutine tracking
-        self._coroutine_frames: set[int] = set()
+        # Coroutine tracking.
+        # Keyed by id(frame) but storing the frame object so we can tell a
+        # genuine resume (same frame) from a brand-new frame that merely
+        # reuses a finished coroutine's recycled id() — see _trace_dispatch.
+        self._coroutine_frames: dict[int, FrameType] = {}
         self._pending_returns: dict[int, TraceEvent] = {}
 
         # Exception tracking: frames that received an exception event
@@ -113,7 +116,7 @@ class TraceCollector:
         self.result = None
         self._call_states = {}
         self._frame_stack = []
-        self._coroutine_frames = set()
+        self._coroutine_frames = {}
         self._pending_returns = {}
         self._exception_frames = set()
         self._started_at_ns = time.perf_counter_ns()
@@ -236,10 +239,25 @@ class TraceCollector:
 
         frame_id = id(frame)
 
-        # Coroutine resume: same frame entering again after a suspend
-        if frame_id in self._coroutine_frames:
+        # Coroutine resume: the SAME frame object re-entering after a suspend.
+        # Compare identity, not just id(): CPython recycles id() values once a
+        # finished coroutine's frame is garbage-collected, so a stale id could
+        # otherwise misclassify a brand-new frame as a resume and silently drop
+        # its CALL event (and every descendant would look parentless).
+        existing = self._coroutine_frames.get(frame_id)
+        if existing is frame:
             self._pending_returns.pop(frame_id, None)
             return self._frame_trace
+        if existing is not None:
+            # Recycled id() from a finished coroutine whose frame was GC'd.
+            # Flush its deferred final return and purge stale bookkeeping,
+            # then fall through to record this as a genuinely new frame.
+            stale_return = self._pending_returns.pop(frame_id, None)
+            if stale_return is not None:
+                self.events.append(stale_return)
+            self._call_states.pop(frame_id, None)
+            self._discard_frame(frame_id)
+            self._coroutine_frames.pop(frame_id, None)
 
         file_path, func_name, line = info
         depth = len(self._frame_stack)
@@ -254,7 +272,7 @@ class TraceCollector:
         self._frame_stack.append(frame_id)
 
         if self._is_coroutine(frame):
-            self._coroutine_frames.add(frame_id)
+            self._coroutine_frames[frame_id] = frame
 
         self.events.append(
             TraceEvent(
@@ -328,7 +346,7 @@ class TraceCollector:
                 # Exception still propagating — this is an unwind, not a real return.
                 self._call_states.pop(frame_id, None)
                 self._discard_frame(frame_id)
-                self._coroutine_frames.discard(frame_id)
+                self._coroutine_frames.pop(frame_id, None)
                 self._pending_returns.pop(frame_id, None)
                 return
             # else: exception was caught, frame is doing a real return.
