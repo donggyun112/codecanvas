@@ -176,6 +176,16 @@ class ImpactAnalyzer:
                              if f.qualified_name == func.qualified_name)
                     af.hunks.append(hunk)
 
+        # Risk source: the viz FlowGraph builder gives per-node risk when
+        # available (extension path). The MCP path passes flow_builder=None,
+        # so fall back to the standalone signal-based score here. This keeps
+        # aggregate endpoint risk meaningful without building any FlowGraph.
+        if self._flow_builder is None:
+            for af in result.affected_functions:
+                func = self.cg.get_function(af.qualified_name)
+                if func is not None:
+                    af.risk_score = self._compute_function_risk(func)
+
         # 1b. Compute risk scores — use FlowGraph risk if builder available
         risk_cache: dict[str, float] = {}  # qname → score from flow graphs
 
