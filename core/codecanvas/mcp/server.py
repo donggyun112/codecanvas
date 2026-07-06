@@ -62,6 +62,15 @@ def analyze_impact(project_path: str, diff_text: str | None = None,
     )
 
 
+@mcp.tool()
+def function_flow(project_path: str, function: str) -> dict:
+    """Control-flow outline of a function: branch/loop/try nesting, early
+    returns (with dict-key shape), raises, and meaningful calls, de-noised
+    (no logging/docstrings). Use to grasp complex logic without reading the
+    full source. `function` = qualified name, bare name, or file:line."""
+    return _with_builder(project_path, lambda b: queries.function_flow(b, function))
+
+
 def main() -> None:
     """Console entry point: run the stdio MCP server."""
     mcp.run()

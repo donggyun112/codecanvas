@@ -143,8 +143,10 @@ Tools:
 | `list_entrypoints` | What entrypoints exist in this project? |
 | `who_calls` | Who calls this function? (ground-truth reverse edges) |
 | `what_does` | What does this function do? (signature, effects, risk) |
+| `function_flow` | How does this function work? (de-noised control-flow outline: branches, loops, try/finally, early returns, key calls) |
 | `analyze_impact` | What endpoints break if I apply this diff? |
 
+`list_entrypoints` also accepts `filter` / `kind` to narrow large projects.
 All tools take a `project_path`; outputs are compact and token-bounded.
 
 ## Environment Variables

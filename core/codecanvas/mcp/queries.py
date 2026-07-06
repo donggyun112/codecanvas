@@ -215,3 +215,34 @@ def analyze_impact(builder, diff_text: str | None = None,
     if note:
         out["note"] = note
     return out
+
+
+def function_flow(builder, function: str) -> dict:
+    """Return a de-noised control-flow outline of a function.
+
+    Preserves branch/loop/try nesting, early returns (with dict-key shape),
+    raises, and meaningful calls — dropping logging, docstrings, and
+    literal-only assignments — so the logic can be grasped without reading
+    the full body.
+    """
+    from codecanvas.mcp import outline
+
+    func, err = resolve_function(builder, function)
+    if err is not None:
+        return err
+    ast_node = builder.call_graph.get_ast_node(func.qualified_name)
+    import ast as _ast
+    if not isinstance(ast_node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+        return {
+            "error": f"No function body available for '{func.qualified_name}' "
+                     f"(it may be a class or an unparsed definition).",
+        }
+    lines, truncated = outline.function_flow_lines(ast_node)
+    out = {
+        "function": func.qualified_name,
+        "location": f"{func.file_path}:{func.line_start}",
+        "flow": lines,
+    }
+    if truncated:
+        out["note"] = f"outline truncated at {len(lines)} lines"
+    return out
