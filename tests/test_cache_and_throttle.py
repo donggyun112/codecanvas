@@ -6,6 +6,7 @@ Validates:
 - ProjectTooLargeError fires at the right threshold
 - Warm entrypoint cache returns correct results
 """
+import json
 import os
 import sys
 import time
@@ -105,6 +106,15 @@ class TestEntrypointCache:
         eps = b2.get_entrypoints()
         assert len(eps) >= 1
 
+    def test_entrypoint_cache_records_analyzer_fingerprint(self, tmp_path):
+        proj = _make_project(tmp_path)
+        b = FlowGraphBuilder(proj)
+        b.get_entrypoints()
+
+        with open(os.path.join(proj, ".codecanvas", "entrypoints.json")) as fh:
+            payload = json.load(fh)
+        assert payload["analyzer"] == cg_mod._analyzer_fingerprint()
+
     def test_entrypoint_cache_rejects_stale_analyzer(self, tmp_path, monkeypatch):
         proj = _make_project(tmp_path)
 
@@ -135,6 +145,16 @@ class TestCallGraphCache:
 
         assert len(d1["nodes"]) == len(d2["nodes"])
         assert len(d1["edges"]) == len(d2["edges"])
+
+    def test_callgraph_cache_records_analyzer_fingerprint(self, tmp_path):
+        proj = _make_project(tmp_path)
+        b = FlowGraphBuilder(proj)
+        ep = next(e for e in b.get_entrypoints() if e.kind == "api")
+        b.build_flow(ep)
+
+        with open(os.path.join(proj, ".codecanvas", "callgraph.json")) as fh:
+            payload = json.load(fh)
+        assert payload["analyzer"] == cg_mod._analyzer_fingerprint()
 
     def test_corrupted_callgraph_cache_falls_back(self, tmp_path):
         proj = _make_project(tmp_path)
