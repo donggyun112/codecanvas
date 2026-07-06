@@ -39,3 +39,17 @@ def test_who_calls_verify_user_lists_login():
 def test_who_calls_unknown_returns_error():
     out = queries.who_calls(_b(), "nope_nope")
     assert "error" in out
+
+
+def test_what_does_verify_user():
+    out = queries.what_does(_b(), "verify_user")
+    assert out["async"] is True
+    assert "email" in out["signature"] and "password" in out["signature"]
+    assert out["docstring"].startswith("Verify")
+    assert "calls" in out and "callees" in out["calls"]
+
+
+def test_what_does_login_reports_raise():
+    out = queries.what_does(_b(), "login")
+    statuses = [r.get("status") for r in out["calls"]["raises"]]
+    assert 401 in statuses, out["calls"]["raises"]

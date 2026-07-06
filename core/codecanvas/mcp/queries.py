@@ -104,3 +104,49 @@ def who_calls(builder, function: str) -> dict:
     if note:
         out["note"] = note
     return out
+
+
+def _summarize_calls(func) -> dict:
+    db, http, raises, callees = [], [], [], []
+    for c in func.calls:
+        if c.is_raise:
+            raises.append({"status": c.raise_status, "exception": c.func_name})
+        elif c.is_db_call:
+            db.append({"op": (c.db_detail or {}).get("operation"),
+                       "model": (c.db_detail or {}).get("model"),
+                       "call": c.func_name})
+        elif c.is_http_call:
+            http.append({"method": (c.http_detail or {}).get("method"),
+                         "call": c.func_name})
+        else:
+            callees.append(c.func_name)
+    # Dedup callees preserving order.
+    seen, uniq = set(), []
+    for name in callees:
+        if name not in seen:
+            seen.add(name)
+            uniq.append(name)
+    uniq, _ = capped(uniq)
+    return {"db": db, "http": http, "raises": raises, "callees": uniq}
+
+
+def what_does(builder, function: str) -> dict:
+    """Summarize what a function does (signature + effects), no source read."""
+    from codecanvas.graph.impact import ImpactAnalyzer
+
+    func, err = resolve_function(builder, function)
+    if err is not None:
+        return err
+
+    kw = "async def" if func.is_async else "def"
+    ret = f" -> {func.return_annotation}" if func.return_annotation else ""
+    signature = f"{kw} {func.name}({', '.join(func.params)}){ret}"
+
+    return {
+        "function": func.qualified_name,
+        "async": func.is_async,
+        "signature": signature,
+        "docstring": (func.docstring or "").strip(),
+        "calls": _summarize_calls(func),
+        "risk": ImpactAnalyzer._compute_function_risk(func),
+    }
