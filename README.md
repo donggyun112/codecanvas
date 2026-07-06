@@ -129,6 +129,24 @@ python3 -m pytest tests/
 | `CodeCanvas: Analyze Function Flow` | Flow from cursor position |
 | `CodeCanvas: Trace Flow (Runtime)` | Execute HTTP request + trace |
 
+## MCP Server (for coding agents)
+
+CodeCanvas exposes its analysis engine to coding agents (Claude Code, Cursor)
+over MCP (stdio):
+
+    claude mcp add codecanvas -- codecanvas-mcp
+
+Tools:
+
+| Tool | Answers |
+|---|---|
+| `list_entrypoints` | What entrypoints exist in this project? |
+| `who_calls` | Who calls this function? (ground-truth reverse edges) |
+| `what_does` | What does this function do? (signature, effects, risk) |
+| `analyze_impact` | What endpoints break if I apply this diff? |
+
+All tools take a `project_path`; outputs are compact and token-bounded.
+
 ## Environment Variables
 
 | Variable | Default | Description |
