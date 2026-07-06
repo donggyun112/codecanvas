@@ -333,6 +333,41 @@ REACH_APP = {
 }
 
 
+YIELD_APP = {
+    "g.py": """
+        def gen(flag):
+            if flag:
+                yield 1
+            yield 2
+
+        async def stream(agen):
+            async for x in agen:
+                yield x
+    """,
+}
+
+
+def test_reaching_conditions_captures_yield(tmp_path):
+    b = _tmp_builder(tmp_path, YIELD_APP)
+    out = queries.reaching_conditions(b, "gen")
+    kinds = {(o["kind"], tuple(o["guards"])) for o in out["outcomes"]}
+    assert ("yield", ("flag",)) in kinds, out["outcomes"]
+    assert ("yield", ()) in kinds, out["outcomes"]
+
+
+def test_reaching_conditions_yield_in_async_for(tmp_path):
+    b = _tmp_builder(tmp_path, YIELD_APP)
+    out = queries.reaching_conditions(b, "stream")
+    ylds = [o for o in out["outcomes"] if o["kind"] == "yield"]
+    assert ylds and "loop" in ylds[0]["guards"], out["outcomes"]
+
+
+def test_reaching_conditions_target_yield_filters(tmp_path):
+    b = _tmp_builder(tmp_path, YIELD_APP)
+    out = queries.reaching_conditions(b, "gen", target="yield")
+    assert out["outcomes"] and all(o["kind"] == "yield" for o in out["outcomes"])
+
+
 def test_reaching_conditions_returns_guarded_outcomes(tmp_path):
     out = queries.reaching_conditions(_tmp_builder(tmp_path, REACH_APP), "charge")
     kinds = {(o["kind"], tuple(o["guards"])) for o in out["outcomes"]}

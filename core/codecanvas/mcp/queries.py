@@ -414,6 +414,33 @@ def _cyclomatic(node) -> int:
     return count
 
 
+def _yield_value(stmt):
+    """If a statement is a bare ``yield``/``yield from`` expression, return its
+    rendered value (for the outcome detail); else None if it holds no yield."""
+    import ast
+    from codecanvas.mcp import outline
+    for node in ast.walk(stmt):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # don't descend into nested scopes — their yields aren't ours
+            continue
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return outline._expr(node.value) if node.value is not None else ""
+    return None
+
+
+def _stmt_has_yield(stmt) -> bool:
+    """True if a statement contains a yield not inside a nested function."""
+    import ast
+    for child in ast.iter_child_nodes(stmt):
+        if isinstance(child, (ast.Yield, ast.YieldFrom)):
+            return True
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if _stmt_has_yield(child):
+            return True
+    return False
+
+
 def reaching_conditions(builder, function: str, target=None) -> dict:
     """Guard conditions under which each outcome (return/raise) is reached.
 
@@ -424,9 +451,12 @@ def reaching_conditions(builder, function: str, target=None) -> dict:
     success path enforces (e.g. "payment saved" returned from an except).
 
     ``target``:
-    - ``None`` (default): every return/raise with its guards.
-    - ``"return"`` / ``"raise"``: only that kind.
+    - ``None`` (default): every return/raise/yield with its guards.
+    - ``"return"`` / ``"raise"`` / ``"yield"``: only that kind.
     - ``"line:N"``: the guards enclosing the statement at line N.
+
+    ``yield`` outcomes make this work for generators/async generators (a
+    yield is an output point like a return, but does not terminate the block).
 
     Also returns approximate cyclomatic complexity and any statements that
     are unreachable (follow an unconditional return/raise/break in the same
@@ -485,12 +515,18 @@ def reaching_conditions(builder, function: str, target=None) -> dict:
                 walk(s.orelse, guards)
             elif isinstance(s, (ast.With, ast.AsyncWith)):
                 walk(s.body, guards)
+            elif _stmt_has_yield(s):
+                # A yield is a generator's output point — an outcome like a
+                # return, but it does not terminate the block.
+                outcomes.append({"at": s.lineno, "kind": "yield",
+                                 "detail": _yield_value(s) or "",
+                                 "guards": list(guards)})
 
     walk(node.body, [])
 
     if target is None:
         selected = outcomes
-    elif target in ("return", "raise"):
+    elif target in ("return", "raise", "yield"):
         selected = [o for o in outcomes if o["kind"] == target]
     elif target.startswith("line:") and target[5:].isdigit():
         ln = int(target[5:])
@@ -498,7 +534,7 @@ def reaching_conditions(builder, function: str, target=None) -> dict:
         selected = [{"at": ln, "kind": "line", "guards": g}] if g is not None else []
     else:
         return {"error": f"Invalid target {target!r}. "
-                         f"Use 'return', 'raise', or 'line:N'."}
+                         f"Use 'return', 'raise', 'yield', or 'line:N'."}
 
     out = {
         "function": func.qualified_name,
