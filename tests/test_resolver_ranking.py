@@ -158,3 +158,22 @@ def test_file_line_multiple_returns_candidates(tmp_path):
     func, err = queries.resolve_function(b, "svc.py:1")
     assert func is None
     assert "candidates" in err and len(err["candidates"]) == 2
+
+
+def test_who_calls_ambiguous_propagates_candidates(tmp_path):
+    b = _resolved(tmp_path, {
+        "app/a.py":
+            "def proc():\n"
+            "    return 1\n"
+            "def c1():\n"
+            "    return proc()\n",
+        "app/b.py":
+            "def proc():\n"
+            "    return 2\n"
+            "def d1():\n"
+            "    return proc()\n"
+            "def d2():\n"
+            "    return proc()\n",
+    })
+    out = queries.who_calls(b, "proc")
+    assert "error" in out and "candidates" in out
