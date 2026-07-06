@@ -1816,6 +1816,25 @@ class CallGraphBuilder:
         self._last_resolve_confidence = "inferred"
         return resolved_candidates[0]
 
+    def _resolve_method_prefer_unique_impl(
+        self,
+        type_name: str,
+        method_name: str,
+        caller: "FunctionDef",
+    ) -> "FunctionDef | None":
+        """Resolve method_name on type_name, preferring the unique concrete
+        implementation of an interface (concrete-first) over the declared
+        interface type. Falls back to the declared type when there is no
+        single implementation. DI redirects are tagged 'inferred'.
+        """
+        impl = self._unique_impl_of(type_name)
+        if impl:
+            result = self._resolve_method_on_class(impl, method_name, caller)
+            if result:
+                self._last_resolve_confidence = "inferred"
+                return result
+        return self._resolve_method_on_class(type_name, method_name, caller)
+
     def _resolve_attribute_call(self, call: CallSite, caller: FunctionDef) -> FunctionDef | None:
         """Resolve attribute/member calls only when the receiver type is known.
 
@@ -1845,14 +1864,18 @@ class CallGraphBuilder:
                 caller.class_qname, owner_parts[1:],
             )
             if resolved_type:
-                return self._resolve_method_on_class(resolved_type, method_name, caller)
+                return self._resolve_method_prefer_unique_impl(
+                    resolved_type, method_name, caller,
+                )
 
-            # Fallback: single-level self.attr (original behavior)
+            # Fallback: single-level self.attr
             if caller.class_qname:
                 attr_name = owner_parts[1]
                 attr_type = self._class_attr_types.get(caller.class_qname, {}).get(attr_name)
                 if attr_type:
-                    return self._resolve_method_on_class(attr_type, method_name, caller)
+                    return self._resolve_method_prefer_unique_impl(
+                        attr_type, method_name, caller,
+                    )
 
             # Structural inference for self.unknown_attr.method()
             result = self._resolve_by_structural_typing(method_name, caller)
