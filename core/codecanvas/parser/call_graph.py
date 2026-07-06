@@ -6,6 +6,7 @@ through service layers, repositories, and external calls.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 import os
@@ -82,6 +83,48 @@ def _files_signature(file_paths: list[str]) -> list[list]:
             continue
         sig.append([fp, st.st_mtime_ns, st.st_size])
     return sig
+
+
+# Fingerprint of the analyzer's own source. When the analyzer's logic
+# changes but the serialized cache layout does not, the file `signature`
+# is unchanged and the manual CACHE_FORMAT_VERSION is easy to forget —
+# so a stale cache would be served. This hash rejects such caches
+# automatically. Memoized per process.
+_ANALYZER_FP: str | None = None
+
+
+def _analyzer_fingerprint() -> str:
+    """Return a hash of the analyzer's source + package version.
+
+    Covers every .py under parser/ plus graph/builder.py and
+    graph/models.py (where the serialized dataclasses live). Never
+    raises: on unreadable source (frozen / .pyc-only build) it falls
+    back to a version-only hash rather than disabling the check.
+    """
+    global _ANALYZER_FP
+    if _ANALYZER_FP is not None:
+        return _ANALYZER_FP
+
+    try:
+        from codecanvas import __version__ as ver
+    except Exception:
+        ver = "unknown"
+
+    h = hashlib.sha256()
+    h.update(ver.encode("utf-8"))
+    try:
+        parser_dir = Path(__file__).resolve().parent
+        graph_dir = parser_dir.parent / "graph"
+        sources = sorted(parser_dir.glob("*.py"))
+        sources += [graph_dir / "builder.py", graph_dir / "models.py"]
+        for src in sorted(sources):
+            h.update(src.read_bytes())
+    except OSError:
+        _ANALYZER_FP = hashlib.sha256(ver.encode("utf-8")).hexdigest()
+        return _ANALYZER_FP
+
+    _ANALYZER_FP = h.hexdigest()
+    return _ANALYZER_FP
 
 
 @dataclass

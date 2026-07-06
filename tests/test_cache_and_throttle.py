@@ -185,3 +185,40 @@ class TestThrottle:
         b.get_entrypoints()
         with pytest.raises(cg_mod.ProjectTooLargeError):
             b.build_flow(next(e for e in b.get_entrypoints() if e.kind == "api"))
+
+
+class TestAnalyzerFingerprint:
+    def test_stable_and_hex(self, monkeypatch):
+        monkeypatch.setattr(cg_mod, "_ANALYZER_FP", None)
+        a = cg_mod._analyzer_fingerprint()
+        b = cg_mod._analyzer_fingerprint()
+        assert a == b
+        assert len(a) == 64
+        assert all(c in "0123456789abcdef" for c in a)
+
+    def test_folds_version(self, monkeypatch):
+        import codecanvas
+        monkeypatch.setattr(cg_mod, "_ANALYZER_FP", None)
+        monkeypatch.setattr(codecanvas, "__version__", "9.9.9-test")
+        fp_a = cg_mod._analyzer_fingerprint()
+
+        monkeypatch.setattr(cg_mod, "_ANALYZER_FP", None)
+        monkeypatch.setattr(codecanvas, "__version__", "0.0.0-other")
+        fp_b = cg_mod._analyzer_fingerprint()
+
+        assert fp_a != fp_b
+
+    def test_fallback_on_unreadable_source(self, monkeypatch):
+        import hashlib
+        from pathlib import Path
+        import codecanvas
+
+        monkeypatch.setattr(cg_mod, "_ANALYZER_FP", None)
+
+        def _boom(self):
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(Path, "read_bytes", _boom)
+        fp = cg_mod._analyzer_fingerprint()
+        expected = hashlib.sha256(codecanvas.__version__.encode("utf-8")).hexdigest()
+        assert fp == expected
