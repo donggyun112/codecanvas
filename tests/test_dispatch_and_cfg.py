@@ -539,6 +539,72 @@ class TestMongoDbDetection:
         assert "db_write" in signals, signals
 
 
+class TestLlmSdkDetection:
+    """LLM provider SDK calls are external network (http) effects."""
+
+    def _handler(self, tmp_path: Path, body: str, name: str):
+        _write_files(
+            tmp_path,
+            {
+                "app.py": f"""
+                    from fastapi import FastAPI
+
+                    app = FastAPI()
+
+                    @app.post("/x")
+                    async def {name}(client, model, repo):
+{body}
+                """,
+            },
+        )
+        cg = CallGraphBuilder(str(tmp_path))
+        cg.analyze_project()
+        handler = cg._find_function(name, str(tmp_path / "app.py"))
+        assert handler is not None
+        return handler
+
+    def test_anthropic_messages_create(self, tmp_path: Path) -> None:
+        h = self._handler(
+            tmp_path,
+            "                        return await client.messages.create(model='m', messages=[])",
+            "chat_anthropic",
+        )
+        assert any(c.is_http_call for c in h.calls), [c.func_name for c in h.calls]
+
+    def test_openai_chat_completions_create(self, tmp_path: Path) -> None:
+        h = self._handler(
+            tmp_path,
+            "                        return await client.chat.completions.create(model='m', messages=[])",
+            "chat_openai",
+        )
+        assert any(c.is_http_call for c in h.calls), [c.func_name for c in h.calls]
+
+    def test_genai_generate_content(self, tmp_path: Path) -> None:
+        h = self._handler(
+            tmp_path,
+            "                        return await client.models.generate_content(model='m')",
+            "chat_genai",
+        )
+        assert any(c.is_http_call for c in h.calls), [c.func_name for c in h.calls]
+
+    def test_gemini_generate_content_async(self, tmp_path: Path) -> None:
+        h = self._handler(
+            tmp_path,
+            "                        return await model.generate_content_async('hi')",
+            "chat_gemini",
+        )
+        assert any(c.is_http_call for c in h.calls), [c.func_name for c in h.calls]
+
+    def test_plain_create_is_not_llm(self, tmp_path: Path) -> None:
+        # A bare .create() with no LLM chain must NOT be flagged as http.
+        h = self._handler(
+            tmp_path,
+            "                        return repo.create(data)",
+            "make_thing",
+        )
+        assert not any(c.is_http_call for c in h.calls), [c.func_name for c in h.calls]
+
+
 # -----------------------------------------------------------------------
 # 5. CFG correctness for nested structures
 # -----------------------------------------------------------------------

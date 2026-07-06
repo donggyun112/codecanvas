@@ -512,6 +512,15 @@ HTTP_PATTERNS = {
     "request", "fetch", "send",
 }
 HTTP_OBJECT_HINTS = {"client", "http", "httpx", "requests", "aiohttp", "session"}
+
+# LLM provider SDK calls are external network effects (Anthropic, OpenAI,
+# Google GenAI/Gemini, ...). Method names distinctive enough to match alone:
+LLM_METHODS = {"generate_content", "generate_content_async"}
+# Generic method names (create/stream) count as an LLM call only when the
+# receiver chain names an LLM resource (client.messages.create,
+# client.chat.completions.create, client.responses.create, ...).
+LLM_CALL_METHODS = {"create", "stream"}
+LLM_CHAIN_HINTS = {"messages", "completions", "responses", "embeddings", "chat"}
 LOW_SIGNAL_METHODS = {
     "append", "extend", "insert", "isoformat", "get",
     "items", "keys", "values", "split", "strip",
@@ -3800,8 +3809,17 @@ class CallGraphBuilder:
         - requests.request("GET", url)
         - aiohttp session.get(url)
         - Chain patterns: client.headers({...}).get(url)
+        - LLM provider SDKs: client.messages.create(...),
+          client.chat.completions.create(...), client.models.generate_content(...)
         """
         if isinstance(node.func, ast.Attribute):
+            # LLM provider SDK calls are external network effects.
+            if node.func.attr in LLM_METHODS:
+                return True
+            if node.func.attr in LLM_CALL_METHODS and _chain_has_any(
+                node.func.value, LLM_CHAIN_HINTS
+            ):
+                return True
             if node.func.attr in HTTP_PATTERNS:
                 root = _chain_root_name(node.func.value)
                 if root is not None and root.lower() in HTTP_OBJECT_HINTS:
