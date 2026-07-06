@@ -3529,6 +3529,11 @@ class CallGraphBuilder:
 
         if isinstance(node, ast.Assign):
             inferred_type = self._infer_assigned_type(node.value)
+            if inferred_type is None and isinstance(node.value, ast.Name):
+                # self.x = x / y = x — carry the type from an already-known
+                # local or constructor-param annotation (e.g. DI: an injected
+                # dependency assigned to self).
+                inferred_type = local_types.get(node.value.id)
             if inferred_type:
                 for target in node.targets:
                     self._record_assignment_type(target, inferred_type, local_types, self_attr_types)
