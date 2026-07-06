@@ -792,6 +792,8 @@ class CallGraphBuilder:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 qname = f"{namespace}.{node.name}"
                 local_types, self_attr_types = self._extract_assignment_types(node)
+                enclosing = self._functions.get(class_qname) if class_qname else None
+                decorators = [self._decorator_name(d) for d in node.decorator_list]
                 func_def = FunctionDef(
                     name=node.name,
                     qualified_name=qname,
@@ -800,13 +802,15 @@ class CallGraphBuilder:
                     line_end=node.end_lineno or node.lineno,
                     is_async=isinstance(node, ast.AsyncFunctionDef),
                     class_name=class_name,
-                    decorators=[self._decorator_name(d) for d in node.decorator_list],
+                    decorators=decorators,
                     calls=self._extract_calls(node),
                     references=self._extract_references(node),
                     docstring=ast.get_docstring(node) or "",
                     params=[a.arg for a in node.args.args if a.arg != "self"],
                     return_annotation=self._annotation_str(node.returns),
                     class_qname=class_qname,
+                    is_protocol=bool(enclosing and enclosing.is_protocol),
+                    is_abstract=any(d.endswith("abstractmethod") for d in decorators),
                     local_types=local_types,
                     logic_steps=self._extract_logic_steps(node),
                 )

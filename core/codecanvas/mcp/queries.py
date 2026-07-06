@@ -15,6 +15,59 @@ def _location(func) -> str:
     return f"{func.file_path}:{func.line_start}"
 
 
+def _is_test_path(fp: str) -> bool:
+    """True if a file path looks like test code (dir segment or filename)."""
+    parts = (fp or "").replace("\\", "/").split("/")
+    if any(seg in ("tests", "test") for seg in parts):
+        return True
+    base = parts[-1] if parts else ""
+    return base.startswith("test_") or base.endswith("_test.py")
+
+
+def _rank_key(cg, f) -> tuple:
+    """Ranking key, higher is better: (non_test, concrete, fan_in)."""
+    non_test = not _is_test_path(f.file_path or "")
+    concrete = not (f.is_protocol or f.is_abstract)
+    fan_in = len(cg.get_callers(f.qualified_name))
+    return (non_test, concrete, fan_in)
+
+
+def _rank_and_select(cg, ref: str, cands: list):
+    """Rank ambiguous candidates; auto-select a dominant one or return a list.
+
+    Dominance: the top candidate wins outright on the categorical key
+    (non_test, concrete); on a categorical tie it must also dominate
+    fan-in by a clear margin (>= 2x and >= +2) to auto-select. Otherwise
+    a ranked, best-first candidate list is returned for the agent.
+    """
+    keyed = sorted(
+        ((_rank_key(cg, f), f) for f in cands),
+        key=lambda kf: kf[0],
+        reverse=True,
+    )
+    (top_key, top), (second_key, _second) = keyed[0], keyed[1]
+    top_cat, second_cat = top_key[:2], second_key[:2]
+    if top_cat > second_cat or (
+        top_cat == second_cat
+        and top_key[2] >= 2 * second_key[2]
+        and top_key[2] - second_key[2] >= 2
+    ):
+        return top, None
+    return None, {
+        "error": f"Ambiguous '{ref}' ({len(cands)} matches); pick one by qualified_name.",
+        "candidates": [
+            {
+                "qualified_name": f.qualified_name,
+                "location": _location(f),
+                "kind": "method" if f.class_name else "function",
+                "is_interface": bool(f.is_protocol or f.is_abstract),
+                "callers": key[2],
+            }
+            for key, f in keyed[:10]
+        ],
+    }
+
+
 def resolve_function(builder, ref: str):
     """Resolve a function reference to a FunctionDef.
 
@@ -41,16 +94,13 @@ def resolve_function(builder, ref: str):
                 if same and f.line_start <= line <= end:
                     return f, None
 
-    # 3. Bare name (unique last segment).
-    by_name = [f for f in funcs if f.name == ref]
-    if len(by_name) == 1:
-        return by_name[0], None
-    if len(by_name) > 1:
-        return None, {
-            "error": f"Ambiguous function name '{ref}' ({len(by_name)} matches). "
-                     f"Use a qualified name.",
-            "suggestions": [f.qualified_name for f in by_name][:10],
-        }
+    # 3. Bare name or dot-boundary suffix (Class.method / module.Class.method).
+    cands = [f for f in funcs
+             if f.qualified_name == ref or f.qualified_name.endswith("." + ref)]
+    if len(cands) == 1:
+        return cands[0], None
+    if len(cands) > 1:
+        return _rank_and_select(cg, ref, cands)
 
     # 4. Miss -> near-name suggestions.
     names = [f.name for f in funcs]
