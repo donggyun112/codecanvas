@@ -81,3 +81,26 @@ def list_entrypoints(builder) -> dict:
     if note:
         out["note"] = note
     return out
+
+
+def who_calls(builder, function: str) -> dict:
+    """Direct callers of a function (ground-truth reverse edges)."""
+    func, err = resolve_function(builder, function)
+    if err is not None:
+        return err
+    cg = builder.call_graph
+    callers = cg.get_callers(func.qualified_name)
+    rows = [
+        {
+            "caller": caller.qualified_name,
+            "location": _location(caller),
+            "relation": ref.relation,
+            "condition": ref.condition,
+        }
+        for caller, ref in callers
+    ]
+    rows, note = capped(rows)
+    out = {"function": func.qualified_name, "callers": rows}
+    if note:
+        out["note"] = note
+    return out

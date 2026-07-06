@@ -27,3 +27,15 @@ def test_resolve_unknown_returns_suggestions():
     func, err = queries.resolve_function(_b(), "verifyuser")
     assert func is None
     assert "error" in err and isinstance(err["suggestions"], list)
+
+
+def test_who_calls_verify_user_lists_login():
+    out = queries.who_calls(_b(), "verify_user")
+    assert "callers" in out, out
+    caller_names = [c["caller"] for c in out["callers"]]
+    assert any(name.endswith(".login") or name == "login" for name in caller_names), caller_names
+
+
+def test_who_calls_unknown_returns_error():
+    out = queries.who_calls(_b(), "nope_nope")
+    assert "error" in out
