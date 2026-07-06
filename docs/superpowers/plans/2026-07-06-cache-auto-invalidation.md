@@ -14,7 +14,7 @@
 - Hash scope (exact): every `.py` under `core/codecanvas/parser/`, plus `core/codecanvas/graph/builder.py` and `core/codecanvas/graph/models.py`, plus `codecanvas.__version__`.
 - `_analyzer_fingerprint()` must never raise; on unreadable source it returns the `__version__`-only hash (never `None`, never disables the check).
 - Keep the manual version integers as backstops: `CACHE_FORMAT_VERSION` (unchanged) and a new `ENTRYPOINT_CACHE_VERSION` (replaces the inline literal `1`). Do not merge them.
-- Tests run from repo root: `python3 -m pytest tests/test_cache_and_throttle.py -v` (the file inserts `../core` onto `sys.path`).
+- Tests run from repo root with the venv interpreter (this environment's lean-ctx shell gate forbids `python3 -c`, `-e`, and bash pipes; plain `python3` lacks deps): `PYTHONPATH=core .venv/bin/python3 -m pytest tests/test_cache_and_throttle.py -v`.
 - Commit messages: no AI/tool attribution or co-author footer.
 
 ---
@@ -73,7 +73,7 @@ class TestAnalyzerFingerprint:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest tests/test_cache_and_throttle.py::TestAnalyzerFingerprint -v`
+Run: `PYTHONPATH=core .venv/bin/python3 -m pytest tests/test_cache_and_throttle.py::TestAnalyzerFingerprint -v`
 Expected: FAIL with `AttributeError: module 'codecanvas.parser.call_graph' has no attribute '_analyzer_fingerprint'`
 
 - [ ] **Step 3: Add `import hashlib`**
@@ -148,7 +148,7 @@ def _analyzer_fingerprint() -> str:
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/test_cache_and_throttle.py::TestAnalyzerFingerprint -v`
+Run: `PYTHONPATH=core .venv/bin/python3 -m pytest tests/test_cache_and_throttle.py::TestAnalyzerFingerprint -v`
 Expected: PASS (3 tests)
 
 - [ ] **Step 6: Commit**
@@ -196,7 +196,7 @@ Add this method inside the existing `TestCallGraphCache` class in `tests/test_ca
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m pytest "tests/test_cache_and_throttle.py::TestCallGraphCache::test_callgraph_cache_rejects_stale_analyzer" -v`
+Run: `PYTHONPATH=core .venv/bin/python3 -m pytest "tests/test_cache_and_throttle.py::TestCallGraphCache::test_callgraph_cache_rejects_stale_analyzer" -v`
 Expected: FAIL — `_load_cache` returns `True` (it ignores the analyzer field today).
 
 - [ ] **Step 3: Add the analyzer check to `_load_cache`**
@@ -242,7 +242,7 @@ Change it to:
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/test_cache_and_throttle.py::TestCallGraphCache -v`
+Run: `PYTHONPATH=core .venv/bin/python3 -m pytest tests/test_cache_and_throttle.py::TestCallGraphCache -v`
 Expected: PASS (all 3 methods, including the existing `test_warm_flow_matches_cold` positive control)
 
 - [ ] **Step 6: Commit**
@@ -285,7 +285,7 @@ Add this method inside the existing `TestEntrypointCache` class in `tests/test_c
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m pytest "tests/test_cache_and_throttle.py::TestEntrypointCache::test_entrypoint_cache_rejects_stale_analyzer" -v`
+Run: `PYTHONPATH=core .venv/bin/python3 -m pytest "tests/test_cache_and_throttle.py::TestEntrypointCache::test_entrypoint_cache_rejects_stale_analyzer" -v`
 Expected: FAIL — `_load_entrypoint_cache` returns a list (it ignores the analyzer field today).
 
 - [ ] **Step 3: Add the `ENTRYPOINT_CACHE_VERSION` constant**
@@ -399,7 +399,7 @@ Replace that block with:
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/test_cache_and_throttle.py::TestEntrypointCache -v`
+Run: `PYTHONPATH=core .venv/bin/python3 -m pytest tests/test_cache_and_throttle.py::TestEntrypointCache -v`
 Expected: PASS (all methods, including existing `test_warm_matches_cold`, `test_cache_invalidated_on_file_change`, `test_corrupted_cache_falls_back`, `test_deleted_cache_falls_back`)
 
 - [ ] **Step 7: Commit**
@@ -422,41 +422,44 @@ git commit -m "Reject stale entrypoint cache via analyzer fingerprint"
 
 - [ ] **Step 1: Run the full cache/throttle suite**
 
-Run: `python3 -m pytest tests/test_cache_and_throttle.py -v`
+Run: `PYTHONPATH=core .venv/bin/python3 -m pytest tests/test_cache_and_throttle.py -v`
 Expected: PASS — all classes green, including `TestLazyAST` and `TestThrottle` (unchanged behavior) and `test_cache_invalidated_on_file_change` (signature path still works).
 
 - [ ] **Step 2: Run the broader suite to catch unrelated breakage**
 
-Run: `python3 -m pytest tests/ -q`
+Run: `PYTHONPATH=core .venv/bin/python3 -m pytest tests/ -q`
 Expected: PASS — no regressions from the cache changes. (If a pre-existing unrelated failure appears, note it; do not fix out of scope.)
 
 - [ ] **Step 3: Manual smoke — confirm auto-invalidation end to end**
 
-Run:
+The end-to-end behavior is already proven deterministically by the rejection tests in Tasks 2 and 3 (they write a real cache, then reject it under a changed fingerprint). This step is an optional extra smoke.
 
-```bash
-python3 -c "
+This environment's shell gate blocks `python3 -c`; write a scratch script and run it with the venv interpreter. Create a temp file (e.g. under the session scratchpad dir) named `smoke_cache.py`:
+
+```python
 import sys, os, tempfile, pathlib
-sys.path.insert(0, 'core')
+sys.path.insert(0, "core")
 from codecanvas.graph.builder import FlowGraphBuilder
 import codecanvas.parser.call_graph as cg
+import codecanvas
 
 d = tempfile.mkdtemp()
-pathlib.Path(d, 'app').mkdir()
-pathlib.Path(d, 'app/__init__.py').write_text('')
-pathlib.Path(d, 'app/main.py').write_text(
-    'from fastapi import FastAPI\napp=FastAPI()\n@app.get(\"/x\")\ndef h():\n    return 1\n'
+pathlib.Path(d, "app").mkdir()
+pathlib.Path(d, "app/__init__.py").write_text("")
+pathlib.Path(d, "app/main.py").write_text(
+    'from fastapi import FastAPI\napp=FastAPI()\n@app.get("/x")\ndef h():\n    return 1\n'
 )
 b = FlowGraphBuilder(d); b.get_entrypoints()
-print('cache written:', os.path.exists(os.path.join(d, '.codecanvas/entrypoints.json')))
+print("cache written:", os.path.exists(os.path.join(d, ".codecanvas/entrypoints.json")))
 
-# Simulate analyzer change by clearing memo + patching version.
+# Simulate analyzer change: clear memo + change version.
 cg._ANALYZER_FP = None
-import codecanvas; codecanvas.__version__ = '0.0.0-changed'
+codecanvas.__version__ = "0.0.0-changed"
 b2 = FlowGraphBuilder(d)
-print('rejected stale cache (expect None):', b2._load_entrypoint_cache())
-"
+print("rejected stale cache (expect None):", b2._load_entrypoint_cache())
 ```
+
+Run (from repo root): `PYTHONPATH=core .venv/bin/python3 <path>/smoke_cache.py`
 
 Expected output:
 ```
