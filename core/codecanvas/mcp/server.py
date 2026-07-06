@@ -103,6 +103,23 @@ def reaching_conditions(function: str, project_path: str | None = None,
         project_path, lambda b: queries.reaching_conditions(b, function, target))
 
 
+@mcp.tool()
+def call_tree(function: str, project_path: str | None = None, depth: int = 2,
+              filter: str | None = None) -> dict:
+    """Forward transitive call tree — what a function reaches, N hops down.
+
+    The complement of `who_calls` (reverse): get the whole downstream tree in
+    one call instead of hopping node-by-node. Each node carries its `depth`,
+    the `via` caller on the traced path, effect flags (db/http/raises), and
+    risk. Only project-internal functions are nodes; library calls show up as
+    the parent's effect tags. Cycle-safe (dedup by name). `filter` narrows by
+    substring before the cap. `function` = qualified name, bare name, or
+    file:line."""
+    return _with_builder(
+        project_path,
+        lambda b: queries.call_tree(b, function, depth=depth, filter=filter))
+
+
 def main() -> None:
     """Console entry point: run the stdio MCP server."""
     mcp.run()

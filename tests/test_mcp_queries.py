@@ -318,6 +318,60 @@ def test_reaching_conditions_reports_cyclomatic(tmp_path):
     assert out["cyclomatic"] >= 3, out["cyclomatic"]
 
 
+CALLTREE_APP = {
+    "svc.py": """
+        import httpx
+
+        def leaf():
+            httpx.get("http://x")
+            return 1
+
+        def mid():
+            return leaf()
+
+        def top():
+            return mid()
+    """,
+}
+
+
+def test_call_tree_traces_forward_callees(tmp_path):
+    out = queries.call_tree(_tmp_builder(tmp_path, CALLTREE_APP), "top", depth=2)
+    by_name = {n["function"].rsplit(".", 1)[-1]: n for n in out["nodes"]}
+    assert "mid" in by_name and "leaf" in by_name, out["nodes"]
+    assert by_name["mid"]["depth"] == 1
+    assert by_name["leaf"]["depth"] == 2
+    assert by_name["mid"]["via"].endswith("top")
+    assert by_name["leaf"]["via"].endswith("mid")
+
+
+def test_call_tree_default_depth_limits(tmp_path):
+    out = queries.call_tree(_tmp_builder(tmp_path, CALLTREE_APP), "top", depth=1)
+    names = [n["function"].rsplit(".", 1)[-1] for n in out["nodes"]]
+    assert "mid" in names
+    assert "leaf" not in names, names
+
+
+def test_call_tree_tags_effects(tmp_path):
+    out = queries.call_tree(_tmp_builder(tmp_path, CALLTREE_APP), "top", depth=2)
+    leaf = next(n for n in out["nodes"] if n["function"].endswith("leaf"))
+    assert "http" in leaf["effects"], leaf
+
+
+def test_call_tree_handles_recursion(tmp_path):
+    out = queries.call_tree(_tmp_builder(tmp_path, {
+        "rec.py": """
+            def a():
+                return b()
+
+            def b():
+                return a()
+        """,
+    }), "a", depth=5)
+    names = [n["function"] for n in out["nodes"]]
+    assert len(names) == len(set(names)), names
+
+
 def test_reaching_conditions_detects_dead_code(tmp_path):
     out = queries.reaching_conditions(_tmp_builder(tmp_path, {
         "d.py": """

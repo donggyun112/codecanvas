@@ -11,7 +11,8 @@ def test_all_tools_registered():
     tools = anyio.run(server.mcp.list_tools)
     names = {t.name for t in tools}
     assert names == {"list_entrypoints", "who_calls", "what_does",
-                     "analyze_impact", "function_flow", "reaching_conditions"}
+                     "analyze_impact", "function_flow", "reaching_conditions",
+                     "call_tree"}
 
 
 def test_tool_function_returns_dict():

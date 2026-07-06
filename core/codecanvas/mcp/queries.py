@@ -495,3 +495,76 @@ def reaching_conditions(builder, function: str, target=None) -> dict:
     if dead:
         out["dead_code"] = sorted(set(dead))
     return out
+
+
+def _effect_tags(func) -> list[str]:
+    """Compact per-node effect flags: db / http / raises."""
+    tags = []
+    if any(c.is_db_call for c in func.calls):
+        tags.append("db")
+    if any(c.is_http_call for c in func.calls):
+        tags.append("http")
+    if any(c.is_raise for c in func.calls):
+        tags.append("raises")
+    return tags
+
+
+def call_tree(builder, function: str, depth: int = 2, filter=None) -> dict:
+    """Forward transitive call tree: what this function reaches, N hops down.
+
+    Complements ``who_calls`` (reverse). Instead of hopping node-by-node,
+    get the whole downstream tree in one call, each node tagged with its
+    ``depth``, the ``via`` caller on the traced path, effect flags
+    (db/http/raises), and risk. Only project-internal functions are nodes;
+    library/builtin calls are surfaced as the parent's effect tags, not
+    walked. Breadth-first with dedup by qualified name, so recursion/cycles
+    terminate and no function appears twice.
+
+    ``filter`` is a case-insensitive substring over function/location/via,
+    applied before the output cap.
+    """
+    from codecanvas.graph.impact import ImpactAnalyzer
+
+    func, err = resolve_function(builder, function)
+    if err is not None:
+        return err
+    cg = builder.call_graph
+    depth = max(1, int(depth))
+
+    nodes = []
+    visited = {func.qualified_name}
+    frontier = [func]
+    for hop in range(1, depth + 1):
+        next_frontier = []
+        for caller in frontier:
+            for call in caller.calls:
+                callee = cg._resolve_call(call, caller)
+                if callee is None or callee.qualified_name in visited:
+                    continue
+                visited.add(callee.qualified_name)
+                nodes.append({
+                    "function": callee.qualified_name,
+                    "location": _location(callee),
+                    "depth": hop,
+                    "via": caller.qualified_name,
+                    "effects": _effect_tags(callee),
+                    "risk": ImpactAnalyzer._compute_function_risk(callee),
+                })
+                next_frontier.append(callee)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+
+    if filter:
+        needle = filter.lower()
+        nodes = [
+            n for n in nodes
+            if needle in f"{n['function']} {n['location']} {n['via']}".lower()
+        ]
+
+    nodes, note = capped(nodes)
+    out = {"function": func.qualified_name, "location": _location(func),
+           "nodes": nodes}
+    if note:
+        out["note"] = note
+    return out
