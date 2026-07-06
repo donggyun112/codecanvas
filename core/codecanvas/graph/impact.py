@@ -47,6 +47,7 @@ class AffectedEndpoint:
     affected_functions: list[str]  # qualified names
     max_depth: int = 0             # how far the change is from the handler
     aggregate_risk: float = 0
+    handler_file: str = ""         # source file of the handler (for filtering)
 
 
 @dataclass
@@ -254,6 +255,7 @@ class ImpactAnalyzer:
                     affected_functions=sorted(overlap),
                     max_depth=max_depth,
                     aggregate_risk=round(agg_risk, 1),
+                    handler_file=ep.handler_file,
                 ))
 
         # 3. Summary

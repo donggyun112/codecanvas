@@ -297,11 +297,16 @@ def _diff_non_python_files(diff_text: str) -> list[str]:
 
 
 def analyze_impact(builder, diff_text: str | None = None,
-                   git_ref: str | None = None) -> dict:
+                   git_ref: str | None = None, include_tests=False) -> dict:
     """Impact of a change: changed functions -> affected endpoints.
 
     Uses flow_builder=None so no FlowGraph is ever built (risk comes from
     the standalone signal-based score).
+
+    ``include_tests``: endpoints whose handler lives under a test path are
+    excluded by default (consistent with ``list_entrypoints``), since a
+    change reaching a test fixture is rarely the impact the agent cares
+    about. Set True to keep them.
     """
     from codecanvas.graph.impact import ImpactAnalyzer
 
@@ -325,10 +330,17 @@ def analyze_impact(builder, diff_text: str | None = None,
          "risk": f.risk_score, "change_type": f.change_type}
         for f in result.affected_functions
     ]
+    affected_eps = result.affected_endpoints
+    hidden_test_eps = 0
+    if not include_tests:
+        kept = [e for e in affected_eps
+                if not _is_test_path(getattr(e, "handler_file", "") or "")]
+        hidden_test_eps = len(affected_eps) - len(kept)
+        affected_eps = kept
     endpoints = [
         {"method": e.method, "path": e.path, "via": e.affected_functions,
          "call_depth": e.max_depth, "risk": e.aggregate_risk}
-        for e in result.affected_endpoints
+        for e in affected_eps
     ]
     changed, cnote = capped(changed)
     endpoints, enote = capped(endpoints)
@@ -346,7 +358,9 @@ def analyze_impact(builder, diff_text: str | None = None,
            "affected_endpoints": endpoints}
     if skipped:
         out["skipped_files"] = skipped
-    note = "; ".join(n for n in (cnote, enote) if n)
+    tnote = (f"{hidden_test_eps} test-fixture endpoint(s) hidden; "
+             f"pass include_tests=True to show them." if hidden_test_eps else "")
+    note = "; ".join(n for n in (cnote, enote, tnote) if n)
     if note:
         out["note"] = note
     return out

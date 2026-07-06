@@ -70,11 +70,16 @@ def what_does(function: str, project_path: str | None = None) -> dict:
 
 @mcp.tool()
 def analyze_impact(project_path: str | None = None, diff_text: str | None = None,
-                   git_ref: str | None = None) -> dict:
-    """Given a diff or git ref, list changed functions and affected endpoints."""
+                   git_ref: str | None = None, include_tests: bool = False) -> dict:
+    """Given a diff or git ref, list changed functions and affected endpoints.
+
+    Endpoints whose handler is under a test path are hidden by default
+    (consistent with list_entrypoints); set `include_tests=True` to keep them.
+    Non-Python changed files are reported under `skipped_files`."""
     return _with_builder(
         project_path,
-        lambda b: queries.analyze_impact(b, diff_text=diff_text, git_ref=git_ref),
+        lambda b: queries.analyze_impact(b, diff_text=diff_text, git_ref=git_ref,
+                                         include_tests=include_tests),
     )
 
 

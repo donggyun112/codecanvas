@@ -259,6 +259,53 @@ def test_analyze_impact_no_diff_has_no_skipped_files_key():
     assert out["summary"] == "No Python changes detected."
 
 
+IMPACT_EP_APP = {
+    "svc.py": "def helper():\n    return 1\n",
+    "app.py": """
+        from fastapi import FastAPI
+        from svc import helper
+        app = FastAPI()
+
+        @app.get("/real")
+        def real_route():
+            return helper()
+    """,
+    "tests/test_routes.py": """
+        from fastapi import FastAPI
+        from svc import helper
+        app = FastAPI()
+
+        @app.get("/fixture")
+        def fixture_route():
+            return helper()
+    """,
+}
+
+HELPER_DIFF = """\
+--- a/svc.py
++++ b/svc.py
+@@ -1,2 +1,3 @@
+ def helper():
++    # changed
+     return 1
+"""
+
+
+def test_analyze_impact_excludes_test_endpoints_by_default(tmp_path):
+    out = queries.analyze_impact(_tmp_builder(tmp_path, IMPACT_EP_APP),
+                                 diff_text=HELPER_DIFF)
+    paths = [e["path"] for e in out["affected_endpoints"]]
+    assert "/real" in paths, paths
+    assert "/fixture" not in paths, paths
+
+
+def test_analyze_impact_include_tests_keeps_test_endpoints(tmp_path):
+    out = queries.analyze_impact(_tmp_builder(tmp_path, IMPACT_EP_APP),
+                                 diff_text=HELPER_DIFF, include_tests=True)
+    paths = [e["path"] for e in out["affected_endpoints"]]
+    assert "/fixture" in paths, paths
+
+
 def test_analyze_impact_mixed_diff_reports_both():
     mixed = NON_PY_DIFF + VERIFY_USER_DIFF
     out = queries.analyze_impact(_b(), diff_text=mixed)
