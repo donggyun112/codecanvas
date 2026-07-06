@@ -26,6 +26,12 @@ from codecanvas.parser.call_graph import CallGraphBuilder, FunctionDef
 from codecanvas.parser.fastapi_extractor import ExceptionHandlerInfo, FastAPIExtractor
 from codecanvas.parser.entrypoint_extractor import EntryPointExtractor
 
+# Manual backstop version for the entrypoints.json cache. The analyzer
+# fingerprint catches ordinary logic changes; bump this only for a
+# deliberate change to the entrypoint cache payload layout that lies
+# outside the hashed analyzer source.
+ENTRYPOINT_CACHE_VERSION = 1
+
 # Map node types to semantic layer names for Level 1 grouping
 _LAYER_MAP = {
     NodeType.ROUTER: "routers",
@@ -74,6 +80,7 @@ class FlowGraphBuilder:
         from codecanvas.parser.call_graph import (
             _iter_project_python_files,
             _files_signature,
+            _analyzer_fingerprint,
         )
         cache_path = self._ep_cache_path()
         if not cache_path.exists():
@@ -84,7 +91,9 @@ class FlowGraphBuilder:
         except (OSError, json.JSONDecodeError):
             return None
 
-        if not isinstance(payload, dict) or payload.get("version") != 1:
+        if not isinstance(payload, dict) or payload.get("version") != ENTRYPOINT_CACHE_VERSION:
+            return None
+        if payload.get("analyzer") != _analyzer_fingerprint():
             return None
         sig = _files_signature(
             _iter_project_python_files(Path(self.project_root)),
@@ -100,12 +109,14 @@ class FlowGraphBuilder:
         from codecanvas.parser.call_graph import (
             _iter_project_python_files,
             _files_signature,
+            _analyzer_fingerprint,
         )
         cache_path = self._ep_cache_path()
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
-                "version": 1,
+                "version": ENTRYPOINT_CACHE_VERSION,
+                "analyzer": _analyzer_fingerprint(),
                 "signature": _files_signature(
                     _iter_project_python_files(Path(self.project_root)),
                 ),

@@ -105,6 +105,19 @@ class TestEntrypointCache:
         eps = b2.get_entrypoints()
         assert len(eps) >= 1
 
+    def test_entrypoint_cache_rejects_stale_analyzer(self, tmp_path, monkeypatch):
+        proj = _make_project(tmp_path)
+
+        # Cold build writes entrypoints.json with the real fingerprint.
+        b1 = FlowGraphBuilder(proj)
+        b1.get_entrypoints()
+
+        # Simulate an analyzer whose source changed.
+        monkeypatch.setattr(cg_mod, "_analyzer_fingerprint", lambda: "STALE")
+
+        b2 = FlowGraphBuilder(proj)
+        assert b2._load_entrypoint_cache() is None
+
 
 class TestCallGraphCache:
     def test_warm_flow_matches_cold(self, tmp_path):
