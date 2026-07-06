@@ -177,7 +177,7 @@ def list_entrypoints(builder, filter=None, kind=None,
     return out
 
 
-def who_calls(builder, function: str, depth: int = 1) -> dict:
+def who_calls(builder, function: str, depth: int = 1, filter=None) -> dict:
     """Callers of a function (ground-truth reverse edges).
 
     ``depth`` controls how many hops of the reverse call tree to walk:
@@ -186,6 +186,10 @@ def who_calls(builder, function: str, depth: int = 1) -> dict:
       ``depth`` (hops from the target) and ``callee`` (the function it calls
       on the traced path). The walk is breadth-first and dedups by qualified
       name, so cycles/recursion terminate and no caller is listed twice.
+
+    ``filter`` is a case-insensitive substring matched against each row's
+    caller, location, and callee. It is applied BEFORE the output cap, so a
+    specific caller in a heavily-called function is not hidden by truncation.
     """
     func, err = resolve_function(builder, function)
     if err is not None:
@@ -215,6 +219,13 @@ def who_calls(builder, function: str, depth: int = 1) -> dict:
         if not next_frontier:
             break
         frontier = next_frontier
+
+    if filter:
+        needle = filter.lower()
+        rows = [
+            r for r in rows
+            if needle in f"{r['caller']} {r['location']} {r['callee']}".lower()
+        ]
 
     rows, note = capped(rows)
     out = {"function": func.qualified_name, "callers": rows}

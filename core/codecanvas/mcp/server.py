@@ -45,14 +45,18 @@ def list_entrypoints(project_path: str, filter: str | None = None,
 
 
 @mcp.tool()
-def who_calls(project_path: str, function: str, depth: int = 1) -> dict:
+def who_calls(project_path: str, function: str, depth: int = 1,
+              filter: str | None = None) -> dict:
     """Find callers of a function (qualified name, bare name, or file:line).
 
     `depth=1` (default) returns direct callers; `depth=N` walks up to N hops
     of transitive callers, tagging each with its `depth` and the `callee` it
-    calls on the traced path. Cycles/recursion terminate safely."""
+    calls on the traced path. Cycles/recursion terminate safely. On heavily
+    called functions the result is capped, so `filter` (case-insensitive
+    substring over caller/location/callee) narrows it before truncation."""
     return _with_builder(
-        project_path, lambda b: queries.who_calls(b, function, depth=depth))
+        project_path,
+        lambda b: queries.who_calls(b, function, depth=depth, filter=filter))
 
 
 @mcp.tool()

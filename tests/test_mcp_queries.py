@@ -210,6 +210,33 @@ def test_who_calls_depth_handles_recursion(tmp_path):
     assert len(names) == len(set(names)), names
 
 
+FANOUT = {
+    "fan.py": """
+        def target():
+            return 1
+
+        def alpha_caller():
+            return target()
+
+        def beta_caller():
+            return target()
+    """,
+}
+
+
+def test_who_calls_filter_narrows_callers(tmp_path):
+    out = queries.who_calls(_tmp_builder(tmp_path, FANOUT), "target", filter="alpha")
+    names = [c["caller"] for c in out["callers"]]
+    assert any(n.endswith("alpha_caller") for n in names), names
+    assert not any(n.endswith("beta_caller") for n in names), names
+
+
+def test_who_calls_filter_no_match_is_empty(tmp_path):
+    out = queries.who_calls(
+        _tmp_builder(tmp_path, FANOUT), "target", filter="zzz_no_such")
+    assert out["callers"] == []
+
+
 NON_PY_DIFF = """\
 diff --git a/README.md b/README.md
 --- a/README.md
