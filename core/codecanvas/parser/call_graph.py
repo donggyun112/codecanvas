@@ -2077,6 +2077,38 @@ class CallGraphBuilder:
         # Too ambiguous — don't guess
         return None
 
+    def _unique_impl_of(self, type_name: str) -> str | None:
+        """Return the single concrete implementation's class name for an
+        interface (Protocol/ABC), or None if the type is concrete or has
+        zero/multiple implementations.
+
+        Indexed-data only (no analyze_project() re-entrance) so it is safe to
+        call from _resolve_call during the enrichment phase. Stricter than
+        _resolve_concrete_type: never guesses among multiple implementations.
+        """
+        simple_name = self._normalize_type_name(type_name)
+        if not simple_name:
+            return None
+        candidates = [
+            self._functions[qname]
+            for qname in self._name_index.get(simple_name, [])
+            if self._functions[qname].definition_type in {"class", "schema"}
+        ]
+        if not candidates:
+            return None
+        type_def = candidates[0]
+        if not type_def.is_protocol and not type_def.is_abstract:
+            return None  # concrete type — nothing to redirect
+        implementations = [
+            func for func in self._functions.values()
+            if func.definition_type == "class"
+            and self._normalize_type_name(func.name) != simple_name
+            and any(self._normalize_type_name(base) == simple_name for base in func.bases)
+        ]
+        if len(implementations) == 1:
+            return implementations[0].name
+        return None
+
     def _resolve_concrete_type(
         self,
         type_name: str,
