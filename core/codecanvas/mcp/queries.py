@@ -116,7 +116,8 @@ def resolve_function(builder, ref: str):
     }
 
 
-def list_entrypoints(builder, filter=None, kind=None) -> dict:
+def list_entrypoints(builder, filter=None, kind=None,
+                     include_tests=False) -> dict:
     """List discovered entrypoints (APIs + scripts + functions).
 
     Optional narrowing, applied BEFORE the output cap so a target in a
@@ -124,8 +125,18 @@ def list_entrypoints(builder, filter=None, kind=None) -> dict:
     - ``kind``: keep only entrypoints of this kind (e.g. "api", "script").
     - ``filter``: case-insensitive substring matched against the method,
       path, handler, id, and tags.
+    - ``include_tests``: by default entrypoints whose handler lives under a
+      test path (``tests/`` dir, ``test_*.py`` / ``*_test.py``) are hidden,
+      since test-app fixtures are not real service routes. Set True to keep
+      them.
     """
     eps = builder.get_entrypoints()
+
+    hidden_tests = 0
+    if not include_tests:
+        kept = [e for e in eps if not _is_test_path(e.handler_file or "")]
+        hidden_tests = len(eps) - len(kept)
+        eps = kept
 
     if kind:
         eps = [e for e in eps if e.kind == kind]
@@ -151,29 +162,60 @@ def list_entrypoints(builder, filter=None, kind=None) -> dict:
         }
         for e in eps
     ]
-    rows, note = capped(rows)
+    rows, cap_note = capped(rows)
     out = {"count": len(eps), "entrypoints": rows}
-    if note:
-        out["note"] = note
+    notes = []
+    if hidden_tests:
+        notes.append(
+            f"{hidden_tests} test-fixture entrypoint(s) hidden; "
+            f"pass include_tests=True to show them."
+        )
+    if cap_note:
+        notes.append(cap_note)
+    if notes:
+        out["note"] = " ".join(notes)
     return out
 
 
-def who_calls(builder, function: str) -> dict:
-    """Direct callers of a function (ground-truth reverse edges)."""
+def who_calls(builder, function: str, depth: int = 1) -> dict:
+    """Callers of a function (ground-truth reverse edges).
+
+    ``depth`` controls how many hops of the reverse call tree to walk:
+    - ``depth=1`` (default): direct callers only.
+    - ``depth=N``: transitive callers up to N hops. Each row carries its
+      ``depth`` (hops from the target) and ``callee`` (the function it calls
+      on the traced path). The walk is breadth-first and dedups by qualified
+      name, so cycles/recursion terminate and no caller is listed twice.
+    """
     func, err = resolve_function(builder, function)
     if err is not None:
         return err
     cg = builder.call_graph
-    callers = cg.get_callers(func.qualified_name)
-    rows = [
-        {
-            "caller": caller.qualified_name,
-            "location": _location(caller),
-            "relation": ref.relation,
-            "condition": ref.condition,
-        }
-        for caller, ref in callers
-    ]
+    depth = max(1, int(depth))
+
+    rows = []
+    visited = {func.qualified_name}
+    frontier = [func]  # functions whose callers we still need to expand
+    for hop in range(1, depth + 1):
+        next_frontier = []
+        for callee in frontier:
+            for caller, ref in cg.get_callers(callee.qualified_name):
+                if caller.qualified_name in visited:
+                    continue
+                visited.add(caller.qualified_name)
+                rows.append({
+                    "caller": caller.qualified_name,
+                    "location": _location(caller),
+                    "relation": ref.relation,
+                    "condition": ref.condition,
+                    "depth": hop,
+                    "callee": callee.qualified_name,
+                })
+                next_frontier.append(caller)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+
     rows, note = capped(rows)
     out = {"function": func.qualified_name, "callers": rows}
     if note:
@@ -227,6 +269,22 @@ def what_does(builder, function: str) -> dict:
     }
 
 
+def _diff_non_python_files(diff_text: str) -> list[str]:
+    """Changed non-Python file paths from a unified diff (sorted, unique).
+
+    Mirrors ``parse_unified_diff``'s ``+++ b/<path>`` header scan, but keeps
+    only the paths it drops (non ``.py``) so the agent still learns which
+    files changed even when no Python function was touched.
+    """
+    files = set()
+    for line in (diff_text or "").splitlines():
+        if line.startswith("+++ b/"):
+            path = line[6:].strip()
+            if path and path != "/dev/null" and not path.endswith(".py"):
+                files.add(path)
+    return sorted(files)
+
+
 def analyze_impact(builder, diff_text: str | None = None,
                    git_ref: str | None = None) -> dict:
     """Impact of a change: changed functions -> affected endpoints.
@@ -263,9 +321,20 @@ def analyze_impact(builder, diff_text: str | None = None,
     ]
     changed, cnote = capped(changed)
     endpoints, enote = capped(endpoints)
-    out = {"summary": result.summary,
+
+    skipped = _diff_non_python_files(diff_text) if diff_text else []
+    summary = result.summary
+    if skipped and not changed:
+        # No Python function changed, but the diff did touch other files —
+        # say so instead of the bare "No Python changes detected."
+        summary = (f"No Python changes detected; "
+                   f"{len(skipped)} non-Python file(s) changed.")
+
+    out = {"summary": summary,
            "changed_functions": changed,
            "affected_endpoints": endpoints}
+    if skipped:
+        out["skipped_files"] = skipped
     note = "; ".join(n for n in (cnote, enote) if n)
     if note:
         out["note"] = note

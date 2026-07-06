@@ -27,23 +27,32 @@ def _with_builder(project_path: str, fn):
 
 @mcp.tool()
 def list_entrypoints(project_path: str, filter: str | None = None,
-                     kind: str | None = None) -> dict:
+                     kind: str | None = None,
+                     include_tests: bool = False) -> dict:
     """List API/script/function entrypoints discovered in the project.
 
     On large projects the result is capped, so narrow it: `filter` is a
     case-insensitive substring matched over method/path/handler/id/tags
     (e.g. "login"), and `kind` keeps one kind ("api", "script", "function").
+    Test-fixture entrypoints (handlers under `tests/`, `test_*.py`) are
+    hidden by default; set `include_tests=True` to keep them.
     """
     return _with_builder(
         project_path,
-        lambda b: queries.list_entrypoints(b, filter=filter, kind=kind),
+        lambda b: queries.list_entrypoints(
+            b, filter=filter, kind=kind, include_tests=include_tests),
     )
 
 
 @mcp.tool()
-def who_calls(project_path: str, function: str) -> dict:
-    """Find direct callers of a function (qualified name, bare name, or file:line)."""
-    return _with_builder(project_path, lambda b: queries.who_calls(b, function))
+def who_calls(project_path: str, function: str, depth: int = 1) -> dict:
+    """Find callers of a function (qualified name, bare name, or file:line).
+
+    `depth=1` (default) returns direct callers; `depth=N` walks up to N hops
+    of transitive callers, tagging each with its `depth` and the `callee` it
+    calls on the traced path. Cycles/recursion terminate safely."""
+    return _with_builder(
+        project_path, lambda b: queries.who_calls(b, function, depth=depth))
 
 
 @mcp.tool()
