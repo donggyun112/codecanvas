@@ -25,21 +25,9 @@ def _is_test_path(fp: str) -> bool:
 
 
 def _rank_key(cg, f) -> tuple:
-    """Ranking key, higher is better: (non_test, concrete, fan_in).
-
-    is_protocol/is_abstract are set on a class's own FunctionDef, not on
-    its methods' FunctionDefs (see call_graph.py's ast.ClassDef handling
-    vs. _visit_definitions). A method inherits its class's interface-ness
-    via class_qname, so fall back to looking up the class definition when
-    the method itself doesn't carry the flags.
-    """
-    is_protocol, is_abstract = f.is_protocol, f.is_abstract
-    if f.class_qname and not (is_protocol or is_abstract):
-        cls = cg.get_function(f.class_qname)
-        if cls is not None:
-            is_protocol, is_abstract = cls.is_protocol, cls.is_abstract
+    """Ranking key, higher is better: (non_test, concrete, fan_in)."""
     non_test = not _is_test_path(f.file_path or "")
-    concrete = not (is_protocol or is_abstract)
+    concrete = not (f.is_protocol or f.is_abstract)
     fan_in = len(cg.get_callers(f.qualified_name))
     return (non_test, concrete, fan_in)
 

@@ -848,7 +848,7 @@ class CallGraphBuilder:
                             self._name_index.setdefault(child.name, []).append(nested_qname)
 
             elif isinstance(node, ast.ClassDef):
-                class_qname = f"{namespace}.{node.name}"
+                child_class_qname = f"{namespace}.{node.name}"
                 init_node = next(
                     (
                         child for child in node.body
@@ -871,7 +871,7 @@ class CallGraphBuilder:
                 is_schema = bool(base_names & _SCHEMA_BASES)
                 class_def = FunctionDef(
                     name=node.name,
-                    qualified_name=class_qname,
+                    qualified_name=child_class_qname,
                     file_path=file_path,
                     line_start=node.lineno,
                     line_end=node.end_lineno or node.lineno,
@@ -883,16 +883,16 @@ class CallGraphBuilder:
                     params=[a.arg for a in init_node.args.args if a.arg != "self"] if init_node else [],
                     return_annotation=node.name,
                     definition_type="schema" if is_schema else "class",
-                    class_qname=class_qname,
+                    class_qname=child_class_qname,
                     bases=[self._annotation_str(base) or self._get_name(base) for base in node.bases],
                     is_protocol=self._is_protocol_class(node),
                     is_abstract=self._is_abstract_class(node),
                 )
-                self._functions[class_qname] = class_def
-                self._name_index.setdefault(node.name, []).append(class_qname)
+                self._functions[child_class_qname] = class_def
+                self._name_index.setdefault(node.name, []).append(child_class_qname)
                 # Extract annotation-only field types for dataclass/schema/attrs classes
-                self._extract_class_field_types(node, class_qname)
-                self._visit_definitions(node, class_qname, file_path, node.name, class_qname)
+                self._extract_class_field_types(node, child_class_qname)
+                self._visit_definitions(node, child_class_qname, file_path, node.name, child_class_qname)
 
     def _extract_class_field_types(self, class_node: ast.ClassDef, class_qname: str) -> None:
         """Extract annotation-only field types from class body.

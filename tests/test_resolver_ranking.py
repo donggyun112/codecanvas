@@ -177,3 +177,31 @@ def test_who_calls_ambiguous_propagates_candidates(tmp_path):
     })
     out = queries.who_calls(b, "proc")
     assert "error" in out and "candidates" in out
+
+
+def test_top_level_function_after_protocol_not_flagged(tmp_path):
+    b = _resolved(tmp_path, {
+        "app/svc.py":
+            "from typing import Protocol\n"
+            "class Reader(Protocol):\n"
+            "    def read(self): ...\n"
+            "def make_reader():\n"
+            "    return None\n",
+    })
+    cg = b.call_graph
+    fn = next(f for f in cg.all_functions() if f.name == "make_reader")
+    assert fn.is_protocol is False
+    assert fn.class_name is None
+    assert fn.class_qname is None
+
+
+def test_protocol_method_still_flagged(tmp_path):
+    b = _resolved(tmp_path, {
+        "app/svc.py":
+            "from typing import Protocol\n"
+            "class Reader(Protocol):\n"
+            "    def read(self): ...\n",
+    })
+    cg = b.call_graph
+    m = next(f for f in cg.all_functions() if f.name == "read")
+    assert m.is_protocol is True
