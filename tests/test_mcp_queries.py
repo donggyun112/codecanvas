@@ -53,3 +53,29 @@ def test_what_does_login_reports_raise():
     out = queries.what_does(_b(), "login")
     statuses = [r.get("status") for r in out["calls"]["raises"]]
     assert 401 in statuses, out["calls"]["raises"]
+
+
+VERIFY_USER_DIFF = """\
+--- a/app/services/auth_service.py
++++ b/app/services/auth_service.py
+@@ -12,4 +12,5 @@
+     async def verify_user(self, email: str, password: str):
+         user = await self.user_repo.find_by_email(email)
+         if user is None:
+             return None
++        # changed
+"""
+
+
+def test_analyze_impact_maps_verify_user_to_login_endpoint():
+    out = queries.analyze_impact(_b(), diff_text=VERIFY_USER_DIFF)
+    changed = [c["function"] for c in out["changed_functions"]]
+    assert any(name.endswith(".verify_user") for name in changed), changed
+    ep_paths = [e["path"] for e in out["affected_endpoints"]]
+    assert any(p.endswith("/login") for p in ep_paths), ep_paths
+
+
+def test_analyze_impact_no_changes_message():
+    out = queries.analyze_impact(_b(), diff_text="not a diff")
+    assert "summary" in out
+    assert out["changed_functions"] == []

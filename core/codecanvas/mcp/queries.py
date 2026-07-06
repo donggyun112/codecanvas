@@ -150,3 +150,42 @@ def what_does(builder, function: str) -> dict:
         "calls": _summarize_calls(func),
         "risk": ImpactAnalyzer._compute_function_risk(func),
     }
+
+
+def analyze_impact(builder, diff_text: str | None = None,
+                   git_ref: str | None = None) -> dict:
+    """Impact of a change: changed functions -> affected endpoints.
+
+    Uses flow_builder=None so no FlowGraph is ever built (risk comes from
+    the standalone signal-based score).
+    """
+    from codecanvas.graph.impact import ImpactAnalyzer
+
+    analyzer = ImpactAnalyzer(
+        builder.call_graph, builder.project_root,
+        entrypoints=builder.get_entrypoints(), flow_builder=None,
+    )
+    if diff_text:
+        result = analyzer.analyze_diff(diff_text)
+    else:
+        result = analyzer.analyze_git_ref(git_ref or "HEAD~1..HEAD")
+
+    changed = [
+        {"function": f.qualified_name, "location": f"{f.file_path}:{f.line_start}",
+         "risk": f.risk_score, "change_type": f.change_type}
+        for f in result.affected_functions
+    ]
+    endpoints = [
+        {"method": e.method, "path": e.path, "via": e.affected_functions,
+         "call_depth": e.max_depth, "risk": e.aggregate_risk}
+        for e in result.affected_endpoints
+    ]
+    changed, cnote = capped(changed)
+    endpoints, enote = capped(endpoints)
+    out = {"summary": result.summary,
+           "changed_functions": changed,
+           "affected_endpoints": endpoints}
+    note = "; ".join(n for n in (cnote, enote) if n)
+    if note:
+        out["note"] = note
+    return out
