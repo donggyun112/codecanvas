@@ -621,6 +621,58 @@ class TestResolverPrefersNonTest:
         resolved = cg._resolve_call(call, handler)
         assert resolved is None or not _is_test_path(resolved.file_path), resolved
 
+    def test_structural_typing_skips_builtin_method_names(self, tmp_path: Path) -> None:
+        # h.update() where h is a hashlib object must not duck-bind to the one
+        # project class that happens to define update() — names that exist on
+        # builtin types (dict.update, set.add, str.format, file read/write)
+        # are overwhelmingly builtin/stdlib calls, not dynamic dispatch.
+        _write_files(
+            tmp_path,
+            {
+                "fingerprint.py": (
+                    "import hashlib\n"
+                    "def fingerprint(data):\n"
+                    "    h = hashlib.sha256()\n"
+                    "    h.update(data)\n"
+                    "    return h.hexdigest()\n"
+                ),
+                "repo.py": (
+                    "class UserRepo:\n"
+                    "    def update(self, user):\n"
+                    "        return user\n"
+                ),
+            },
+        )
+        cg = CallGraphBuilder(str(tmp_path))
+        cg.analyze_project()
+        fn = cg._find_function("fingerprint", str(tmp_path / "fingerprint.py"))
+        assert fn is not None
+        call = next(c for c in fn.calls if c.func_name.endswith("update"))
+        resolved = cg._resolve_call(call, fn)
+        assert resolved is None, f"h.update() misresolved to {resolved.qualified_name}"
+
+    def test_structural_typing_still_resolves_distinctive_names(self, tmp_path: Path) -> None:
+        # The builtin-name guard must not kill the feature: a distinctive
+        # method name with a single project implementation still resolves.
+        _write_files(
+            tmp_path,
+            {
+                "api.py": "def handler(gateway):\n    return gateway.checkout('/x')\n",
+                "pay.py": (
+                    "class PaymentGateway:\n"
+                    "    def checkout(self, u):\n"
+                    "        return 1\n"
+                ),
+            },
+        )
+        cg = CallGraphBuilder(str(tmp_path))
+        cg.analyze_project()
+        handler = cg._find_function("handler", str(tmp_path / "api.py"))
+        assert handler is not None
+        call = next(c for c in handler.calls if "checkout" in c.func_name)
+        resolved = cg._resolve_call(call, handler)
+        assert resolved is not None and resolved.name == "checkout", resolved
+
 
 class TestLlmSdkDetection:
     """LLM provider SDK calls are external network (http) effects."""

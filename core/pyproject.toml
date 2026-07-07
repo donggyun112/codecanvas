@@ -1,6 +1,6 @@
 [project]
 name = "codecanvas-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Precision static-analysis MCP server for Python: call graphs, control flow, and change impact"
 readme = "README.md"
 requires-python = ">=3.10"

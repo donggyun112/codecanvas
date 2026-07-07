@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import logging
 import os
@@ -552,6 +553,18 @@ HTTP_PATTERNS = {
     "request", "fetch", "send",
 }
 HTTP_OBJECT_HINTS = {"client", "http", "httpx", "requests", "aiohttp", "session"}
+
+# Method names that exist on builtin types (dict.update, set.add, str.format,
+# file read/write). A call like h.update() on an untyped receiver is far more
+# likely a builtin/stdlib call than dynamic dispatch to the one project class
+# that happens to define the name, so structural typing never guesses these.
+_BUILTIN_METHOD_NAMES: frozenset[str] = frozenset(
+    name
+    for t in (dict, list, set, frozenset, str, bytes, bytearray, tuple,
+              io.IOBase, io.RawIOBase, io.BufferedIOBase, io.TextIOBase)
+    for name in dir(t)
+    if not name.startswith("_")
+)
 
 # LLM provider SDK calls are external network effects (Anthropic, OpenAI,
 # Google GenAI/Gemini, ...). Method names distinctive enough to match alone:
@@ -2185,6 +2198,12 @@ class CallGraphBuilder:
         """
         candidates = self._name_index.get(method_name, [])
         if not candidates:
+            return None
+
+        # Names that exist on builtin types are never a duck-typing signal:
+        # h.update() / buf.write() would bind to whatever lone project class
+        # defines the name (see _BUILTIN_METHOD_NAMES).
+        if method_name in _BUILTIN_METHOD_NAMES:
             return None
 
         # Filter to actual class methods (not standalone functions)
