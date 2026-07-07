@@ -16,8 +16,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "core"))
 
-from codecanvas.graph.builder import FlowGraphBuilder
-from codecanvas.parser import call_graph as cg_mod
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.parser import call_graph as cg_mod
 
 
 def _write(root, rel_path, content):
@@ -248,13 +248,13 @@ class TestAnalyzerFingerprint:
         assert all(c in "0123456789abcdef" for c in a)
 
     def test_folds_version(self, monkeypatch):
-        import codecanvas
+        import codecanvas_mcp
         monkeypatch.setattr(cg_mod, "_ANALYZER_FP", None)
-        monkeypatch.setattr(codecanvas, "__version__", "9.9.9-test")
+        monkeypatch.setattr(codecanvas_mcp, "__version__", "9.9.9-test")
         fp_a = cg_mod._analyzer_fingerprint()
 
         monkeypatch.setattr(cg_mod, "_ANALYZER_FP", None)
-        monkeypatch.setattr(codecanvas, "__version__", "0.0.0-other")
+        monkeypatch.setattr(codecanvas_mcp, "__version__", "0.0.0-other")
         fp_b = cg_mod._analyzer_fingerprint()
 
         assert fp_a != fp_b
@@ -262,7 +262,7 @@ class TestAnalyzerFingerprint:
     def test_fallback_on_unreadable_source(self, monkeypatch):
         import hashlib
         from pathlib import Path
-        import codecanvas
+        import codecanvas_mcp
 
         monkeypatch.setattr(cg_mod, "_ANALYZER_FP", None)
 
@@ -271,5 +271,5 @@ class TestAnalyzerFingerprint:
 
         monkeypatch.setattr(Path, "read_bytes", _boom)
         fp = cg_mod._analyzer_fingerprint()
-        expected = hashlib.sha256(codecanvas.__version__.encode("utf-8")).hexdigest()
+        expected = hashlib.sha256(codecanvas_mcp.__version__.encode("utf-8")).hexdigest()
         assert fp == expected

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from codecanvas.parser.call_graph import CallGraphBuilder
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder
 
 SAMPLE = Path(__file__).parent.parent / "sample-fastapi"
 

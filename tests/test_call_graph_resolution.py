@@ -9,8 +9,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "core"))
 
-from codecanvas.graph.builder import FlowGraphBuilder
-from codecanvas.graph.models import EdgeType, NodeType
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.graph.models import EdgeType, NodeType
 
 
 def _build_flow(project_root: Path, method: str, path: str):

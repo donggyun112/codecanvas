@@ -18,10 +18,10 @@ sys.path.insert(0, str(ROOT / "sample-fastapi"))
 
 from httpx import ASGITransport, AsyncClient
 
-from codecanvas.graph.builder import FlowGraphBuilder
-from codecanvas.tracer.mapper import TraceMapper
-from codecanvas.tracer.middleware import TracingMiddleware, tracing_state
-from codecanvas.tracer.models import TraceEventType
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.tracer.mapper import TraceMapper
+from codecanvas_mcp.tracer.middleware import TracingMiddleware, tracing_state
+from codecanvas_mcp.tracer.models import TraceEventType
 
 SAMPLE_ROOT = str(ROOT / "sample-fastapi")
 
@@ -291,7 +291,7 @@ def test_edge_hit_requires_actual_transition_not_both_ends(app, builder):
 def test_runtime_only_nodes_are_created_for_unresolved_trace_calls(builder):
     """Functions seen in the trace but absent from the static graph should
     appear as runtime_only nodes, not be silently dropped."""
-    from codecanvas.tracer.models import TraceEvent, TraceResult
+    from codecanvas_mcp.tracer.models import TraceEvent, TraceResult
 
     login_entry = next(
         e for e in builder.get_endpoints()

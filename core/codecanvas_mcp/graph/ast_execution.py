@@ -9,8 +9,8 @@ import ast
 import re
 from typing import Any
 
-from codecanvas.graph.execution import DataLink, ExecutionGraph, ExecutionStep
-from codecanvas.parser.call_graph import CallGraphBuilder, FunctionDef
+from codecanvas_mcp.graph.execution import DataLink, ExecutionGraph, ExecutionStep
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder, FunctionDef
 
 
 class ASTExecutionBuilder:
@@ -587,7 +587,7 @@ class ASTExecutionBuilder:
         # Compute human-readable branch explanation
         branch_explanation = ""
         try:
-            from codecanvas.graph.cfg import CFGBuilder
+            from codecanvas_mcp.graph.cfg import CFGBuilder
             branch_explanation = CFGBuilder._explain_branch(
                 stmt.test, stmt.body, stmt.orelse,
             )
@@ -773,7 +773,7 @@ class ASTExecutionBuilder:
                 if iter_type:
                     elem_type = CallGraphBuilder._extract_element_type(iter_type)
                     if elem_type:
-                        from codecanvas.parser.call_graph import CallGraphBuilder as _CG
+                        from codecanvas_mcp.parser.call_graph import CallGraphBuilder as _CG
                         normalized = _CG._normalize_type_name(elem_type)
                         if normalized and normalized[0].isupper():
                             func.local_types[stmt.target.id] = normalized
@@ -966,7 +966,7 @@ class ASTExecutionBuilder:
                     target_name = item.optional_vars.id
                     ret_type = callee.return_annotation
                     if ret_type:
-                        from codecanvas.parser.call_graph import CallGraphBuilder
+                        from codecanvas_mcp.parser.call_graph import CallGraphBuilder
                         normalized = CallGraphBuilder._normalize_type_name(ret_type)
                         if normalized and normalized[0].isupper():
                             func.local_types[target_name] = normalized
@@ -1182,7 +1182,7 @@ class ASTExecutionBuilder:
                 pass  # assignment handled by _handle_assign caller
             return result
         if isinstance(node, ast.Call):
-            from codecanvas.parser.call_graph import CallSite
+            from codecanvas_mcp.parser.call_graph import CallSite
             func_name, owner_parts, is_attribute_call = CallGraphBuilder._get_call_target(node)
             if not func_name:
                 return None
@@ -1265,7 +1265,7 @@ class ASTExecutionBuilder:
             if branch_condition:
                 try:
                     test_ast = ast.parse(branch_condition, mode="eval").body
-                    from codecanvas.graph.cfg import CFGBuilder
+                    from codecanvas_mcp.graph.cfg import CFGBuilder
                     explanation = CFGBuilder._explain_branch(test_ast, [], [])
                     if explanation:
                         return explanation
@@ -1526,7 +1526,7 @@ class ASTExecutionBuilder:
         return getattr(self.cg, "_last_resolve_confidence", None) or "definite"
 
     def _is_io_func(self, func: FunctionDef) -> bool:
-        from codecanvas.graph.models import NodeType
+        from codecanvas_mcp.graph.models import NodeType
         node_type = self.cg._classify_function(func)
         if node_type in (NodeType.REPOSITORY, NodeType.DATABASE, NodeType.EXTERNAL_API):
             return True

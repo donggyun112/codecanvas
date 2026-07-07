@@ -11,8 +11,8 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
-from codecanvas.graph.models import FlowGraph, FlowNode, EdgeType
-from codecanvas.parser.call_graph import CallGraphBuilder
+from codecanvas_mcp.graph.models import FlowGraph, FlowNode, EdgeType
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder
 
 
 @dataclass
@@ -333,7 +333,7 @@ class ImpactAnalyzer:
         if not ast_node or not isinstance(ast_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return []
 
-        from codecanvas.graph.ast_execution import ASTExecutionBuilder
+        from codecanvas_mcp.graph.ast_execution import ASTExecutionBuilder
         results = []
         # Check annotations + defaults for Depends()
         for arg in ast_node.args.args + ast_node.args.kwonlyargs:

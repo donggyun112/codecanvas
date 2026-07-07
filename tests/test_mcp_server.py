@@ -2,7 +2,7 @@ from pathlib import Path
 
 import anyio
 
-from codecanvas.mcp import server
+from codecanvas_mcp.mcp import server
 
 SAMPLE = Path(__file__).parent.parent / "sample-fastapi"
 

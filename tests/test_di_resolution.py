@@ -1,4 +1,4 @@
-from codecanvas.parser.call_graph import CallGraphBuilder
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder
 
 
 def _build(tmp_path, src, name="di_app.py"):

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from codecanvas.graph.models import Endpoint, Evidence
+from codecanvas_mcp.graph.models import Endpoint, Evidence
 
 
 # FastAPI/Starlette HTTP method decorators

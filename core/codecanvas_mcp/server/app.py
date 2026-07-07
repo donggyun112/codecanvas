@@ -17,8 +17,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from codecanvas.graph.builder import FlowGraphBuilder
-from codecanvas.parser.call_graph import ProjectTooLargeError
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.parser.call_graph import ProjectTooLargeError
 
 app = FastAPI(title="CodeCanvas Analysis Server")
 
@@ -226,9 +226,9 @@ async def trace_request(req: TraceRequest):
     """
     from httpx import ASGITransport, AsyncClient
 
-    from codecanvas.tracer.app_discovery import discover_app
-    from codecanvas.tracer.mapper import TraceMapper
-    from codecanvas.tracer.middleware import TracingMiddleware, tracing_state
+    from codecanvas_mcp.tracer.app_discovery import discover_app
+    from codecanvas_mcp.tracer.mapper import TraceMapper
+    from codecanvas_mcp.tracer.middleware import TracingMiddleware, tracing_state
 
     # 1. Ensure static analysis is ready
     builder = _builders.get(req.project_path)
@@ -312,7 +312,7 @@ async def trace_request(req: TraceRequest):
 def _enrich_from_openapi(target_app: Any, builder: FlowGraphBuilder) -> None:
     """Supplement static analysis with the live app's OpenAPI spec."""
     try:
-        from codecanvas.parser.openapi_enricher import (
+        from codecanvas_mcp.parser.openapi_enricher import (
             apply_enrichments,
             enrich_endpoints,
             extract_openapi_spec,
@@ -334,8 +334,8 @@ def _discover_target_app(project_path: str) -> Any:
 
     No caching: the user may have edited source since the last trace.
     """
-    from codecanvas.tracer.app_discovery import discover_app
-    from codecanvas.tracer.middleware import TracingMiddleware
+    from codecanvas_mcp.tracer.app_discovery import discover_app
+    from codecanvas_mcp.tracer.middleware import TracingMiddleware
 
     # Invalidate cached modules from the target project so we pick up edits
     _invalidate_project_modules(project_path)
@@ -384,7 +384,7 @@ async def analyze_impact(req: ImpactRequest):
     builder = _get_or_create_builder(project_path)
     entrypoints = builder.get_entrypoints()
 
-    from codecanvas.graph.impact import ImpactAnalyzer
+    from codecanvas_mcp.graph.impact import ImpactAnalyzer
     analyzer = ImpactAnalyzer(
         builder.call_graph, project_path,
         entrypoints=entrypoints, flow_builder=builder,
@@ -403,7 +403,7 @@ async def analyze_impact(req: ImpactRequest):
     if req.entry_id:
         target = next((e for e in entrypoints if e.id == req.entry_id), None)
         if target:
-            from codecanvas.graph.impact import annotate_flow_graph_impact
+            from codecanvas_mcp.graph.impact import annotate_flow_graph_impact
             graph = builder.build_flow(target)
             annotate_flow_graph_impact(graph, result)
             response["flowGraph"] = graph.to_dict()

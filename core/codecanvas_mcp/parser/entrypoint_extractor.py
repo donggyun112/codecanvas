@@ -10,8 +10,8 @@ import ast
 import os
 from pathlib import Path
 
-from codecanvas.graph.models import EntryPoint
-from codecanvas.parser.fastapi_extractor import FastAPIExtractor
+from codecanvas_mcp.graph.models import EntryPoint
+from codecanvas_mcp.parser.fastapi_extractor import FastAPIExtractor
 
 
 class EntryPointExtractor:

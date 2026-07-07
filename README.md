@@ -54,18 +54,18 @@ webview/            React Flow canvas (React 18, Vite)
   └─ src/layout/         ELK layout + branch centering
 
 core/               Python static analysis engine
-  ├─ codecanvas/graph/
+  ├─ codecanvas_mcp/graph/
   │   ├─ models.py       Canonical IR (FlowNode, FlowEdge, FlowGraph)
   │   ├─ builder.py      FlowGraph build pipeline
   │   ├─ ast_execution.py AST → ExecutionGraph (semantic execution steps)
   │   ├─ cfg.py          AST → ControlFlowGraph (branches/loops)
   │   ├─ impact.py       git diff → impact analysis
   │   └─ execution.py    ExecutionGraph model + L3 merge
-  ├─ codecanvas/parser/
+  ├─ codecanvas_mcp/parser/
   │   ├─ call_graph.py   Project-wide call graph + disk cache
   │   ├─ fastapi_extractor.py  FastAPI routes/middleware/exception handlers
   │   └─ entrypoint_extractor.py  API/script/function entrypoint discovery
-  └─ codecanvas/server/
+  └─ codecanvas_mcp/server/
       └─ app.py          FastAPI analysis server (5 endpoints)
 ```
 
@@ -105,9 +105,9 @@ pnpm install
 cd core && pip install -e ".[dev]" && cd ..
 
 # MCP server only (no FastAPI web server / runtime tracer):
-#   pip install codecanvas
+#   pip install codecanvas-mcp
 # Web server + tracer:
-#   pip install "codecanvas[server]"
+#   pip install "codecanvas-mcp[server]"
 
 # Build (webview + extension)
 pnpm -r run build

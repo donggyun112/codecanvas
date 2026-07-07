@@ -1,4 +1,4 @@
-from codecanvas.mcp.answers import capped, DEFAULT_CAP
+from codecanvas_mcp.mcp.answers import capped, DEFAULT_CAP
 
 
 def test_capped_under_limit_no_note():

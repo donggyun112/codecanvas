@@ -14,8 +14,8 @@ sys.path.insert(0, str(ROOT / "sample-fastapi"))
 
 from httpx import ASGITransport, AsyncClient
 
-from codecanvas.tracer.middleware import TracingMiddleware, tracing_state
-from codecanvas.tracer.models import TraceEventType
+from codecanvas_mcp.tracer.middleware import TracingMiddleware, tracing_state
+from codecanvas_mcp.tracer.models import TraceEventType
 
 SAMPLE_ROOT = str(ROOT / "sample-fastapi")
 

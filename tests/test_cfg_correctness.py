@@ -10,8 +10,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "core"))
 
-from codecanvas.graph.cfg import CFGBuilder, ControlFlowGraph
-from codecanvas.parser.call_graph import CallGraphBuilder
+from codecanvas_mcp.graph.cfg import CFGBuilder, ControlFlowGraph
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder
 
 
 # ---------------------------------------------------------------------------

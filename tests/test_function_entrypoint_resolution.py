@@ -9,7 +9,7 @@ import textwrap
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "core"))
 
-from codecanvas.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
 
 
 def _write_files(project_root: Path, files: dict[str, str]) -> None:

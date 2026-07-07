@@ -1,7 +1,8 @@
 [project]
-name = "codecanvas"
+name = "codecanvas-mcp"
 version = "0.1.0"
-description = "Python request flow explainer for FastAPI"
+description = "Precision static-analysis MCP server for Python: call graphs, control flow, and change impact"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "libcst>=1.0.0",
@@ -16,12 +17,16 @@ server = [
 ]
 dev = [
     "pytest",
-    "codecanvas[server]",
+    "codecanvas-mcp[server]",
 ]
 
+[project.urls]
+Repository = "https://github.com/donggyun112/codecanvas"
+Issues = "https://github.com/donggyun112/codecanvas/issues"
+
 [project.scripts]
-codecanvas = "codecanvas.server.app:main"
-codecanvas-mcp = "codecanvas.mcp.server:main"
+codecanvas = "codecanvas_mcp.server.app:main"
+codecanvas-mcp = "codecanvas_mcp.mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]

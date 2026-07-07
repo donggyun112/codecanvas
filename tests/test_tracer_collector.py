@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "core"))
 
-from codecanvas.tracer import TraceCollector, TraceEventType
+from codecanvas_mcp.tracer import TraceCollector, TraceEventType
 
 
 def _load_module(module_path: Path, module_name: str):

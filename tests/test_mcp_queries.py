@@ -1,8 +1,8 @@
 import textwrap
 from pathlib import Path
 
-from codecanvas.mcp.session import get_builder
-from codecanvas.mcp import queries
+from codecanvas_mcp.mcp.session import get_builder
+from codecanvas_mcp.mcp import queries
 
 SAMPLE = Path(__file__).parent.parent / "sample-fastapi"
 
@@ -120,7 +120,7 @@ def test_analyze_impact_rejects_option_injection_ref(tmp_path):
 
 
 def test_is_safe_git_ref():
-    from codecanvas.graph.impact import _is_safe_git_ref
+    from codecanvas_mcp.graph.impact import _is_safe_git_ref
     assert _is_safe_git_ref("HEAD~1..HEAD")
     assert _is_safe_git_ref("main...feature/x")
     assert _is_safe_git_ref("abc123")

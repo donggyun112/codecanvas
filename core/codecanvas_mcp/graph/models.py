@@ -354,8 +354,8 @@ class FlowGraph:
         if include_execution_graph:
             cg = self._call_graph if hasattr(self, '_call_graph') else None
             if cg:
-                from codecanvas.graph.ast_execution import ASTExecutionBuilder
-                from codecanvas.graph.cfg import CFGBuilder
+                from codecanvas_mcp.graph.ast_execution import ASTExecutionBuilder
+                from codecanvas_mcp.graph.cfg import CFGBuilder
 
                 handler = self.entrypoint
                 aeb = ASTExecutionBuilder(cg)

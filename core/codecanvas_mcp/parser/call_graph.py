@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from codecanvas.graph.models import (
+from codecanvas_mcp.graph.models import (
     Confidence,
     EdgeType,
     Evidence,
@@ -106,7 +106,7 @@ def _analyzer_fingerprint() -> str:
         return _ANALYZER_FP
 
     try:
-        from codecanvas import __version__ as ver
+        from codecanvas_mcp import __version__ as ver
     except Exception:
         ver = "unknown"
 

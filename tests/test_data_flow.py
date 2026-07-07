@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "core"))
 
-from codecanvas.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
 
 
 SAMPLE_DIR = os.path.join(os.path.dirname(__file__), "..", "sample-fastapi")

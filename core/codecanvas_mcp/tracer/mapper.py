@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 
-from codecanvas.graph.models import (
+from codecanvas_mcp.graph.models import (
     Confidence,
     EdgeType,
     Evidence,
@@ -23,8 +23,8 @@ from codecanvas.graph.models import (
     FlowNode,
     NodeType,
 )
-from codecanvas.parser.call_graph import CallGraphBuilder
-from codecanvas.tracer.models import TraceEventType, TraceResult
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder
+from codecanvas_mcp.tracer.models import TraceEventType, TraceResult
 
 
 class TraceMapper:

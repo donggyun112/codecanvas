@@ -1,5 +1,5 @@
-from codecanvas.graph.builder import FlowGraphBuilder
-from codecanvas.mcp import queries
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.mcp import queries
 
 
 def _resolved(tmp_path, files):

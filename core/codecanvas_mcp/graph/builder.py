@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from codecanvas.graph.models import (
+from codecanvas_mcp.graph.models import (
     Confidence,
     DataFlowStep,
     EdgeType,
@@ -22,9 +22,9 @@ from codecanvas.graph.models import (
     FlowNode,
     NodeType,
 )
-from codecanvas.parser.call_graph import CallGraphBuilder, FunctionDef
-from codecanvas.parser.fastapi_extractor import ExceptionHandlerInfo, FastAPIExtractor
-from codecanvas.parser.entrypoint_extractor import EntryPointExtractor
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder, FunctionDef
+from codecanvas_mcp.parser.fastapi_extractor import ExceptionHandlerInfo, FastAPIExtractor
+from codecanvas_mcp.parser.entrypoint_extractor import EntryPointExtractor
 
 # Manual backstop version for the entrypoints.json cache. The analyzer
 # fingerprint catches ordinary logic changes; bump this only for a
@@ -77,7 +77,7 @@ class FlowGraphBuilder:
         return Path(self.project_root) / ".codecanvas" / "entrypoints.json"
 
     def _load_entrypoint_cache(self) -> list[EntryPoint] | None:
-        from codecanvas.parser.call_graph import (
+        from codecanvas_mcp.parser.call_graph import (
             _iter_project_python_files,
             _files_signature,
             _analyzer_fingerprint,
@@ -106,7 +106,7 @@ class FlowGraphBuilder:
             return None
 
     def _save_entrypoint_cache(self, eps: list[EntryPoint]) -> None:
-        from codecanvas.parser.call_graph import (
+        from codecanvas_mcp.parser.call_graph import (
             _iter_project_python_files,
             _files_signature,
             _analyzer_fingerprint,

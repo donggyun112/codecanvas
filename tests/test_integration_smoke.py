@@ -6,9 +6,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "core"))
 
-from codecanvas.graph.builder import FlowGraphBuilder
-from codecanvas.graph.cfg import CFGBuilder, ControlFlowGraph
-from codecanvas.graph.impact import ImpactAnalyzer
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.graph.cfg import CFGBuilder, ControlFlowGraph
+from codecanvas_mcp.graph.impact import ImpactAnalyzer
 
 SAMPLE = ROOT / "sample-fastapi"
 

@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from codecanvas.mcp import session
-from codecanvas.mcp.session import (
+from codecanvas_mcp.mcp import session
+from codecanvas_mcp.mcp.session import (
     get_builder, resolve_project, ProjectNotFoundError, NoDefaultProjectError,
 )
 
@@ -66,7 +66,7 @@ def test_resolve_project_missing_dir_raises():
 
 
 def test_server_tool_uses_default_after_first_call():
-    from codecanvas.mcp import server
+    from codecanvas_mcp.mcp import server
     first = server.list_entrypoints(str(SAMPLE))
     assert "entrypoints" in first
     # Omitting project_path reuses the last project.

@@ -12,7 +12,7 @@ Handles:
 
 Usage::
 
-    from codecanvas.tracer.middleware import TracingMiddleware, tracing_state
+    from codecanvas_mcp.tracer.middleware import TracingMiddleware, tracing_state
 
     app.add_middleware(TracingMiddleware)
 
@@ -35,8 +35,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-from codecanvas.tracer.collector import TraceCollector
-from codecanvas.tracer.models import TraceResult
+from codecanvas_mcp.tracer.collector import TraceCollector
+from codecanvas_mcp.tracer.models import TraceResult
 
 # Context var to tag the traced request — lets the collector (or hooks)
 # know which async context is being traced even when other coroutines

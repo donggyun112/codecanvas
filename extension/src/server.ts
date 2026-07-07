@@ -40,7 +40,7 @@ export class AnalysisServer {
         // Resolve symlinks so ../core works when extension dir is a symlink
         const realExtPath = fs.realpathSync(this.extensionPath);
         const bundledCore = path.join(realExtPath, 'core');
-        if (fs.existsSync(path.join(bundledCore, 'codecanvas'))) {
+        if (fs.existsSync(path.join(bundledCore, 'codecanvas_mcp'))) {
             return bundledCore;
         }
         return path.join(realExtPath, '..', 'core');
@@ -147,7 +147,7 @@ export class AnalysisServer {
             // and prints CODECANVAS_PORT=<port> on stdout.
             this.process = spawn(
                 pythonPath,
-                ['-m', 'codecanvas.server.app', '0'],
+                ['-m', 'codecanvas_mcp.server.app', '0'],
                 {
                     cwd: corePath,
                     env: {

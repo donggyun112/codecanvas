@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from pathlib import Path
 
-from codecanvas.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
 
 _MAX_BUILDERS = 8
 _builders: "OrderedDict[str, FlowGraphBuilder]" = OrderedDict()

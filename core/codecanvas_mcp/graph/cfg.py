@@ -13,7 +13,7 @@ import ast
 from dataclasses import dataclass, field
 from typing import Any
 
-from codecanvas.parser.call_graph import CallGraphBuilder, FunctionDef
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder, FunctionDef
 
 
 def _branch_subject_name(node: ast.expr) -> str:

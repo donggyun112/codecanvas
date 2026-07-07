@@ -8,7 +8,7 @@ from __future__ import annotations
 import difflib
 import os
 
-from codecanvas.mcp.answers import capped
+from codecanvas_mcp.mcp.answers import capped
 
 
 def _location(func) -> str:
@@ -260,7 +260,7 @@ def _summarize_calls(func) -> dict:
 
 def what_does(builder, function: str) -> dict:
     """Summarize what a function does (signature + effects), no source read."""
-    from codecanvas.graph.impact import ImpactAnalyzer
+    from codecanvas_mcp.graph.impact import ImpactAnalyzer
 
     func, err = resolve_function(builder, function)
     if err is not None:
@@ -308,10 +308,10 @@ def analyze_impact(builder, diff_text: str | None = None,
     change reaching a test fixture is rarely the impact the agent cares
     about. Set True to keep them.
     """
-    from codecanvas.graph.impact import ImpactAnalyzer
+    from codecanvas_mcp.graph.impact import ImpactAnalyzer
 
     if not diff_text and git_ref is not None:
-        from codecanvas.graph.impact import _is_safe_git_ref
+        from codecanvas_mcp.graph.impact import _is_safe_git_ref
         if not _is_safe_git_ref(git_ref):
             return {"error": f"Invalid git_ref: {git_ref!r}. "
                              f"Expected a git revision or range like 'HEAD~1..HEAD'."}
@@ -374,7 +374,7 @@ def function_flow(builder, function: str) -> dict:
     literal-only assignments — so the logic can be grasped without reading
     the full body.
     """
-    from codecanvas.mcp import outline
+    from codecanvas_mcp.mcp import outline
 
     func, err = resolve_function(builder, function)
     if err is not None:
@@ -418,7 +418,7 @@ def _yield_value(stmt):
     """If a statement is a bare ``yield``/``yield from`` expression, return its
     rendered value (for the outcome detail); else None if it holds no yield."""
     import ast
-    from codecanvas.mcp import outline
+    from codecanvas_mcp.mcp import outline
     for node in ast.walk(stmt):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             # don't descend into nested scopes — their yields aren't ours
@@ -463,7 +463,7 @@ def reaching_conditions(builder, function: str, target=None) -> dict:
     block). Guards are lexical, not full path conditions.
     """
     import ast
-    from codecanvas.mcp import outline
+    from codecanvas_mcp.mcp import outline
 
     func, err = resolve_function(builder, function)
     if err is not None:
@@ -579,7 +579,7 @@ def call_tree(builder, function: str, depth: int = 2, filter=None,
     ``filter`` is a case-insensitive substring over function/location/via,
     applied before the output cap.
     """
-    from codecanvas.graph.impact import ImpactAnalyzer
+    from codecanvas_mcp.graph.impact import ImpactAnalyzer
 
     func, err = resolve_function(builder, function)
     if err is not None:

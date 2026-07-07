@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from types import FrameType, TracebackType
 from typing import Any, Iterator
 
-from codecanvas.tracer.models import TraceEvent, TraceEventType, TraceResult
+from codecanvas_mcp.tracer.models import TraceEvent, TraceEventType, TraceResult
 
 _IGNORED_SEGMENTS = {".git", ".venv", "__pycache__", "node_modules", "venv"}
 

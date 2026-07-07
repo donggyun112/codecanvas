@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from codecanvas.parser.call_graph import CallGraphBuilder
-from codecanvas.graph.impact import ImpactAnalyzer
-from codecanvas.parser.entrypoint_extractor import EntryPointExtractor
-from codecanvas.parser.fastapi_extractor import FastAPIExtractor
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder
+from codecanvas_mcp.graph.impact import ImpactAnalyzer
+from codecanvas_mcp.parser.entrypoint_extractor import EntryPointExtractor
+from codecanvas_mcp.parser.fastapi_extractor import FastAPIExtractor
 
 SAMPLE = Path(__file__).parent.parent / "sample-fastapi"
 

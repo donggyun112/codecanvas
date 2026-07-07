@@ -6,10 +6,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "core"))
 
-from codecanvas.graph.impact import (
+from codecanvas_mcp.graph.impact import (
     parse_unified_diff, ImpactAnalyzer, ChangedHunk,
 )
-from codecanvas.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
 
 
 def _write_files(root: Path, files: dict[str, str]) -> None:

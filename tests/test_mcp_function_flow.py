@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from codecanvas.parser.call_graph import CallGraphBuilder
-from codecanvas.mcp import outline, queries
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder
+from codecanvas_mcp.mcp import outline, queries
 
 
 def _build(tmp_path, src, name="flow_app.py"):

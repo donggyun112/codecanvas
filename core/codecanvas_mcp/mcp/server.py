@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
-from codecanvas.mcp import queries
-from codecanvas.mcp.session import (
+from codecanvas_mcp.mcp import queries
+from codecanvas_mcp.mcp.session import (
     get_builder, resolve_project, ProjectNotFoundError, NoDefaultProjectError,
 )
-from codecanvas.parser.call_graph import ProjectTooLargeError
+from codecanvas_mcp.parser.call_graph import ProjectTooLargeError
 
 mcp = FastMCP("codecanvas")
 

@@ -9,9 +9,9 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "core"))
 
-from codecanvas.graph.builder import FlowGraphBuilder
-from codecanvas.graph.models import EdgeType, NodeType
-from codecanvas.parser.call_graph import CallGraphBuilder
+from codecanvas_mcp.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.graph.models import EdgeType, NodeType
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder
 
 
 def _write_files(project_root: Path, files: dict[str, str]) -> None:
@@ -577,7 +577,7 @@ class TestResolverPrefersNonTest:
         return SimpleNamespace(file_path=path, qualified_name=path)
 
     def test_prefer_non_test_drops_test_candidates_for_prod_caller(self) -> None:
-        from codecanvas.parser.call_graph import _prefer_non_test
+        from codecanvas_mcp.parser.call_graph import _prefer_non_test
         real = self._cand("src/core.py")
         fake = self._cand("tests/fixtures.py")
         # test candidate first (simulating adverse walk order)
@@ -585,13 +585,13 @@ class TestResolverPrefersNonTest:
         assert out == [real], out
 
     def test_prefer_non_test_keeps_all_when_only_test_candidates(self) -> None:
-        from codecanvas.parser.call_graph import _prefer_non_test
+        from codecanvas_mcp.parser.call_graph import _prefer_non_test
         fake = self._cand("tests/fixtures.py")
         out = _prefer_non_test([fake], caller_file="src/api.py")
         assert out == [fake]
 
     def test_prefer_non_test_noop_for_test_caller(self) -> None:
-        from codecanvas.parser.call_graph import _prefer_non_test
+        from codecanvas_mcp.parser.call_graph import _prefer_non_test
         real = self._cand("src/core.py")
         fake = self._cand("tests/fixtures.py")
         # caller is itself test code → test candidates stay eligible
@@ -601,7 +601,7 @@ class TestResolverPrefersNonTest:
     def test_structural_typing_skips_test_only_method(self, tmp_path: Path) -> None:
         # client.post() on an untyped receiver falls to structural typing; a
         # production caller must not duck-bind to a test fixture's post().
-        from codecanvas.parser.call_graph import _is_test_path
+        from codecanvas_mcp.parser.call_graph import _is_test_path
         _write_files(
             tmp_path,
             {
@@ -717,7 +717,7 @@ class TestCFGNestedStructures:
             },
         )
 
-        from codecanvas.graph.cfg import CFGBuilder
+        from codecanvas_mcp.graph.cfg import CFGBuilder
 
         cg = CallGraphBuilder(str(tmp_path))
         cg.analyze_project()
@@ -763,7 +763,7 @@ class TestCFGNestedStructures:
             },
         )
 
-        from codecanvas.graph.cfg import CFGBuilder
+        from codecanvas_mcp.graph.cfg import CFGBuilder
 
         cg = CallGraphBuilder(str(tmp_path))
         cg.analyze_project()
