@@ -101,7 +101,13 @@ Use `projectByKind(flowData, kinds, edgeTypes)` to extract nodes/edges for any v
 pnpm install
 
 # Install Python dependencies
+# [dev] pulls in everything (pytest + the [server] extra below)
 cd core && pip install -e ".[dev]" && cd ..
+
+# MCP server only (no FastAPI web server / runtime tracer):
+#   pip install codecanvas
+# Web server + tracer:
+#   pip install "codecanvas[server]"
 
 # Build (webview + extension)
 pnpm -r run build
@@ -111,7 +117,6 @@ pnpm -r run build
 
 # Run tests
 python3 -m pytest tests/
-# Note: some tracer tests require httpx (pip install httpx)
 ```
 
 ### Requirements

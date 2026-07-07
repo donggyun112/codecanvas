@@ -4,16 +4,19 @@ version = "0.1.0"
 description = "Python request flow explainer for FastAPI"
 requires-python = ">=3.10"
 dependencies = [
-    "fastapi",
-    "uvicorn",
     "libcst>=1.0.0",
-    "httpx>=0.24.0",
     "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
+server = [
+    "fastapi",
+    "uvicorn",
+    "httpx>=0.24.0",
+]
 dev = [
     "pytest",
+    "codecanvas[server]",
 ]
 
 [project.scripts]
