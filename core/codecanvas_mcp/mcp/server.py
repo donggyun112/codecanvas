@@ -15,7 +15,25 @@ from codecanvas_mcp.mcp.session import (
 )
 from codecanvas_mcp.parser.call_graph import ProjectTooLargeError
 
-mcp = FastMCP("codecanvas")
+mcp = FastMCP(
+    "codecanvas",
+    instructions=(
+        "CodeCanvas answers precise questions about a Python codebase from a "
+        "real call graph and control-flow graph — not text search or "
+        "guesswork. Turn to it instead of grepping or reading whole files "
+        "when you need to know: who calls a function and what breaks if you "
+        "change it (who_calls); everything a function reaches downstream and "
+        "the side effects it triggers (call_tree); what a function does at a "
+        "glance (what_does); how its logic branches (function_flow); the exact "
+        "conditions guarding each return/raise (reaching_conditions); where a "
+        "codebase's entry points and HTTP routes live (list_entrypoints); and "
+        "the blast radius of a diff or PR (analyze_impact).\n\n"
+        "Pass `project_path` (the repo root) once — it is remembered for later "
+        "calls in the session, so subsequent calls may omit it. Answers are "
+        "compact and capped on large projects; use each tool's "
+        "`filter`/`depth`/`kind` args to narrow results. Python only."
+    ),
+)
 
 
 def _with_builder(project_path, fn):
@@ -32,7 +50,10 @@ def _with_builder(project_path, fn):
 def list_entrypoints(project_path: str | None = None, filter: str | None = None,
                      kind: str | None = None,
                      include_tests: bool = False) -> dict:
-    """List API/script/function entrypoints discovered in the project.
+    """Map where a codebase starts — list its API/HTTP routes, CLI scripts,
+    and entry-point functions. Reach for this first to get the lay of an
+    unfamiliar project: what endpoints exist, which handler serves each
+    route, where execution begins.
 
     On large projects the result is capped, so narrow it: `filter` is a
     case-insensitive substring matched over method/path/handler/id/tags
@@ -50,10 +71,14 @@ def list_entrypoints(project_path: str | None = None, filter: str | None = None,
 @mcp.tool()
 def who_calls(function: str, project_path: str | None = None, depth: int = 1,
               filter: str | None = None) -> dict:
-    """Find callers of a function (qualified name, bare name, or file:line).
+    """Find the callers of a function — who calls it, its upstream usages and
+    references, the reverse call graph, and what would break if you change its
+    signature. Complements `call_tree`, which walks the opposite direction
+    (downstream, what the function reaches).
 
-    `depth=1` (default) returns direct callers; `depth=N` walks up to N hops
-    of transitive callers, tagging each with its `depth` and the `callee` it
+    `function` accepts a qualified name, bare name, or file:line. `depth=1`
+    (default) returns direct callers; `depth=N` walks up to N hops of
+    transitive callers, tagging each with its `depth` and the `callee` it
     calls on the traced path. Cycles/recursion terminate safely. On heavily
     called functions the result is capped, so `filter` (case-insensitive
     substring over caller/location/callee) narrows it before truncation."""
@@ -64,18 +89,26 @@ def who_calls(function: str, project_path: str | None = None, depth: int = 1,
 
 @mcp.tool()
 def what_does(function: str, project_path: str | None = None) -> dict:
-    """Summarize a function: signature, docstring, db/http/raise effects, risk."""
+    """Get a quick summary of what a function does without reading its source
+    — its signature, docstring, side effects (whether it touches the database
+    or makes HTTP calls), the exceptions it can raise, and a risk rating. Use
+    it to triage an unfamiliar function before deciding whether to dig into
+    `function_flow` or the full source."""
     return _with_builder(project_path, lambda b: queries.what_does(b, function))
 
 
 @mcp.tool()
 def analyze_impact(project_path: str | None = None, diff_text: str | None = None,
                    git_ref: str | None = None, include_tests: bool = False) -> dict:
-    """Given a diff or git ref, list changed functions and affected endpoints.
+    """Assess the blast radius of a change — given a diff or git ref, list the
+    changed functions and which API endpoints they affect. Reach for this when
+    reviewing a PR or before merging, to see what a set of edits could break
+    downstream.
 
+    Pass `diff_text` for an inline diff, or `git_ref` to diff against a ref.
     Endpoints whose handler is under a test path are hidden by default
-    (consistent with list_entrypoints); set `include_tests=True` to keep them.
-    Non-Python changed files are reported under `skipped_files`."""
+    (consistent with `list_entrypoints`); set `include_tests=True` to keep
+    them. Non-Python changed files are reported under `skipped_files`."""
     return _with_builder(
         project_path,
         lambda b: queries.analyze_impact(b, diff_text=diff_text, git_ref=git_ref,
@@ -85,23 +118,26 @@ def analyze_impact(project_path: str | None = None, diff_text: str | None = None
 
 @mcp.tool()
 def function_flow(function: str, project_path: str | None = None) -> dict:
-    """Control-flow outline of a function: branch/loop/try nesting, early
-    returns (with dict-key shape), raises, and meaningful calls, de-noised
-    (no logging/docstrings). Use to grasp complex logic without reading the
-    full source. `function` = qualified name, bare name, or file:line."""
+    """Understand how a function works internally without reading the full
+    source — a de-noised control-flow outline showing branch/loop/try nesting,
+    early returns (with their dict-key shape), raises, and the meaningful calls
+    (logging and docstrings stripped out). Reach for this to grasp complex or
+    deeply-nested logic at a glance. For the exact conditions guarding each
+    return/raise, use `reaching_conditions` instead. `function` = qualified
+    name, bare name, or file:line."""
     return _with_builder(project_path, lambda b: queries.function_flow(b, function))
 
 
 @mcp.tool()
 def reaching_conditions(function: str, project_path: str | None = None,
                         target: str | None = None) -> dict:
-    """Guards under which each return/raise in a function is reached.
-
-    Re-expresses control-flow reasoning as facts: for each outcome, the
-    lexically enclosing branch conditions (if/elif/else, except, loop).
-    Surfaces error-path vs success-path asymmetries (e.g. a success response
-    returned from an except handler), plus cyclomatic complexity and any
-    unreachable statements. `target`: omit for all return/raise; or
+    """Find out under what conditions a function reaches each of its returns
+    and raises — the guard/path conditions (the enclosing if/elif/else,
+    except, and loop tests) leading to each outcome. Reach for this when
+    hunting a bug in branching logic or asking "why does this hit the error
+    path?": it surfaces error-path vs success-path asymmetries (e.g. a success
+    response returned from an except handler), plus cyclomatic complexity and
+    any unreachable/dead code. `target`: omit for all return/raise; or
     "return" / "raise" / "line:N" to focus. `function` = qualified name,
     bare name, or file:line."""
     return _with_builder(
@@ -111,16 +147,19 @@ def reaching_conditions(function: str, project_path: str | None = None,
 @mcp.tool()
 def call_tree(function: str, project_path: str | None = None, depth: int = 2,
               filter: str | None = None, include_tests: bool = False) -> dict:
-    """Forward transitive call tree — what a function reaches, N hops down.
+    """Trace everything a function reaches downstream — the forward transitive
+    call tree, N hops deep, in one call instead of hopping node-by-node. Reach
+    for this to see what a function ends up doing and which side effects it
+    triggers transitively. The complement of `who_calls`, which walks the
+    opposite direction (upstream, who calls it).
 
-    The complement of `who_calls` (reverse): get the whole downstream tree in
-    one call instead of hopping node-by-node. Each node carries its `depth`,
-    the `via` caller on the traced path, effect flags (db/http/raises), and
-    risk. Only project-internal functions are nodes; library calls show up as
-    the parent's effect tags. Cycle-safe (dedup by name). Callees resolving
-    into a test path are dropped by default (usually a misresolution); set
-    `include_tests=True` to keep them. `filter` narrows by substring before
-    the cap. `function` = qualified name, bare name, or file:line."""
+    Each node carries its `depth`, the `via` caller on the traced path, effect
+    flags (db/http/raises), and risk. Only project-internal functions are
+    nodes; library calls show up as the parent's effect tags. Cycle-safe
+    (dedup by name). Callees resolving into a test path are dropped by default
+    (usually a misresolution); set `include_tests=True` to keep them. `filter`
+    narrows by substring before the cap. `function` = qualified name, bare
+    name, or file:line."""
     return _with_builder(
         project_path,
         lambda b: queries.call_tree(b, function, depth=depth, filter=filter,
