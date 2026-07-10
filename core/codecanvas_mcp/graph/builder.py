@@ -22,7 +22,11 @@ from codecanvas_mcp.graph.models import (
     FlowNode,
     NodeType,
 )
-from codecanvas_mcp.parser.call_graph import CallGraphBuilder, FunctionDef
+from codecanvas_mcp.parser.call_graph import (
+    CallGraphBuilder,
+    FunctionDef,
+    REVIEW_SIGNAL_POINTS,
+)
 from codecanvas_mcp.parser.fastapi_extractor import ExceptionHandlerInfo, FastAPIExtractor
 from codecanvas_mcp.parser.entrypoint_extractor import EntryPointExtractor
 
@@ -1563,9 +1567,16 @@ class FlowGraphBuilder:
             propagate = tgt_signals & PROPAGATED
             if propagate:
                 src_signals = src.metadata.setdefault("review_signals", [])
+                # Track signals acquired purely via propagation so the scorer
+                # can exclude them: the owning callee is already scored for
+                # them, and summing them into the caller too would double-count
+                # a single physical operation in the endpoint aggregate.
+                propagated = src.metadata.setdefault("propagated_signals", [])
                 for sig in propagate:
                     if sig not in src_signals:
                         src_signals.append(sig)
+                        if sig not in propagated:
+                            propagated.append(sig)
 
     @staticmethod
     def _compute_risk_scores(graph: FlowGraph) -> None:
@@ -1574,11 +1585,7 @@ class FlowGraphBuilder:
         Score is based on review signals, error paths, call complexity,
         and pipeline phase exposure.
         """
-        SIGNAL_POINTS = {
-            "db_write": 3, "db_read": 1, "http_call": 3,
-            "raises_5xx": 4, "raises_4xx": 2, "raises": 1,
-            "auth": 2, "io": 1,
-        }
+        SIGNAL_POINTS = REVIEW_SIGNAL_POINTS
         PHASE_MULTIPLIER = {
             "handler": 1.5, "repository": 1.3, "service": 1.0,
             "dependency": 0.8, "middleware": 0.7,
@@ -1607,8 +1614,13 @@ class FlowGraphBuilder:
 
             # 1. Review signal points
             signals = node.metadata.get("review_signals", [])
-            seen_raises = False
+            # Signals acquired purely by 1-hop propagation from a callee are
+            # scored on that callee, not here — otherwise a single physical
+            # db_write/http_call is summed into the endpoint aggregate twice.
+            propagated = set(node.metadata.get("propagated_signals", []))
             for sig in signals:
+                if sig in propagated:
+                    continue
                 # Skip generic 'raises' if specific status exists
                 if sig == "raises" and ("raises_4xx" in signals or "raises_5xx" in signals):
                     continue

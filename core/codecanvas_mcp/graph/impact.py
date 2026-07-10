@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from codecanvas_mcp.graph.models import FlowGraph, FlowNode, EdgeType
-from codecanvas_mcp.parser.call_graph import CallGraphBuilder
+from codecanvas_mcp.parser.call_graph import CallGraphBuilder, REVIEW_SIGNAL_POINTS
 
 
 @dataclass
@@ -267,12 +267,14 @@ class ImpactAnalyzer:
 
     @staticmethod
     def _compute_function_risk(func) -> float:
-        """Compute risk score for a single function (mirrors builder logic)."""
-        SIGNAL_POINTS = {
-            "db_write": 3, "db_read": 1, "http_call": 3,
-            "raises_5xx": 4, "raises_4xx": 2, "raises": 1,
-            "auth": 2, "io": 1,
-        }
+        """Compute risk score for a single function.
+
+        This is the flat, per-function variant of the flow-graph scorer in
+        graph/builder.py: same signal weights (shared REVIEW_SIGNAL_POINTS),
+        but no phase multiplier or call-complexity term — impact analysis
+        ranks changed functions, not endpoint exposure.
+        """
+        SIGNAL_POINTS = REVIEW_SIGNAL_POINTS
         signals = CallGraphBuilder._aggregate_review_signals(func)
         raw = 0
         for sig in signals:

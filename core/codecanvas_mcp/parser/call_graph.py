@@ -540,6 +540,16 @@ MONGO_METHODS = MONGO_WRITE_METHODS | MONGO_READ_METHODS
 # (e.g. `payments_collection.find(...)`), since they collide with stdlib.
 MONGO_GENERIC_METHODS = {"find", "distinct"}
 
+# Single source of truth for review-signal risk weights, shared by the flow
+# graph scorer (graph/builder.py) and the impact scorer (graph/impact.py) so
+# the two can never drift. Keys must match the tags emitted by
+# CallGraphBuilder._aggregate_review_signals — no phantom entries.
+REVIEW_SIGNAL_POINTS = {
+    "db_write": 3, "db_read": 1, "http_call": 3,
+    "raises_5xx": 4, "raises_4xx": 2, "raises": 1,
+    "auth": 2,
+}
+
 
 def _is_db_object_name(name: str | None) -> bool:
     """True if a receiver name looks like a DB session/collection object."""
@@ -3228,8 +3238,13 @@ class CallGraphBuilder:
                         signals.add("raises_5xx")
                 continue
             if call.is_db_call:
-                op = (call.db_detail or {}).get("operation", "").lower()
-                if op in DB_WRITE_OPS:
+                detail = call.db_detail or {}
+                op = detail.get("operation", "").lower()
+                # execute() is a write op by name, but execute(select(...)) is a
+                # read — trust the classified access kind when we have it.
+                if op == "execute" and detail.get("execute_access") == "read":
+                    signals.add("db_read")
+                elif op in DB_WRITE_OPS:
                     signals.add("db_write")
                 else:
                     signals.add("db_read")
@@ -4024,6 +4039,19 @@ class CallGraphBuilder:
         # Extract raw SQL from execute(text("SELECT ...")) or execute("SELECT ...")
         if node.func.attr == "execute" and node.args:
             sql_arg = node.args[0]
+            # Classify the executed construct so a read is not mistaken for a
+            # write. `execute` is a write op by name, but execute(select(...))
+            # is a read — walk to the root of the argument's construct chain
+            # (select(...).where(...) → select) and record the access kind.
+            root = sql_arg
+            while isinstance(root, ast.Call) and isinstance(root.func, ast.Attribute):
+                root = root.func.value
+            if isinstance(root, ast.Call) and isinstance(root.func, ast.Name):
+                ctor = root.func.id.lower()
+                if ctor == "select":
+                    detail["execute_access"] = "read"
+                elif ctor in ("insert", "update", "delete"):
+                    detail["execute_access"] = "write"
             raw_sql = None
             # execute("SELECT ...")
             if isinstance(sql_arg, ast.Constant) and isinstance(sql_arg.value, str):
@@ -4037,6 +4065,11 @@ class CallGraphBuilder:
                 parsed = _parse_simple_sql(raw_sql)
                 if parsed:
                     detail["sql_parsed"] = parsed
+                    parsed_op = parsed.get("operation")
+                    if parsed_op == "SELECT":
+                        detail.setdefault("execute_access", "read")
+                    elif parsed_op in ("INSERT", "UPDATE", "DELETE"):
+                        detail.setdefault("execute_access", "write")
 
         return detail
 
