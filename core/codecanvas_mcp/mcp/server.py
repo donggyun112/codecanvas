@@ -76,7 +76,8 @@ def who_calls(function: str, project_path: str | None = None, depth: int = 1,
     signature. Complements `call_tree`, which walks the opposite direction
     (downstream, what the function reaches).
 
-    `function` accepts a qualified name, bare name, or file:line. `depth=1`
+    `function` accepts a qualified name, bare name, file:line, or a
+    scope-skipping suffix like `Class.nested` (an enclosing scope omitted). `depth=1`
     (default) returns direct callers; `depth=N` walks up to N hops of
     transitive callers, tagging each with its `depth` and the `callee` it
     calls on the traced path. Cycles/recursion terminate safely. On heavily
@@ -93,7 +94,8 @@ def what_does(function: str, project_path: str | None = None) -> dict:
     — its signature, docstring, side effects (whether it touches the database
     or makes HTTP calls), the exceptions it can raise, and a risk rating. Use
     it to triage an unfamiliar function before deciding whether to dig into
-    `function_flow` or the full source."""
+    `function_flow` or the full source. `function` = qualified name, bare name,
+    file:line, or a scope-skipping suffix like `Class.nested`."""
     return _with_builder(project_path, lambda b: queries.what_does(b, function))
 
 
@@ -124,7 +126,7 @@ def function_flow(function: str, project_path: str | None = None) -> dict:
     (logging and docstrings stripped out). Reach for this to grasp complex or
     deeply-nested logic at a glance. For the exact conditions guarding each
     return/raise, use `reaching_conditions` instead. `function` = qualified
-    name, bare name, or file:line."""
+    name, bare name, file:line, or a scope-skipping suffix like `Class.nested`."""
     return _with_builder(project_path, lambda b: queries.function_flow(b, function))
 
 
@@ -139,7 +141,7 @@ def reaching_conditions(function: str, project_path: str | None = None,
     response returned from an except handler), plus cyclomatic complexity and
     any unreachable/dead code. `target`: omit for all return/raise; or
     "return" / "raise" / "line:N" to focus. `function` = qualified name,
-    bare name, or file:line."""
+    bare name, file:line, or a scope-skipping suffix like `Class.nested`."""
     return _with_builder(
         project_path, lambda b: queries.reaching_conditions(b, function, target))
 
@@ -159,7 +161,7 @@ def call_tree(function: str, project_path: str | None = None, depth: int = 2,
     (dedup by name). Callees resolving into a test path are dropped by default
     (usually a misresolution); set `include_tests=True` to keep them. `filter`
     narrows by substring before the cap. `function` = qualified name, bare
-    name, or file:line."""
+    name, file:line, or a scope-skipping suffix like `Class.nested`."""
     return _with_builder(
         project_path,
         lambda b: queries.call_tree(b, function, depth=depth, filter=filter,

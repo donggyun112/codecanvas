@@ -68,10 +68,50 @@ def _rank_and_select(cg, ref: str, cands: list):
     }
 
 
+def _miss_suggestions(cg, funcs, ref: str) -> dict:
+    """Error payload for an unresolved ref.
+
+    Suggest qualified names whose own (tail) name matches best — exact tail
+    hits first, else a fuzzy match on the tail — so the agent gets a
+    copy-pasteable target instead of a bare simple name.
+    """
+    tail = ref.rsplit(".", 1)[-1]
+    hits = [f for f in funcs if f.name == tail]
+    if not hits:
+        close = set(difflib.get_close_matches(tail, {f.name for f in funcs}, n=5))
+        hits = [f for f in funcs if f.name in close]
+    hits.sort(key=lambda f: _rank_key(cg, f), reverse=True)
+    return {
+        "error": f"No function matching '{ref}'.",
+        "suggestions": [f.qualified_name for f in hits[:5]],
+    }
+
+
+def _gapped_suffix_match(qname: str, ref: str) -> bool:
+    """True if ``ref``'s dotted segments occur in order within ``qname``, tail-anchored.
+
+    Matches a scope-skipping reference like ``Class.nested`` against
+    ``module.Class.method.nested`` (the enclosing ``method`` omitted). The final
+    segment must coincide (the function's own name) and every ``ref`` segment
+    must appear in order, so ordering and the tail are enforced — this keeps the
+    looser match from firing on unrelated functions.
+    """
+    q = qname.split(".")
+    r = ref.split(".")
+    if len(r) < 2 or r[-1] != q[-1]:
+        return False
+    i = 0
+    for seg in q:
+        if i < len(r) and seg == r[i]:
+            i += 1
+    return i == len(r)
+
+
 def resolve_function(builder, ref: str):
     """Resolve a function reference to a FunctionDef.
 
-    Accepts a qualified name, a bare name (if unique), or ``file:line``.
+    Accepts a qualified name, a bare name (if unique), a ``file:line``, or a
+    scope-skipping suffix such as ``Class.nested`` (enclosing method omitted).
     Returns (func, None) or (None, {"error", "suggestions"}).
     """
     cg = builder.call_graph
@@ -107,13 +147,18 @@ def resolve_function(builder, ref: str):
     if len(cands) > 1:
         return _rank_and_select(cg, ref, cands)
 
-    # 4. Miss -> near-name suggestions.
-    names = [f.name for f in funcs]
-    close = difflib.get_close_matches(ref, names, n=5)
-    return None, {
-        "error": f"No function matching '{ref}'.",
-        "suggestions": close,
-    }
+    # 3b. Gapped dot-boundary subsequence — fallback for a reference that skips
+    #     an enclosing scope, e.g. `Class.nested` omitting the method between.
+    #     Only for dotted refs; a bare miss gains nothing here.
+    if len(ref.split(".")) >= 2:
+        gapped = [f for f in funcs if _gapped_suffix_match(f.qualified_name, ref)]
+        if len(gapped) == 1:
+            return gapped[0], None
+        if len(gapped) > 1:
+            return _rank_and_select(cg, ref, gapped)
+
+    # 4. Miss -> suggest qualified names whose own (tail) name matches best.
+    return None, _miss_suggestions(cg, funcs, ref)
 
 
 def list_entrypoints(builder, filter=None, kind=None,
