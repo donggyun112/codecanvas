@@ -259,6 +259,60 @@ def test_analyze_impact_no_diff_has_no_skipped_files_key():
     assert out["summary"] == "No Python changes detected."
 
 
+STATE_RETURNS = {
+    "agent.py": """
+        def next_step(state):
+            if state.get("done"):
+                return {"messages": []}
+            return {
+                "messages": [],
+                "remaining_steps": state["remaining_steps"] - 1,
+            }
+    """,
+}
+
+
+def test_validate_state_schema_flags_missing_required_return_key(tmp_path):
+    schema = {
+        "properties": {"messages": {}, "remaining_steps": {}},
+        "required": ["messages", "remaining_steps"],
+    }
+    out = queries.validate_state_schema(
+        _tmp_builder(tmp_path, STATE_RETURNS), "next_step", schema)
+
+    assert [r["field"] for r in out["reads"]] == ["done", "remaining_steps"]
+    assert any(
+        d["type"] == "missing_required_return_keys"
+        and d["fields"] == ["remaining_steps"]
+        for d in out["diagnostics"]
+    ), out["diagnostics"]
+
+
+STATE_EXTRA_FIELD = {
+    "agent.py": """
+        def next_step(state):
+            update = {"messages": []}
+            update["unexpected"] = True
+            return update
+    """,
+}
+
+
+def test_validate_state_schema_flags_return_field_outside_schema(tmp_path):
+    schema = {
+        "properties": {"messages": {}, "remaining_steps": {}},
+        "required": ["messages"],
+    }
+    out = queries.validate_state_schema(
+        _tmp_builder(tmp_path, STATE_EXTRA_FIELD), "next_step", schema)
+
+    assert out["returns"][0]["keys"] == ["messages", "unexpected"]
+    assert any(
+        d["type"] == "field_not_in_schema" and d["field"] == "unexpected"
+        for d in out["diagnostics"]
+    ), out["diagnostics"]
+
+
 IMPACT_EP_APP = {
     "svc.py": "def helper():\n    return 1\n",
     "app.py": """

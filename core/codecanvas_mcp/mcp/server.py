@@ -147,6 +147,27 @@ def reaching_conditions(function: str, project_path: str | None = None,
 
 
 @mcp.tool()
+def validate_state_schema(function: str, state_schema: dict,
+                          project_path: str | None = None,
+                          state_var: str = "state") -> dict:
+    """Check a function's state dict/object usage against expected fields.
+
+    Use this when a bug depends on domain state shape rather than call graph
+    reachability alone. `state_schema` may be JSON-schema-like
+    (`{"properties": {...}, "required": [...]}`) or a simple field mapping.
+    The tool reports state reads/writes, dict-shaped returns, schema-extra
+    fields, and returns missing required fields. This is a focused repro aid:
+    it turns custom state assumptions into checkable evidence, but still does
+    not conclusively prove runtime behavior.
+    """
+    return _with_builder(
+        project_path,
+        lambda b: queries.validate_state_schema(
+            b, function, state_schema, state_var=state_var),
+    )
+
+
+@mcp.tool()
 def call_tree(function: str, project_path: str | None = None, depth: int = 2,
               filter: str | None = None, include_tests: bool = False) -> dict:
     """Trace everything a function reaches downstream — the forward transitive

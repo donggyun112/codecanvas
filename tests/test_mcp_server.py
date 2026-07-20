@@ -12,7 +12,7 @@ def test_all_tools_registered():
     names = {t.name for t in tools}
     assert names == {"list_entrypoints", "who_calls", "what_does",
                      "analyze_impact", "function_flow", "reaching_conditions",
-                     "call_tree"}
+                     "validate_state_schema", "call_tree"}
 
 
 def test_tool_function_returns_dict():

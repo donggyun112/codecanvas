@@ -592,6 +592,348 @@ def reaching_conditions(builder, function: str, target=None) -> dict:
     return out
 
 
+def _schema_fields(state_schema) -> tuple[list[str], list[str], str | None]:
+    """Return (schema_keys, required_keys, error) from a small schema shape."""
+    if isinstance(state_schema, (list, tuple, set)):
+        keys = sorted({str(k) for k in state_schema if isinstance(k, str)})
+        return keys, keys, None
+
+    if not isinstance(state_schema, dict):
+        return [], [], "state_schema must be a dict or a list of field names."
+
+    props = state_schema.get("properties")
+    required = state_schema.get("required")
+    if isinstance(props, dict):
+        keys = {str(k) for k in props.keys()}
+    else:
+        reserved = {"properties", "required", "type", "title", "description"}
+        keys = {str(k) for k in state_schema.keys() if k not in reserved}
+
+    if isinstance(required, list):
+        req = {str(k) for k in required if isinstance(k, str)}
+    else:
+        req = set(keys)
+    keys |= req
+    return sorted(keys), sorted(req), None
+
+
+def _literal_key(node) -> str | None:
+    import ast
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _dict_keys_from_literal(node) -> tuple[list[str], bool]:
+    import ast
+    if not isinstance(node, ast.Dict):
+        return [], True
+    keys: list[str] = []
+    unknown = False
+    for key_node in node.keys:
+        if key_node is None:
+            unknown = True
+            continue
+        key = _literal_key(key_node)
+        if key is None:
+            unknown = True
+        else:
+            keys.append(key)
+    return keys, unknown
+
+
+def _state_field_from_node(node, state_var: str) -> tuple[str | None, str | None]:
+    """Return (field, source_kind) for state['x'] or state.x."""
+    import ast
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+        if node.value.id == state_var:
+            return _literal_key(node.slice), "subscript"
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        if node.value.id == state_var:
+            return node.attr, "attribute"
+    return None, None
+
+
+def _target_name(node) -> str | None:
+    import ast
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _expr_text(node) -> str:
+    import ast
+    try:
+        text = ast.unparse(node)
+    except Exception:
+        text = "<expr>"
+    return " ".join(text.split())
+
+
+class _StateSchemaVisitor:
+    """Collect local state-field reads, writes, and dict-shaped returns."""
+
+    def __init__(self, state_var: str):
+        self.state_var = state_var
+        self.reads: list[dict] = []
+        self.writes: list[dict] = []
+        self.returns: list[dict] = []
+        self._dict_vars: dict[str, dict] = {}
+
+    def visit(self, node) -> None:
+        import ast
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return
+        method = getattr(self, f"visit_{node.__class__.__name__}", None)
+        if method is not None:
+            method(node)
+            return
+        self.generic_visit(node)
+
+    def generic_visit(self, node) -> None:
+        import ast
+        for child in ast.iter_child_nodes(node):
+            self.visit(child)
+
+    def visit_Assign(self, node) -> None:
+        for target in node.targets:
+            self._record_target(target, node.value, node.lineno)
+        self.visit(node.value)
+
+    def visit_AnnAssign(self, node) -> None:
+        self._record_target(node.target, node.value, node.lineno)
+        if node.value is not None:
+            self.visit(node.value)
+
+    def visit_AugAssign(self, node) -> None:
+        field, source = _state_field_from_node(node.target, self.state_var)
+        if field is not None:
+            self._write(field, node.lineno, source or "state")
+            self._read(field, node.lineno, source or "state")
+        self.visit(node.value)
+
+    def visit_Subscript(self, node) -> None:
+        import ast
+        field, source = _state_field_from_node(node, self.state_var)
+        if field is not None and isinstance(node.ctx, ast.Load):
+            self._read(field, node.lineno, source or "state")
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node) -> None:
+        import ast
+        field, source = _state_field_from_node(node, self.state_var)
+        if field is not None and isinstance(node.ctx, ast.Load):
+            self._read(field, node.lineno, source or "state")
+        self.generic_visit(node)
+
+    def visit_Call(self, node) -> None:
+        import ast
+        if isinstance(node.func, ast.Attribute):
+            owner = node.func.value
+            method = node.func.attr
+            if isinstance(owner, ast.Name) and owner.id == self.state_var:
+                self._handle_state_call(method, node)
+                return
+            if isinstance(owner, ast.Name) and owner.id in self._dict_vars:
+                self._handle_dict_var_call(owner.id, method, node)
+                return
+        self.generic_visit(node)
+
+    def visit_Return(self, node) -> None:
+        keys, unknown = self._return_keys(node.value)
+        self.returns.append({
+            "at": node.lineno,
+            "keys": sorted(set(keys)),
+            "unknown_keys": unknown,
+            "detail": _expr_text(node.value) if node.value is not None else "",
+        })
+        if node.value is not None:
+            self.visit(node.value)
+
+    def _record_target(self, target, value, line: int) -> None:
+        import ast
+        field, source = _state_field_from_node(target, self.state_var)
+        if field is not None:
+            self._write(field, line, source or "state")
+            return
+
+        name = _target_name(target)
+        if name is not None and isinstance(value, ast.Dict):
+            keys, unknown = _dict_keys_from_literal(value)
+            self._dict_vars[name] = {"keys": set(keys), "unknown": unknown}
+            return
+
+        if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+            var = target.value.id
+            key = _literal_key(target.slice)
+            if key is not None and var in self._dict_vars:
+                self._dict_vars[var]["keys"].add(key)
+
+    def _handle_state_call(self, method: str, node) -> None:
+        if method in {"get", "setdefault", "pop"} and node.args:
+            key = _literal_key(node.args[0])
+            if key is not None:
+                self._read(key, node.lineno, f"{self.state_var}.{method}")
+                if method in {"setdefault", "pop"}:
+                    self._write(key, node.lineno, f"{self.state_var}.{method}")
+        elif method == "update" and node.args:
+            keys, _unknown = _dict_keys_from_literal(node.args[0])
+            for key in keys:
+                self._write(key, node.lineno, f"{self.state_var}.update")
+
+        for arg in node.args:
+            self.visit(arg)
+        for kw in node.keywords:
+            self.visit(kw.value)
+
+    def _handle_dict_var_call(self, name: str, method: str, node) -> None:
+        if method == "update" and node.args:
+            keys, unknown = _dict_keys_from_literal(node.args[0])
+            self._dict_vars[name]["keys"].update(keys)
+            self._dict_vars[name]["unknown"] = self._dict_vars[name]["unknown"] or unknown
+        for arg in node.args:
+            self.visit(arg)
+        for kw in node.keywords:
+            self.visit(kw.value)
+
+    def _return_keys(self, value) -> tuple[list[str], bool]:
+        import ast
+        if isinstance(value, ast.Dict):
+            return _dict_keys_from_literal(value)
+        if isinstance(value, ast.Name):
+            if value.id == self.state_var:
+                return [], True
+            known = self._dict_vars.get(value.id)
+            if known is not None:
+                return sorted(known["keys"]), bool(known["unknown"])
+        return [], True
+
+    def _read(self, field: str, line: int, source: str) -> None:
+        self.reads.append({"field": field, "at": line, "source": source})
+
+    def _write(self, field: str, line: int, source: str) -> None:
+        self.writes.append({"field": field, "at": line, "source": source})
+
+
+def _dedup_records(records: list[dict]) -> list[dict]:
+    seen = set()
+    out = []
+    for row in records:
+        key = tuple(sorted(row.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def validate_state_schema(builder, function: str, state_schema,
+                          state_var: str = "state") -> dict:
+    """Check function state-field usage against a caller-provided schema.
+
+    ``state_schema`` may be a JSON-schema-like object with ``properties`` and
+    ``required`` or a simple mapping/list of field names. This is a focused
+    static repro helper: it does not prove a bug, but it flags branch returns
+    missing required state keys and state fields that are outside the schema.
+    """
+    import ast
+
+    schema_keys, required_keys, schema_err = _schema_fields(state_schema)
+    if schema_err is not None:
+        return {"error": schema_err}
+    if not state_var:
+        return {"error": "state_var must be a non-empty string."}
+
+    func, err = resolve_function(builder, function)
+    if err is not None:
+        return err
+
+    node = builder.call_graph.get_ast_node(func.qualified_name)
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return {
+            "error": f"No function body available for '{func.qualified_name}' "
+                     f"(it may be a class or an unparsed definition).",
+        }
+
+    visitor = _StateSchemaVisitor(state_var)
+    for stmt in node.body:
+        visitor.visit(stmt)
+
+    reads = _dedup_records(visitor.reads)
+    writes = _dedup_records(visitor.writes)
+    returns = visitor.returns
+    schema_set = set(schema_keys)
+    required_set = set(required_keys)
+    diagnostics = []
+
+    seen_unknown: set[str] = set()
+    if schema_set:
+        for row in reads + writes:
+            field = row["field"]
+            if field not in schema_set and field not in seen_unknown:
+                seen_unknown.add(field)
+                diagnostics.append({
+                    "type": "field_not_in_schema",
+                    "field": field,
+                    "at": row["at"],
+                    "source": row["source"],
+                })
+
+    explicit_return_fields: set[str] = set()
+    has_unknown_return = False
+    for row in returns:
+        keys = set(row["keys"])
+        explicit_return_fields.update(keys)
+        has_unknown_return = has_unknown_return or bool(row["unknown_keys"])
+        if schema_set:
+            extras = sorted(keys - schema_set)
+            for field in extras:
+                diagnostics.append({
+                    "type": "field_not_in_schema",
+                    "field": field,
+                    "at": row["at"],
+                    "source": "return",
+                })
+        if required_set and not row["unknown_keys"]:
+            missing = sorted(required_set - keys)
+            if missing:
+                diagnostics.append({
+                    "type": "missing_required_return_keys",
+                    "at": row["at"],
+                    "fields": missing,
+                })
+
+    observed = ({r["field"] for r in reads} |
+                {w["field"] for w in writes} |
+                explicit_return_fields)
+    if required_set and not has_unknown_return:
+        missing_observed = sorted(required_set - observed)
+        if missing_observed:
+            diagnostics.append({
+                "type": "required_fields_not_observed",
+                "fields": missing_observed,
+            })
+
+    reads, rnote = capped(reads)
+    writes, wnote = capped(writes)
+    returns, retnote = capped(returns)
+    diagnostics, dnote = capped(diagnostics)
+    note = "; ".join(n for n in (rnote, wnote, retnote, dnote) if n)
+
+    out = {
+        "function": func.qualified_name,
+        "location": _location(func),
+        "state_var": state_var,
+        "schema_keys": schema_keys,
+        "required_keys": required_keys,
+        "reads": reads,
+        "writes": writes,
+        "returns": returns,
+        "diagnostics": diagnostics,
+    }
+    if note:
+        out["note"] = note
+    return out
+
+
 def _effect_tags(func) -> list[str]:
     """Compact per-node effect flags: db / http / raises."""
     tags = []
