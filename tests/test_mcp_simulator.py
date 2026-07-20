@@ -1,4 +1,7 @@
 import textwrap
+import signal
+
+import pytest
 
 from codecanvas_mcp.mcp import queries
 from codecanvas_mcp.mcp.session import get_builder
@@ -120,6 +123,160 @@ def test_simulator_generated_cases_respect_common_schema_constraints(tmp_path):
         assert 5 <= state["count"] <= 6
         assert 3 <= len(state["label"]) <= 4
         assert len(state["items"]) >= 1
+    assert out["generated_case_notes"]["strategy"] == (
+        "required-field baseline plus one-property variations"
+    )
+    assert "minLength" in out["generated_case_notes"]["supported_keywords_used"]
+    assert out["generated_case_notes"]["ignored_keywords"] == []
+    assert out["summary"]["status"] == "passed"
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"),
+    reason="requires POSIX timers",
+)
+def test_simulator_separates_import_and_execution_timeouts(tmp_path):
+    builder = _builder(tmp_path, """
+        import time
+
+        def next_step(state):
+            try:
+                time.sleep(0.5)
+            except Exception:
+                return state
+            return state
+    """)
+
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"messages": [], "remaining_steps": 1}],
+        timeout_seconds=0.1,
+        import_timeout_seconds=2,
+    )
+
+    result = out["results"][0]
+    assert result["passed"] is False
+    assert result["exception"]["phase"] == "execution"
+    assert result["violations"] == [{
+        "invariant": "timeout",
+        "phase": "execution",
+        "detail": "execution exceeded 0.1 seconds.",
+    }]
+    assert out["summary"]["failure_kinds"] == ["timeout"]
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"),
+    reason="requires POSIX timers",
+)
+def test_simulator_reports_import_timeout_separately(tmp_path):
+    builder = _builder(tmp_path, """
+        import time
+
+        time.sleep(0.5)
+
+        def next_step(state):
+            return state
+    """)
+
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"messages": [], "remaining_steps": 1}],
+        timeout_seconds=2,
+        import_timeout_seconds=0.1,
+    )
+
+    result = out["results"][0]
+    assert result["passed"] is False
+    assert result["exception"]["phase"] == "import"
+    assert result["violations"][0]["phase"] == "import"
+
+
+def test_simulator_hydrates_allowlisted_langchain_fixture(tmp_path):
+    package = tmp_path / "langchain_core"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "messages.py").write_text(textwrap.dedent("""
+        class AIMessage:
+            def __init__(self, content, tool_calls):
+                self.content = content
+                self.tool_calls = tool_calls
+    """).strip() + "\n", encoding="utf-8")
+    builder = _builder(tmp_path, """
+        from langchain_core.messages import AIMessage
+
+        def next_step(state):
+            message = state["messages"][-1]
+            assert isinstance(message, AIMessage)
+            return {"route": "tools" if message.tool_calls else "end"}
+    """)
+
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        {"type": "object"},
+        cases=[{
+            "messages": [{
+                "$type": "langchain.AIMessage",
+                "content": "",
+                "tool_calls": [{"name": "search", "args": {}, "id": "call-1"}],
+            }],
+        }],
+        invariants=["no_exception", "return_is_mapping"],
+    )
+
+    result = out["results"][0]
+    assert result["return_value"] == {"route": "tools"}
+    assert result["mutated_state"]["messages"][0]["$type"] == (
+        "langchain.AIMessage"
+    )
+
+
+def test_simulator_rejects_unapproved_fixture_type(tmp_path):
+    builder = _builder(tmp_path, """
+        def next_step(state):
+            return state
+    """)
+
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"$type": "os.PathLike"}],
+    )
+
+    result = out["results"][0]
+    assert result["passed"] is False
+    assert result["exception"]["type"] == "ValueError"
+    assert "Unsupported fixture type" in result["exception"]["message"]
+
+
+def test_simulator_redacts_sensitive_output(tmp_path):
+    builder = _builder(tmp_path, """
+        from pathlib import Path
+        import sys
+
+        def next_step(state):
+            print("token=top-secret-value")
+            print(f"{Path.home()}/private", file=sys.stderr)
+            return state
+    """)
+
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"messages": [], "remaining_steps": 1}],
+    )
+
+    result = out["results"][0]
+    assert result["stdout"] == "token=<redacted>\n"
+    assert "top-secret-value" not in result["stdout"]
+    assert result["stderr"] == "<HOME>/private\n"
 
 
 def test_simulator_loads_nested_non_package_module_with_sibling_import(tmp_path):

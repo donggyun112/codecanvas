@@ -940,6 +940,7 @@ def simulate_state_transition(builder, function: str, state_schema: dict,
                               overrides: list[dict] | None = None,
                               state_var: str = "state",
                               timeout_seconds: float = 3.0,
+                              import_timeout_seconds: float = 10.0,
                               max_cases: int = 12) -> dict:
     """Run focused state cases against a module-level function in isolation."""
     from codecanvas_mcp.mcp.simulator import simulate
@@ -966,6 +967,7 @@ def simulate_state_transition(builder, function: str, state_schema: dict,
         overrides=overrides,
         state_var=state_var,
         timeout_seconds=timeout_seconds,
+        import_timeout_seconds=import_timeout_seconds,
         max_cases=max_cases,
     )
     out.setdefault("function", func.qualified_name)

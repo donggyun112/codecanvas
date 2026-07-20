@@ -14,8 +14,11 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import signal
 import subprocess
 import sys
+import time
 import traceback
 from typing import Any
 
@@ -27,6 +30,45 @@ SUPPORTED_INVARIANTS = {
     "no_unknown_return_keys",
     "state_preserves_required_keys",
 }
+
+FIXTURE_TYPES = {
+    "langchain.AIMessage": ("langchain_core.messages", "AIMessage"),
+    "langchain.HumanMessage": ("langchain_core.messages", "HumanMessage"),
+    "langchain.SystemMessage": ("langchain_core.messages", "SystemMessage"),
+    "langchain.ToolMessage": ("langchain_core.messages", "ToolMessage"),
+}
+
+SUPPORTED_SCHEMA_KEYWORDS = {
+    "const", "default", "enum", "exclusiveMaximum", "exclusiveMinimum",
+    "items", "maxItems", "maxLength", "maximum", "minItems", "minLength",
+    "minimum", "properties", "required", "type",
+}
+SCHEMA_METADATA_KEYWORDS = {"description", "title"}
+
+
+class _DeadlineExceeded(BaseException):
+    def __init__(self, phase: str, seconds: float):
+        self.phase = phase
+        self.seconds = seconds
+        super().__init__(f"{phase} exceeded {seconds:g} seconds.")
+
+
+@contextlib.contextmanager
+def _deadline(seconds: float, phase: str):
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        yield
+        return
+
+    def handle_timeout(signum, frame):
+        raise _DeadlineExceeded(phase, seconds)
+
+    previous_handler = signal.signal(signal.SIGALRM, handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _validate_overrides(overrides) -> tuple[list[dict], dict | None]:
@@ -195,6 +237,77 @@ def generate_cases(state_schema: dict, max_cases: int = 12) -> list[dict]:
     return cases
 
 
+def _schema_generation_notes(state_schema: dict) -> dict:
+    encountered: set[str] = set()
+
+    def visit(schema: dict) -> None:
+        for key, value in schema.items():
+            encountered.add(str(key))
+            if key == "properties" and isinstance(value, dict):
+                for property_schema in value.values():
+                    if isinstance(property_schema, dict):
+                        visit(property_schema)
+            elif key in {"items", "additionalProperties"} and isinstance(value, dict):
+                visit(value)
+            elif key in {"allOf", "anyOf", "oneOf"} and isinstance(value, list):
+                for branch in value:
+                    if isinstance(branch, dict):
+                        visit(branch)
+
+    visit(state_schema)
+    ignored = encountered - SUPPORTED_SCHEMA_KEYWORDS - SCHEMA_METADATA_KEYWORDS
+    return {
+        "strategy": "required-field baseline plus one-property variations",
+        "supported_keywords_used": sorted(encountered & SUPPORTED_SCHEMA_KEYWORDS),
+        "ignored_keywords": sorted(ignored),
+    }
+
+
+def _hydrate_fixtures(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_hydrate_fixtures(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    fixture_type = value.get("$type")
+    if fixture_type is None:
+        return {key: _hydrate_fixtures(item) for key, item in value.items()}
+    if fixture_type not in FIXTURE_TYPES:
+        raise ValueError(
+            f"Unsupported fixture type {fixture_type!r}. "
+            f"Supported types: {sorted(FIXTURE_TYPES)}"
+        )
+    module_name, class_name = FIXTURE_TYPES[fixture_type]
+    module = importlib.import_module(module_name)
+    fixture_class = getattr(module, class_name)
+    kwargs = {
+        key: _hydrate_fixtures(item)
+        for key, item in value.items()
+        if key != "$type"
+    }
+    return fixture_class(**kwargs)
+
+
+def _redact_text(text: str) -> str:
+    home = str(Path.home())
+    if home:
+        text = text.replace(home, "<HOME>")
+    for key, value in os.environ.items():
+        upper_key = key.upper()
+        if (
+            value
+            and len(value) >= 4
+            and any(marker in upper_key for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
+        ):
+            text = text.replace(value, "<redacted>")
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1<redacted>", text)
+    return re.sub(
+        r"(?i)((?:api[_-]?key|token|secret|password)\s*[=:]\s*)[^\s,;]+",
+        r"\1<redacted>",
+        text,
+    )
+
+
 def _json_safe(value: Any, depth: int = 0) -> Any:
     if depth > 8:
         return {"type": type(value).__name__, "repr": "<max depth>"}
@@ -204,7 +317,21 @@ def _json_safe(value: Any, depth: int = 0) -> Any:
         return {str(k): _json_safe(v, depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_json_safe(v, depth + 1) for v in value]
-    return {"type": type(value).__name__, "repr": repr(value)[:500]}
+    fixture_name = next((
+        name for name, (module_name, class_name) in FIXTURE_TYPES.items()
+        if value.__class__.__module__.startswith(module_name)
+        and value.__class__.__name__ == class_name
+    ), None)
+    if fixture_name is not None:
+        if hasattr(value, "model_dump"):
+            fields = value.model_dump()
+        else:
+            fields = vars(value)
+        return {"$type": fixture_name, **_json_safe(fields, depth + 1)}
+    return {
+        "type": type(value).__name__,
+        "repr": _redact_text(repr(value)[:500]),
+    }
 
 
 def _module_details(file_path: Path, project_root: Path) -> tuple[str, Path, bool]:
@@ -315,8 +442,8 @@ def _make_override_stub(original, spec: dict, record: dict):
                 raise RuntimeError(
                     f"Override return_sequence exhausted for {record['target']!r}."
                 )
-            return copy.deepcopy(sequence.pop(0))
-        return copy.deepcopy(spec.get("return_value"))
+            return _hydrate_fixtures(copy.deepcopy(sequence.pop(0)))
+        return _hydrate_fixtures(copy.deepcopy(spec.get("return_value")))
 
     if inspect.iscoroutinefunction(original):
         async def async_stub(*args, **kwargs):
@@ -413,22 +540,48 @@ def _run_case(request: dict) -> dict:
     stderr = io.StringIO()
     result = None
     exception = None
+    timings: dict[str, float] = {}
     override_records = [
         {"target": spec["target"], "called": 0, "calls": []}
         for spec in request["overrides"]
     ]
     try:
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            target, target_module = _load_target(request)
-            override_records = _apply_overrides(target_module, request["overrides"])
-            result = _invoke(target, state, request["state_var"])
+            import_started = time.perf_counter()
+            with _deadline(request["import_timeout_seconds"], "import"):
+                target, target_module = _load_target(request)
+                state = _hydrate_fixtures(state)
+                override_records = _apply_overrides(target_module, request["overrides"])
+            timings["import_seconds"] = round(time.perf_counter() - import_started, 6)
+
+            execution_started = time.perf_counter()
+            try:
+                with _deadline(request["timeout_seconds"], "execution"):
+                    result = _invoke(target, state, request["state_var"])
+            finally:
+                timings["execution_seconds"] = round(
+                    time.perf_counter() - execution_started, 6
+                )
+    except _DeadlineExceeded as exc:
+        exception = {
+            "type": "TimeoutError",
+            "message": str(exc),
+            "phase": exc.phase,
+        }
     except Exception as exc:
         exception = {
             "type": type(exc).__name__,
-            "message": str(exc),
-            "traceback": traceback.format_exc(limit=8),
+            "message": _redact_text(str(exc)),
+            "traceback": _redact_text(traceback.format_exc(limit=8)),
         }
-    violations = _violations(request, result, state, exception)
+    if exception is not None and exception.get("phase") in {"import", "execution"}:
+        violations = [{
+            "invariant": "timeout",
+            "phase": exception["phase"],
+            "detail": exception["message"],
+        }]
+    else:
+        violations = _violations(request, result, state, exception)
     output = {
         "return_value": _json_safe(result),
         "mutated_state": _json_safe(state),
@@ -439,13 +592,14 @@ def _run_case(request: dict) -> dict:
             record["target"] for record in override_records
             if record["called"] == 0
         ],
+        "timings": timings,
     }
     if exception is not None:
         output["exception"] = exception
     if stdout.getvalue():
-        output["stdout"] = stdout.getvalue()[-2000:]
+        output["stdout"] = _redact_text(stdout.getvalue()[-2000:])
     if stderr.getvalue():
-        output["stderr"] = stderr.getvalue()[-2000:]
+        output["stderr"] = _redact_text(stderr.getvalue()[-2000:])
     return output
 
 
@@ -456,11 +610,46 @@ def _worker() -> int:
     except Exception as exc:
         response = {
             "passed": False,
-            "violations": [{"invariant": "worker", "detail": str(exc)}],
-            "exception": {"type": type(exc).__name__, "message": str(exc)},
+            "violations": [{"invariant": "worker", "detail": _redact_text(str(exc))}],
+            "exception": {
+                "type": type(exc).__name__,
+                "message": _redact_text(str(exc)),
+            },
         }
     json.dump(response, sys.stdout)
     return 0
+
+
+def _result_summary(results: list[dict]) -> dict:
+    failed_cases = [result["case"] for result in results if not result.get("passed", False)]
+    failure_kinds = sorted({
+        violation.get("invariant", "unknown")
+        for result in results
+        for violation in result.get("violations", [])
+    })
+    unused_overrides = sorted({
+        target
+        for result in results
+        for target in result.get("unused_overrides", [])
+    })
+    import_times = [
+        result.get("timings", {}).get("import_seconds")
+        for result in results
+        if result.get("timings", {}).get("import_seconds") is not None
+    ]
+    execution_times = [
+        result.get("timings", {}).get("execution_seconds")
+        for result in results
+        if result.get("timings", {}).get("execution_seconds") is not None
+    ]
+    return {
+        "status": "failed" if failed_cases else "passed",
+        "failed_cases": failed_cases,
+        "failure_kinds": failure_kinds,
+        "unused_overrides": unused_overrides,
+        "max_import_seconds": max(import_times, default=None),
+        "max_execution_seconds": max(execution_times, default=None),
+    }
 
 
 def simulate(
@@ -474,6 +663,7 @@ def simulate(
     overrides: list[dict] | None,
     state_var: str,
     timeout_seconds: float,
+    import_timeout_seconds: float,
     max_cases: int,
 ) -> dict:
     """Execute state cases in isolated child processes and collect evidence."""
@@ -498,8 +688,15 @@ def simulate(
             "error": f"Unsupported invariants: {unknown}",
             "supported_invariants": sorted(SUPPORTED_INVARIANTS),
         }
-    timeout_seconds = min(30.0, max(0.1, float(timeout_seconds)))
-    max_cases = min(50, max(1, int(max_cases)))
+    try:
+        timeout_seconds = min(30.0, max(0.1, float(timeout_seconds)))
+        import_timeout_seconds = min(60.0, max(0.1, float(import_timeout_seconds)))
+        max_cases = min(50, max(1, int(max_cases)))
+    except (TypeError, ValueError):
+        return {
+            "error": "timeout_seconds and import_timeout_seconds must be numbers; "
+                     "max_cases must be an integer."
+        }
     selected_cases = copy.deepcopy(cases) if cases is not None else generate_cases(
         state_schema, max_cases=max_cases
     )
@@ -521,6 +718,8 @@ def simulate(
             "required_keys": sorted(set(required)),
             "invariants": selected_invariants,
             "overrides": validated_overrides,
+            "timeout_seconds": timeout_seconds,
+            "import_timeout_seconds": import_timeout_seconds,
         }
         try:
             completed = subprocess.run(
@@ -529,7 +728,7 @@ def simulate(
                 capture_output=True,
                 text=True,
                 cwd=project_root,
-                timeout=timeout_seconds,
+                timeout=import_timeout_seconds + timeout_seconds + 1.0,
                 env=os.environ.copy(),
             )
             if completed.returncode != 0:
@@ -537,7 +736,9 @@ def simulate(
                     "passed": False,
                     "violations": [{
                         "invariant": "worker",
-                        "detail": completed.stderr[-1000:] or f"exit code {completed.returncode}",
+                        "detail": _redact_text(
+                            completed.stderr[-1000:] or f"exit code {completed.returncode}"
+                        ),
                     }],
                 }
             else:
@@ -547,27 +748,32 @@ def simulate(
                 "passed": False,
                 "violations": [{
                     "invariant": "timeout",
-                    "detail": f"Exceeded {timeout_seconds:g} seconds.",
+                    "phase": "worker",
+                    "detail": "Worker exceeded the combined import and execution deadline.",
                 }],
             }
         except (OSError, json.JSONDecodeError) as exc:
             result = {
                 "passed": False,
-                "violations": [{"invariant": "worker", "detail": str(exc)}],
+                "violations": [{"invariant": "worker", "detail": _redact_text(str(exc))}],
             }
         result["case"] = index
         result["input_state"] = case
         results.append(result)
 
     failed = sum(not result.get("passed", False) for result in results)
-    return {
+    output = {
         "generated_cases": cases is None,
         "invariants": selected_invariants,
         "case_count": len(results),
         "passed": len(results) - failed,
         "failed": failed,
+        "summary": _result_summary(results),
         "results": results,
     }
+    if cases is None:
+        output["generated_case_notes"] = _schema_generation_notes(state_schema)
+    return output
 
 
 def main() -> int:
