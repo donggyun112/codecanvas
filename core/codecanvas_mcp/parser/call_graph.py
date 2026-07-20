@@ -147,6 +147,8 @@ class FunctionDef:
     definition_type: str = "function"  # function | class
     class_qname: str | None = None
     local_types: dict[str, str] = field(default_factory=dict)
+    runtime_types: dict[str, str] = field(default_factory=dict)
+    bound_names: list[str] = field(default_factory=list)
     logic_steps: list[LogicStep] = field(default_factory=list)
     bases: list[str] = field(default_factory=list)
     is_protocol: bool = False
@@ -238,6 +240,8 @@ def _function_to_dict(func: "FunctionDef") -> dict[str, Any]:
         "definition_type": func.definition_type,
         "class_qname": func.class_qname,
         "local_types": dict(func.local_types),
+        "runtime_types": dict(func.runtime_types),
+        "bound_names": list(func.bound_names),
         "logic_steps": [_logic_to_dict(ls) for ls in func.logic_steps],
         "bases": list(func.bases),
         "is_protocol": func.is_protocol,
@@ -263,6 +267,8 @@ def _function_from_dict(d: dict[str, Any]) -> "FunctionDef":
         definition_type=d.get("definition_type", "function"),
         class_qname=d.get("class_qname"),
         local_types=dict(d.get("local_types", {})),
+        runtime_types=dict(d.get("runtime_types", {})),
+        bound_names=list(d.get("bound_names", [])),
         logic_steps=[_logic_from_dict(ls) for ls in d.get("logic_steps", [])],
         bases=list(d.get("bases", [])),
         is_protocol=bool(d.get("is_protocol", False)),
@@ -624,6 +630,9 @@ class CallGraphBuilder:
         self._file_asts: dict[str, ast.Module] = {}
         self._module_map: dict[str, str] = {}          # file_path -> module name
         self._class_attr_types: dict[str, dict[str, str]] = {}
+        self._module_global_types: dict[str, dict[str, str]] = {}
+        self._module_imports: dict[str, dict[str, str]] = {}
+        self._dependency_overrides: dict[str, set[str]] = {}
         self._caller_index: dict[str, list[CallerReference]] | None = None
         self._ast_nodes: dict[str, ast.AST] = {}  # qualified_name -> AST node
         self._analyzed = False
@@ -663,8 +672,11 @@ class CallGraphBuilder:
             self._analyze_file(fpath)
             if sleep_ms > 0 and (i + 1) % batch_size == 0:
                 time.sleep(sleep_ms / 1000.0)
-        self._enrich_logic_step_calls()
+        self._infer_module_global_provider_types()
+        self._infer_dependency_overrides()
+        self._infer_dependency_param_types()
         self._infer_param_types_from_callers()
+        self._enrich_logic_step_calls()
         self._analyzed = True
 
         # Save cache and free heavy module-level AST trees. Function-level
@@ -714,12 +726,24 @@ class CallGraphBuilder:
             self._class_attr_types = {
                 k: dict(v) for k, v in payload["class_attr_types"].items()
             }
+            self._module_global_types = {
+                k: dict(v) for k, v in payload.get("module_global_types", {}).items()
+            }
+            self._module_imports = {
+                k: dict(v) for k, v in payload.get("module_imports", {}).items()
+            }
+            self._dependency_overrides = {
+                k: set(v) for k, v in payload.get("dependency_overrides", {}).items()
+            }
         except (KeyError, TypeError, ValueError) as e:
             log.warning("call_graph cache malformed, discarding: %s", e)
             self._functions.clear()
             self._name_index.clear()
             self._module_map.clear()
             self._class_attr_types.clear()
+            self._module_global_types.clear()
+            self._module_imports.clear()
+            self._dependency_overrides.clear()
             return False
         return True
 
@@ -739,6 +763,11 @@ class CallGraphBuilder:
                 "name_index": self._name_index,
                 "module_map": self._module_map,
                 "class_attr_types": self._class_attr_types,
+                "module_global_types": self._module_global_types,
+                "module_imports": self._module_imports,
+                "dependency_overrides": {
+                    k: sorted(v) for k, v in self._dependency_overrides.items()
+                },
             }
             tmp = cache_path.with_suffix(".json.tmp")
             with tmp.open("w", encoding="utf-8") as fh:
@@ -808,6 +837,38 @@ class CallGraphBuilder:
                         return self._functions.get(qname)
         return self._functions.get(candidates[0])
 
+    def _expand_import_reference(self, reference: str, from_file: str | None) -> str:
+        """Expand the first segment of a reference through the file's imports."""
+        if not reference or not from_file:
+            return reference
+        first, separator, rest = reference.partition(".")
+        imported = self._module_imports.get(from_file, {}).get(first)
+        if not imported:
+            return reference
+        return imported + (separator + rest if rest else "")
+
+    def _resolve_provider_reference(
+        self,
+        node: ast.expr | None,
+        from_file: str | None,
+    ) -> FunctionDef | None:
+        """Resolve a provider while preserving module and import qualification."""
+        reference = self._dotted_name(node)
+        if not reference:
+            return None
+        expanded = self._expand_import_reference(reference, from_file)
+        exact = self._functions.get(expanded)
+        if exact is not None:
+            return exact
+        if "." in reference or expanded != reference:
+            return None
+        if from_file:
+            module = self._module_map.get(from_file, "")
+            same_module = self._functions.get(f"{module}.{reference}")
+            if same_module is not None:
+                return same_module
+        return self._resolve_by_name(reference, from_file)
+
     def _reparse_file_for_ast(self, file_path: str) -> None:
         """Re-parse one source file and rebind its function-level AST nodes
         into `_ast_nodes`. Used by the lazy path after a cache load.
@@ -872,6 +933,10 @@ class CallGraphBuilder:
         rel_path = os.path.relpath(file_path, self.project_root)
         module_name = rel_path.replace(os.sep, ".").removesuffix(".py").removesuffix(".__init__")
         self._module_map[file_path] = module_name
+        self._module_imports[file_path] = self._extract_module_imports(
+            tree, module_name, file_path,
+        )
+        self._module_global_types[file_path] = self._extract_module_global_types(tree)
 
         self._visit_definitions(tree, module_name, file_path)
 
@@ -908,6 +973,7 @@ class CallGraphBuilder:
                     is_protocol=bool(enclosing and enclosing.is_protocol),
                     is_abstract=any(d.endswith("abstractmethod") for d in decorators),
                     local_types=local_types,
+                    bound_names=self._extract_bound_names(node),
                     logic_steps=self._extract_logic_steps(node),
                 )
                 self._functions[qname] = func_def
@@ -938,6 +1004,7 @@ class CallGraphBuilder:
                                 return_annotation=self._annotation_str(child.returns),
                                 class_qname=class_qname,
                                 local_types=nested_local_types,
+                                bound_names=self._extract_bound_names(child),
                                 logic_steps=self._extract_logic_steps(child),
                             )
                             self._ast_nodes[nested_qname] = child
@@ -1853,18 +1920,25 @@ class CallGraphBuilder:
                 continue
             for call in caller.calls:
                 target = self._resolve_call(call, caller)
-                if target is None:
+                runtime_target = self._resolve_runtime_attribute_call(call, caller)
+                targets = {
+                    candidate.qualified_name: candidate
+                    for candidate in (target, runtime_target)
+                    if candidate is not None
+                }
+                if not targets:
                     continue
-                per_target = index.setdefault(target.qualified_name, {})
-                existing = per_target.get(caller.qualified_name)
-                if existing is None or call.line < existing.line:
-                    per_target[caller.qualified_name] = CallerReference(
-                        caller_qualified_name=caller.qualified_name,
-                        line=call.line,
-                        relation="call",
-                        condition=call.branch_condition,
-                        is_error_path=call.in_branch in ("except",),
-                    )
+                for resolved_target in targets.values():
+                    per_target = index.setdefault(resolved_target.qualified_name, {})
+                    existing = per_target.get(caller.qualified_name)
+                    if existing is None or call.line < existing.line:
+                        per_target[caller.qualified_name] = CallerReference(
+                            caller_qualified_name=caller.qualified_name,
+                            line=call.line,
+                            relation="call",
+                            condition=call.branch_condition,
+                            is_error_path=call.in_branch in ("except",),
+                        )
             for ref in caller.references:
                 target = self._resolve_reference(ref, caller)
                 if target is None:
@@ -1886,6 +1960,26 @@ class CallGraphBuilder:
             )
             for target_qname, refs in index.items()
         }
+
+    def _resolve_runtime_attribute_call(
+        self,
+        call: CallSite,
+        caller: FunctionDef,
+    ) -> FunctionDef | None:
+        """Resolve the concrete provider type without replacing contract edges."""
+        if not call.is_attribute_call or not call.owner_parts:
+            return None
+        runtime_type = caller.runtime_types.get(call.owner_parts[0])
+        if not runtime_type:
+            return None
+        method_name = call.func_name.split(".")[-1]
+        if len(call.owner_parts) > 1:
+            runtime_type = self._follow_attr_chain_from_type(
+                runtime_type, call.owner_parts[1:],
+            ) or ""
+        if not runtime_type:
+            return None
+        return self._resolve_method_on_class(runtime_type, method_name, caller)
 
     def _resolve_reference(self, ref: ReferenceSite, caller: FunctionDef) -> FunctionDef | None:
         """Resolve a function reference used as a value, not a direct call."""
@@ -2035,12 +2129,22 @@ class CallGraphBuilder:
             return None
 
         # --- Local variable / parameter type resolution ---
+        attr_parts = owner_parts[1:]
         local_type = caller.local_types.get(root)
+        if local_type is None and root not in caller.bound_names:
+            local_type = self._module_global_types.get(caller.file_path, {}).get(root)
+        if local_type is None and root not in caller.bound_names:
+            imported = self._resolve_imported_global_type(
+                root, owner_parts, caller.file_path,
+            )
+            if imported:
+                local_type, attr_parts = imported
         if local_type:
-            if len(owner_parts) > 1:
+            local_type = self._normalize_type_name(local_type)
+            if attr_parts:
                 # Follow chain: local_var.attr.method()
                 resolved_type = self._follow_attr_chain_from_type(
-                    local_type, owner_parts[1:],
+                    local_type, attr_parts,
                 )
                 if resolved_type:
                     result = self._resolve_method_on_class(resolved_type, method_name, caller)
@@ -2082,6 +2186,33 @@ class CallGraphBuilder:
                 self._last_resolve_confidence = "inferred"
             return result
         return None
+
+    def _resolve_imported_global_type(
+        self,
+        root: str,
+        owner_parts: tuple[str, ...],
+        from_file: str,
+    ) -> tuple[str, tuple[str, ...]] | None:
+        imported = self._module_imports.get(from_file, {}).get(root)
+        if not imported:
+            return None
+        modules = {
+            module: file_path for file_path, module in self._module_map.items()
+        }
+        if imported in modules and len(owner_parts) > 1:
+            global_name = owner_parts[1]
+            remaining = owner_parts[2:]
+            module_file = modules[imported]
+        else:
+            module_name, separator, global_name = imported.rpartition(".")
+            if not separator or module_name not in modules:
+                return None
+            remaining = owner_parts[1:]
+            module_file = modules[module_name]
+        inferred = self._module_global_types.get(module_file, {}).get(global_name)
+        if not inferred:
+            return None
+        return inferred, remaining
 
     def _follow_attr_chain(
         self,
@@ -2561,7 +2692,7 @@ class CallGraphBuilder:
         # Match patterns like list[User], List[User], Sequence[Item], etc.
         _ITERABLE_WRAPPERS = {
             "list", "List", "Sequence", "Iterable", "Iterator",
-            "AsyncIterator", "AsyncIterable", "Generator",
+            "AsyncIterator", "AsyncIterable", "Generator", "AsyncGenerator",
             "Set", "set", "FrozenSet", "frozenset",
             "Tuple", "tuple",
         }
@@ -2617,29 +2748,193 @@ class CallGraphBuilder:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return None
 
-        # Check return annotation first
-        if provider_func.return_annotation:
-            ann = self._normalize_type_name(provider_func.return_annotation)
-            if ann and ann[0].isupper():
-                return ann
-
-        for child in ast.walk(node):
-            if not isinstance(child, ast.Return) or child.value is None:
-                continue
-            value = child.value
+        inferred_types: set[str] = set()
+        for value in self._provider_result_values(node):
             if isinstance(value, ast.Name):
                 inferred = provider_func.local_types.get(value.id)
                 if inferred:
-                    return inferred
+                    inferred_types.add(self._normalize_type_name(inferred))
             if isinstance(value, ast.Call):
                 func_name, _, _ = self._get_call_target(value)
                 if not func_name:
                     continue
-                # Use name index directly instead of resolve_type_definition
                 normalized = self._normalize_type_name(func_name)
                 if normalized and normalized[:1].isupper():
-                    return normalized
+                    inferred_types.add(normalized)
+        inferred_types.discard("")
+        if len(inferred_types) == 1:
+            return next(iter(inferred_types))
+        if len(inferred_types) > 1:
+            return None
+        if provider_func.return_annotation:
+            ann = self._extract_element_type(provider_func.return_annotation)
+            ann = self._normalize_type_name(ann or provider_func.return_annotation)
+            if ann and ann[0].isupper():
+                return ann
         return None
+
+    @staticmethod
+    def _provider_result_values(
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> list[ast.expr]:
+        """Collect return/yield values from a provider's own lexical scope."""
+        values: list[ast.expr] = []
+
+        def visit(current: ast.AST) -> None:
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                return
+            if isinstance(current, (ast.Return, ast.Yield)):
+                if current.value is not None:
+                    values.append(current.value)
+                return
+            for child in ast.iter_child_nodes(current):
+                visit(child)
+
+        for stmt in node.body:
+            visit(stmt)
+        return values
+
+    def _infer_dependency_param_types(self) -> None:
+        """Infer FastAPI Depends()/Security() parameter types from providers."""
+        for func in self._functions.values():
+            node = self.get_ast_node(func.qualified_name)
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for param_name, dep_call in self._iter_dependency_param_calls(node, func.file_path):
+                if not param_name:
+                    continue
+                inferred = self._infer_dependency_call_type(dep_call, func.file_path)
+                if inferred:
+                    func.runtime_types[param_name] = inferred
+                    if param_name not in func.local_types:
+                        func.local_types[param_name] = inferred
+
+    def _iter_dependency_param_calls(
+        self,
+        func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+        from_file: str | None,
+    ) -> list[tuple[str, ast.Call]]:
+        deps: list[tuple[str, ast.Call]] = []
+        positional = list(func_node.args.posonlyargs) + list(func_node.args.args)
+        positional_defaults: list[ast.expr | None] = (
+            [None] * (len(positional) - len(func_node.args.defaults))
+            + list(func_node.args.defaults)
+        )
+        for arg, default in zip(positional, positional_defaults):
+            dep_call = (
+                self._dependency_call_from_expr(arg.annotation, from_file)
+                or self._dependency_call_from_expr(default, from_file)
+            )
+            if dep_call:
+                deps.append((arg.arg, dep_call))
+        for arg, default in zip(func_node.args.kwonlyargs, func_node.args.kw_defaults):
+            dep_call = (
+                self._dependency_call_from_expr(arg.annotation, from_file)
+                or self._dependency_call_from_expr(default, from_file)
+            )
+            if dep_call:
+                deps.append((arg.arg, dep_call))
+        return deps
+
+    def _dependency_call_from_expr(
+        self,
+        node: ast.expr | None,
+        from_file: str | None,
+    ) -> ast.Call | None:
+        if node is None:
+            return None
+        if isinstance(node, ast.Call):
+            marker = self._dotted_name(node.func)
+            expanded = self._expand_import_reference(marker, from_file)
+            if marker.split(".")[-1] in {"Depends", "Security"} or expanded in {
+                "fastapi.Depends", "fastapi.Security",
+            }:
+                return node
+        if isinstance(node, ast.Subscript) and self._get_name(node.value) == "Annotated":
+            elts = node.slice.elts if isinstance(node.slice, ast.Tuple) else []
+            for elt in elts[1:]:
+                dep_call = self._dependency_call_from_expr(elt, from_file)
+                if dep_call:
+                    return dep_call
+        return None
+
+    def _infer_dependency_call_type(
+        self,
+        dep_call: ast.Call,
+        from_file: str | None,
+    ) -> str | None:
+        if not dep_call.args:
+            return None
+        provider_ref = dep_call.args[0]
+        provider_expr = provider_ref.func if isinstance(provider_ref, ast.Call) else provider_ref
+        provider = self._resolve_provider_reference(provider_expr, from_file)
+        if provider is None:
+            return None
+        override_qnames = self._dependency_overrides.get(provider.qualified_name, set())
+        if len(override_qnames) == 1:
+            provider = self._functions.get(next(iter(override_qnames))) or provider
+        elif len(override_qnames) > 1:
+            return None
+        if provider and provider.definition_type in {"class", "schema"}:
+            return provider.name
+        inferred = self._infer_provider_return_type_safe(provider)
+        if inferred:
+            return inferred
+        return None
+
+    def _infer_dependency_overrides(self) -> None:
+        """Index unambiguous FastAPI app.dependency_overrides assignments."""
+        for file_path, tree in self._file_asts.items():
+            for stmt in tree.body:
+                if not isinstance(stmt, ast.Assign):
+                    continue
+                override = self._resolve_provider_reference(stmt.value, file_path)
+                if override is None:
+                    continue
+                for target in stmt.targets:
+                    if not isinstance(target, ast.Subscript):
+                        continue
+                    container = self._dotted_name(target.value)
+                    if container.split(".")[-1] != "dependency_overrides":
+                        continue
+                    provider = self._resolve_provider_reference(target.slice, file_path)
+                    if provider is not None:
+                        self._dependency_overrides.setdefault(
+                            provider.qualified_name, set(),
+                        ).add(override.qualified_name)
+
+    def _infer_module_global_provider_types(self) -> None:
+        """Infer module globals assigned from project factory/provider calls."""
+        for file_path, tree in self._file_asts.items():
+            globals_for_file = self._module_global_types.setdefault(file_path, {})
+            for stmt in tree.body:
+                assignments: list[tuple[ast.expr, ast.expr | None]] = []
+                if isinstance(stmt, ast.Assign):
+                    assignments.extend((target, stmt.value) for target in stmt.targets)
+                elif isinstance(stmt, ast.AnnAssign):
+                    assignments.append((stmt.target, stmt.value))
+                for target, value in assignments:
+                    if not isinstance(target, ast.Name):
+                        continue
+                    inferred = self._infer_dependency_provider_assignment(value, file_path)
+                    if inferred:
+                        globals_for_file[target.id] = inferred
+
+    def _infer_dependency_provider_assignment(
+        self,
+        value: ast.expr | None,
+        from_file: str | None,
+    ) -> str | None:
+        if not isinstance(value, ast.Call):
+            return None
+        call_name, _, _ = self._get_call_target(value)
+        if not call_name:
+            return None
+        simple = call_name.split(".")[-1]
+        if simple[:1].isupper():
+            return simple
+        provider = self._resolve_provider_reference(value.func, from_file)
+        return self._infer_provider_return_type_safe(provider)
 
     def _extract_logic_steps(
         self,
@@ -3799,6 +4094,99 @@ class CallGraphBuilder:
             return simple_name
         return None
 
+    def _extract_module_global_types(self, tree: ast.Module) -> dict[str, str]:
+        """Infer simple top-level object types for module-scoped injected singletons."""
+        global_types: dict[str, str] = {}
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Assign):
+                inferred_type = self._infer_assigned_type(stmt.value)
+                if inferred_type:
+                    for target in stmt.targets:
+                        if isinstance(target, ast.Name):
+                            global_types[target.id] = inferred_type
+            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                inferred_type = self._infer_assigned_type(stmt.value)
+                if inferred_type is None:
+                    ann = self._annotation_str(stmt.annotation)
+                    if ann and ann[0].isupper():
+                        inferred_type = ann
+                if inferred_type:
+                    global_types[stmt.target.id] = inferred_type
+        return global_types
+
+    @staticmethod
+    def _extract_module_imports(
+        tree: ast.Module,
+        module_name: str,
+        file_path: str,
+    ) -> dict[str, str]:
+        """Map names bound by imports to their project-qualified references."""
+        imports: dict[str, str] = {}
+        is_package = os.path.basename(file_path) == "__init__.py"
+        package = module_name if is_package else module_name.rpartition(".")[0]
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Import):
+                for alias in stmt.names:
+                    local_name = alias.asname or alias.name.split(".")[0]
+                    imports[local_name] = alias.name if alias.asname else local_name
+            elif isinstance(stmt, ast.ImportFrom):
+                base = stmt.module or ""
+                if stmt.level:
+                    package_parts = package.split(".") if package else []
+                    keep = max(0, len(package_parts) - (stmt.level - 1))
+                    prefix = ".".join(package_parts[:keep])
+                    base = ".".join(part for part in (prefix, base) if part)
+                for alias in stmt.names:
+                    if alias.name == "*":
+                        continue
+                    local_name = alias.asname or alias.name
+                    imports[local_name] = ".".join(
+                        part for part in (base, alias.name) if part
+                    )
+        return imports
+
+    @staticmethod
+    def _extract_bound_names(
+        func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> list[str]:
+        """Return names lexically bound in a function, including untyped names."""
+        bound = set(_param_names(func_node.args))
+        declared_global: set[str] = set()
+
+        class BindingVisitor(ast.NodeVisitor):
+            def visit_Name(self, node: ast.Name) -> None:
+                if isinstance(node.ctx, (ast.Store, ast.Del)):
+                    bound.add(node.id)
+
+            def visit_Global(self, node: ast.Global) -> None:
+                declared_global.update(node.names)
+
+            def visit_Import(self, node: ast.Import) -> None:
+                for alias in node.names:
+                    bound.add(alias.asname or alias.name.split(".")[0])
+
+            def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+                for alias in node.names:
+                    if alias.name != "*":
+                        bound.add(alias.asname or alias.name)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                bound.add(node.name)
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                bound.add(node.name)
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                bound.add(node.name)
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                return
+
+        visitor = BindingVisitor()
+        for stmt in func_node.body:
+            visitor.visit(stmt)
+        return sorted(bound - declared_global)
+
     @staticmethod
     def _describe_exception(call: CallSite) -> str:
         """Describe an exception node."""
@@ -4143,6 +4531,17 @@ class CallGraphBuilder:
                     return ()
                 return (*parent, node.func.attr)
         return ()
+
+    @staticmethod
+    def _dotted_name(node: ast.expr | None) -> str:
+        if node is None:
+            return ""
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            parent = CallGraphBuilder._dotted_name(node.value)
+            return f"{parent}.{node.attr}" if parent else node.attr
+        return ""
 
     @staticmethod
     def _get_name(node: ast.expr | None) -> str:
