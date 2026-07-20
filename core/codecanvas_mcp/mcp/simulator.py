@@ -7,9 +7,11 @@ import builtins
 import contextlib
 import copy
 import importlib
+import importlib.util
 import inspect
 import io
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -85,26 +87,90 @@ def _sample_values(spec: dict) -> list[Any]:
         return enum[:2]
     default = spec.get("default")
     kind = spec.get("type")
+    if isinstance(kind, list):
+        samples: list[Any] = [default] if "default" in spec else []
+        for member in kind:
+            member_spec = dict(spec)
+            member_spec["type"] = member
+            samples.extend(_sample_values(member_spec))
+        return _unique(samples)
+
     samples: list[Any] = [default] if "default" in spec else []
     if kind == "boolean":
         samples.extend([False, True])
     elif kind == "integer":
-        samples.extend([spec.get("minimum", 0), 1])
+        minimum = spec.get("minimum")
+        maximum = spec.get("maximum")
+        exclusive_minimum = spec.get("exclusiveMinimum")
+        exclusive_maximum = spec.get("exclusiveMaximum")
+        lower = math.ceil(minimum) if isinstance(minimum, (int, float)) else None
+        upper = math.floor(maximum) if isinstance(maximum, (int, float)) else None
+        if isinstance(exclusive_minimum, (int, float)):
+            lower = math.floor(exclusive_minimum) + 1
+        if isinstance(exclusive_maximum, (int, float)):
+            upper = math.ceil(exclusive_maximum) - 1
+        first = lower if lower is not None else min(0, upper) if upper is not None else 0
+        samples.extend(value for value in (first, first + 1) if upper is None or value <= upper)
     elif kind == "number":
-        samples.extend([spec.get("minimum", 0.0), 1.0])
+        minimum = spec.get("minimum")
+        maximum = spec.get("maximum")
+        exclusive_minimum = spec.get("exclusiveMinimum")
+        exclusive_maximum = spec.get("exclusiveMaximum")
+        lower = float(exclusive_minimum if isinstance(exclusive_minimum, (int, float))
+                      else minimum) if isinstance(
+                          exclusive_minimum if isinstance(exclusive_minimum, (int, float))
+                          else minimum, (int, float)) else None
+        upper = float(exclusive_maximum if isinstance(exclusive_maximum, (int, float))
+                      else maximum) if isinstance(
+                          exclusive_maximum if isinstance(exclusive_maximum, (int, float))
+                          else maximum, (int, float)) else None
+        lower_open = isinstance(exclusive_minimum, (int, float))
+        upper_open = isinstance(exclusive_maximum, (int, float))
+        if lower is not None and upper is not None:
+            first = (lower + upper) / 2 if lower_open or upper_open else lower
+        elif lower is not None:
+            first = lower + 1.0 if lower_open else lower
+        elif upper is not None:
+            first = upper - 1.0 if upper_open else min(0.0, upper)
+        else:
+            first = 0.0
+        candidates = [first, first + 1.0]
+        samples.extend(value for value in candidates
+                       if (lower is None or value > lower or not lower_open)
+                       and (upper is None or value < upper or not upper_open))
     elif kind == "string":
-        samples.extend([spec.get("minLength", 0) and "x" or "", "value"])
+        minimum = max(0, spec.get("minLength", 0))
+        maximum = spec.get("maxLength")
+        lengths = [minimum, max(minimum, 1)]
+        samples.extend("x" * length for length in lengths
+                       if not isinstance(maximum, int) or length <= maximum)
     elif kind == "array":
-        samples.append([])
+        minimum = max(0, spec.get("minItems", 0))
+        maximum = spec.get("maxItems")
+        item_spec = spec.get("items") if isinstance(spec.get("items"), dict) else {}
+        item = _sample_values(item_spec)[0]
+        lengths = [minimum, max(minimum, 1)]
+        samples.extend([copy.deepcopy(item) for _ in range(length)] for length in lengths
+                       if not isinstance(maximum, int) or length <= maximum)
     elif kind == "object":
-        samples.append({})
+        properties = spec.get("properties") if isinstance(spec.get("properties"), dict) else {}
+        required = spec.get("required") if isinstance(spec.get("required"), list) else []
+        samples.append({
+            key: _sample_values(properties.get(key, {}))[0]
+            for key in required
+            if isinstance(key, str)
+        })
     elif kind == "null":
         samples.append(None)
     else:
         samples.append(None)
 
+    return _unique(samples)
+
+
+def _unique(values: list[Any]) -> list[Any]:
     unique: list[Any] = []
-    for value in samples:
+    for value in values:
         if value not in unique:
             unique.append(value)
     return unique
@@ -141,7 +207,7 @@ def _json_safe(value: Any, depth: int = 0) -> Any:
     return {"type": type(value).__name__, "repr": repr(value)[:500]}
 
 
-def _module_details(file_path: Path, project_root: Path) -> tuple[str, Path]:
+def _module_details(file_path: Path, project_root: Path) -> tuple[str, Path, bool]:
     package_parts: list[str] = []
     parent = file_path.parent
     while (parent / "__init__.py").is_file():
@@ -151,8 +217,8 @@ def _module_details(file_path: Path, project_root: Path) -> tuple[str, Path]:
         module_parts = package_parts
         if file_path.name != "__init__.py":
             module_parts = module_parts + [file_path.stem]
-        return ".".join(module_parts), parent
-    return file_path.stem, project_root
+        return ".".join(module_parts), parent, True
+    return file_path.stem, file_path.parent, False
 
 
 def _load_target(request: dict):
@@ -161,12 +227,20 @@ def _load_target(request: dict):
     if not file_path.is_absolute():
         file_path = project_root / file_path
     file_path = file_path.resolve()
-    module_name, import_root = _module_details(file_path, project_root)
-    for path in (import_root, project_root, project_root / "src"):
+    module_name, import_root, is_package_module = _module_details(file_path, project_root)
+    for path in (project_root / "src", project_root, import_root):
         text = str(path)
         if path.is_dir() and text not in sys.path:
             sys.path.insert(0, text)
-    module = importlib.import_module(module_name)
+    if is_package_module:
+        module = importlib.import_module(module_name)
+    else:
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot create an import spec for {file_path}.")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
     loaded_path = Path(getattr(module, "__file__", "")).resolve()
     if loaded_path != file_path:
         raise ImportError(
@@ -308,8 +382,9 @@ def _violations(request: dict, result: Any, state: dict, exception: dict | None)
     schema_keys = set(request["schema_keys"])
     required_keys = set(request["required_keys"])
     violations: list[dict] = []
-    if exception is not None:
+    if exception is not None and "no_exception" in invariants:
         violations.append({"invariant": "no_exception", "detail": exception["message"]})
+    if exception is not None:
         return violations
     if "return_is_mapping" in invariants and not isinstance(result, dict):
         violations.append({
@@ -411,7 +486,12 @@ def simulate(
     validated_overrides, override_error = _validate_overrides(overrides)
     if override_error is not None:
         return override_error
-    selected_invariants = invariants or ["no_exception"]
+    if invariants is not None and (
+        not isinstance(invariants, list)
+        or not all(isinstance(invariant, str) for invariant in invariants)
+    ):
+        return {"error": "invariants must be a list of strings."}
+    selected_invariants = ["no_exception"] if invariants is None else invariants
     unknown = sorted(set(selected_invariants) - SUPPORTED_INVARIANTS)
     if unknown:
         return {

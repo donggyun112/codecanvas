@@ -99,6 +99,88 @@ def test_simulator_generates_schema_cases(tmp_path):
     assert all("remaining_steps" in row["input_state"] for row in out["results"])
 
 
+def test_simulator_generated_cases_respect_common_schema_constraints(tmp_path):
+    builder = _builder(tmp_path, """
+        def next_step(state):
+            return state
+    """)
+    schema = {
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer", "minimum": 5, "maximum": 6},
+            "label": {"type": "string", "minLength": 3, "maxLength": 4},
+            "items": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        },
+        "required": ["count", "label", "items"],
+    }
+    out = queries.simulate_state_transition(builder, "next_step", schema, max_cases=12)
+
+    for row in out["results"]:
+        state = row["input_state"]
+        assert 5 <= state["count"] <= 6
+        assert 3 <= len(state["label"]) <= 4
+        assert len(state["items"]) >= 1
+
+
+def test_simulator_loads_nested_non_package_module_with_sibling_import(tmp_path):
+    workflow = tmp_path / "workflow"
+    workflow.mkdir()
+    (workflow / "dependency.py").write_text(
+        "def value():\n    return 7\n", encoding="utf-8"
+    )
+    (workflow / "agent.py").write_text(textwrap.dedent("""
+        from dependency import value
+
+        def next_step(state):
+            return {**state, "remaining_steps": value()}
+    """).strip() + "\n", encoding="utf-8")
+    builder = get_builder(str(tmp_path))
+
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"messages": [], "remaining_steps": 1}],
+    )
+
+    assert out["passed"] == 1
+    assert out["results"][0]["return_value"]["remaining_steps"] == 7
+
+
+def test_simulator_only_enforces_selected_exception_invariant(tmp_path):
+    builder = _builder(tmp_path, """
+        def next_step(state):
+            raise ValueError("ignored by selected invariants")
+    """)
+
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"messages": [], "remaining_steps": 1}],
+        invariants=[],
+    )
+
+    assert out["passed"] == 1
+    assert out["results"][0]["violations"] == []
+    assert out["results"][0]["exception"]["type"] == "ValueError"
+
+
+def test_simulator_rejects_non_list_invariants(tmp_path):
+    builder = _builder(tmp_path, """
+        def next_step(state):
+            return state
+    """)
+
+    out = queries.simulate_state_transition(
+        builder, "next_step", SCHEMA, invariants="no_exception"
+    )
+
+    assert out["error"] == "invariants must be a list of strings."
+    assert out["function"] == "agent.next_step"
+    assert out["location"].endswith("agent.py:1")
+
+
 def test_simulator_rejects_additional_required_parameters(tmp_path):
     builder = _builder(tmp_path, """
         def next_step(state, client):

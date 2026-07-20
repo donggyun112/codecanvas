@@ -186,10 +186,13 @@ def simulate_state_transition(function: str, state_schema: dict,
     `return_is_mapping`, `return_has_required_keys`,
     `no_unknown_return_keys`, and `state_preserves_required_keys`. Results
     include return values, state mutations, exceptions, captured output, and
-    per-case violations. Use `overrides` to replace a dependency at its runtime
+    per-case violations. Exceptions are always reported; include `no_exception`
+    when they should fail a case. Use `overrides` to replace a dependency at its runtime
     lookup path with one explicit `return_value`, `return_sequence`, or `raise`
     behavior. Override calls and unused overrides are reported per case. This
-    executes project code; import-time side effects cannot be overridden.
+    executes trusted project code in a separate process, not a security sandbox:
+    filesystem, network, subprocess, and import-time side effects remain possible
+    and cannot be contained or overridden by this tool.
     Module-level sync and async functions are supported in this MVP.
     """
     return _with_builder(
