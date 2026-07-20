@@ -934,6 +934,45 @@ def validate_state_schema(builder, function: str, state_schema,
     return out
 
 
+def simulate_state_transition(builder, function: str, state_schema: dict,
+                              cases: list[dict] | None = None,
+                              invariants: list[str] | None = None,
+                              overrides: list[dict] | None = None,
+                              state_var: str = "state",
+                              timeout_seconds: float = 3.0,
+                              max_cases: int = 12) -> dict:
+    """Run focused state cases against a module-level function in isolation."""
+    from codecanvas_mcp.mcp.simulator import simulate
+
+    if not state_var:
+        return {"error": "state_var must be a non-empty string."}
+    func, err = resolve_function(builder, function)
+    if err is not None:
+        return err
+    if func.class_name:
+        return {
+            "error": "Instance and class methods are not supported by the simulator MVP.",
+            "function": func.qualified_name,
+            "location": _location(func),
+        }
+
+    out = simulate(
+        project_root=builder.project_root,
+        file_path=func.file_path,
+        target_name=func.name,
+        state_schema=state_schema,
+        cases=cases,
+        invariants=invariants,
+        overrides=overrides,
+        state_var=state_var,
+        timeout_seconds=timeout_seconds,
+        max_cases=max_cases,
+    )
+    out.setdefault("function", func.qualified_name)
+    out.setdefault("location", _location(func))
+    return out
+
+
 def _effect_tags(func) -> list[str]:
     """Compact per-node effect flags: db / http / raises."""
     tags = []

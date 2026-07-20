@@ -1,0 +1,244 @@
+import textwrap
+
+from codecanvas_mcp.mcp import queries
+from codecanvas_mcp.mcp.session import get_builder
+
+
+def _builder(tmp_path, source: str):
+    (tmp_path / "agent.py").write_text(
+        textwrap.dedent(source).strip() + "\n", encoding="utf-8"
+    )
+    return get_builder(str(tmp_path))
+
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "done": {"type": "boolean"},
+        "messages": {"type": "array"},
+        "remaining_steps": {"type": "integer", "minimum": 0},
+    },
+    "required": ["messages", "remaining_steps"],
+}
+
+
+def test_simulator_reproduces_missing_return_key(tmp_path):
+    builder = _builder(tmp_path, """
+        def next_step(state):
+            if state.get("done"):
+                return {"messages": []}
+            return {
+                "messages": [],
+                "remaining_steps": state["remaining_steps"] - 1,
+            }
+    """)
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"done": True, "messages": [], "remaining_steps": 1}],
+        invariants=["no_exception", "return_has_required_keys"],
+    )
+
+    assert out["failed"] == 1
+    assert out["results"][0]["return_value"] == {"messages": []}
+    assert out["results"][0]["violations"] == [{
+        "invariant": "return_has_required_keys",
+        "fields": ["remaining_steps"],
+    }]
+
+
+def test_simulator_supports_async_and_captures_mutation(tmp_path):
+    builder = _builder(tmp_path, """
+        async def next_step(state):
+            state["remaining_steps"] -= 1
+            return {
+                "messages": state["messages"],
+                "remaining_steps": state["remaining_steps"],
+            }
+    """)
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"messages": [], "remaining_steps": 2}],
+        invariants=["no_exception", "return_has_required_keys"],
+    )
+
+    assert out["passed"] == 1
+    assert out["results"][0]["mutated_state"]["remaining_steps"] == 1
+    assert out["results"][0]["return_value"]["remaining_steps"] == 1
+
+
+def test_simulator_captures_exception(tmp_path):
+    builder = _builder(tmp_path, """
+        def next_step(state):
+            raise ValueError("bad state")
+    """)
+    out = queries.simulate_state_transition(
+        builder, "next_step", SCHEMA, cases=[{"messages": [], "remaining_steps": 1}]
+    )
+
+    assert out["failed"] == 1
+    assert out["results"][0]["exception"]["type"] == "ValueError"
+    assert "bad state" in out["results"][0]["exception"]["message"]
+
+
+def test_simulator_generates_schema_cases(tmp_path):
+    builder = _builder(tmp_path, """
+        def next_step(state):
+            return state
+    """)
+    out = queries.simulate_state_transition(
+        builder, "next_step", SCHEMA, max_cases=6
+    )
+
+    assert out["generated_cases"] is True
+    assert 1 < out["case_count"] <= 6
+    assert all("messages" in row["input_state"] for row in out["results"])
+    assert all("remaining_steps" in row["input_state"] for row in out["results"])
+
+
+def test_simulator_rejects_additional_required_parameters(tmp_path):
+    builder = _builder(tmp_path, """
+        def next_step(state, client):
+            return state
+    """)
+    out = queries.simulate_state_transition(
+        builder, "next_step", SCHEMA, cases=[{"messages": [], "remaining_steps": 1}]
+    )
+
+    assert out["failed"] == 1
+    assert out["results"][0]["exception"]["type"] == "TypeError"
+    assert "client" in out["results"][0]["exception"]["message"]
+
+
+def test_simulator_overrides_dependency_return_and_records_calls(tmp_path):
+    builder = _builder(tmp_path, """
+        def load_steps(user_id):
+            return 99
+
+        def unused_dependency():
+            return "real"
+
+        def next_step(state):
+            return {
+                "messages": [],
+                "remaining_steps": load_steps(state["user_id"]),
+            }
+    """)
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"user_id": 7, "messages": [], "remaining_steps": 1}],
+        overrides=[
+            {"target": "agent.load_steps", "return_value": 3},
+            {"target": "agent.unused_dependency", "return_value": "fake"},
+        ],
+    )
+
+    result = out["results"][0]
+    assert result["return_value"]["remaining_steps"] == 3
+    assert result["overrides"][0]["called"] == 1
+    assert result["overrides"][0]["calls"] == [{"args": [7], "kwargs": {}}]
+    assert result["unused_overrides"] == ["agent.unused_dependency"]
+
+
+def test_simulator_overrides_async_dependency(tmp_path):
+    builder = _builder(tmp_path, """
+        async def load_steps(user_id):
+            return 99
+
+        async def next_step(state):
+            steps = await load_steps(state["user_id"])
+            return {"messages": [], "remaining_steps": steps}
+    """)
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"user_id": 7, "messages": [], "remaining_steps": 1}],
+        overrides=[{"target": "agent.load_steps", "return_value": 4}],
+    )
+
+    result = out["results"][0]
+    assert result["passed"] is True
+    assert result["return_value"]["remaining_steps"] == 4
+    assert result["overrides"][0]["called"] == 1
+
+
+def test_simulator_override_return_sequence(tmp_path):
+    builder = _builder(tmp_path, """
+        def choose():
+            return 99
+
+        def next_step(state):
+            return {
+                "messages": [choose(), choose()],
+                "remaining_steps": state["remaining_steps"],
+            }
+    """)
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"messages": [], "remaining_steps": 1}],
+        overrides=[{"target": "agent.choose", "return_sequence": ["a", "b"]}],
+    )
+
+    result = out["results"][0]
+    assert result["return_value"]["messages"] == ["a", "b"]
+    assert result["overrides"][0]["called"] == 2
+
+
+def test_simulator_override_can_raise(tmp_path):
+    builder = _builder(tmp_path, """
+        def load_steps():
+            return 99
+
+        def next_step(state):
+            load_steps()
+            return state
+    """)
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"messages": [], "remaining_steps": 1}],
+        overrides=[{
+            "target": "agent.load_steps",
+            "raise": {"type": "TimeoutError", "message": "dependency timed out"},
+        }],
+    )
+
+    result = out["results"][0]
+    assert result["passed"] is False
+    assert result["exception"]["type"] == "TimeoutError"
+    assert result["overrides"][0]["called"] == 1
+
+
+def test_simulator_patches_import_alias_at_lookup_location(tmp_path):
+    (tmp_path / "dependency.py").write_text(
+        "def load_steps():\n    return 99\n", encoding="utf-8"
+    )
+    builder = _builder(tmp_path, """
+        from dependency import load_steps as fetch_steps
+
+        def next_step(state):
+            return {
+                "messages": [],
+                "remaining_steps": fetch_steps(),
+            }
+    """)
+    out = queries.simulate_state_transition(
+        builder,
+        "next_step",
+        SCHEMA,
+        cases=[{"messages": [], "remaining_steps": 1}],
+        overrides=[{"target": "agent.fetch_steps", "return_value": 5}],
+    )
+
+    result = out["results"][0]
+    assert result["return_value"]["remaining_steps"] == 5
+    assert result["overrides"][0]["resolved_target"] == "agent.fetch_steps"

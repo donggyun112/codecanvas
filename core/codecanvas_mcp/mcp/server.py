@@ -27,7 +27,10 @@ mcp = FastMCP(
         "glance (what_does); how its logic branches (function_flow); the exact "
         "conditions guarding each return/raise (reaching_conditions); where a "
         "codebase's entry points and HTTP routes live (list_entrypoints); and "
-        "the blast radius of a diff or PR (analyze_impact).\n\n"
+        "the blast radius of a diff or PR (analyze_impact). When a suspected "
+        "bug depends on state shape, validate fields statically with "
+        "validate_state_schema, then run focused synthetic or custom cases "
+        "with simulate_state_transition.\n\n"
         "Pass `project_path` (the repo root) once — it is remembered for later "
         "calls in the session, so subsequent calls may omit it. Answers are "
         "compact and capped on large projects; use each tool's "
@@ -164,6 +167,39 @@ def validate_state_schema(function: str, state_schema: dict,
         project_path,
         lambda b: queries.validate_state_schema(
             b, function, state_schema, state_var=state_var),
+    )
+
+
+@mcp.tool()
+def simulate_state_transition(function: str, state_schema: dict,
+                              cases: list[dict] | None = None,
+                              invariants: list[str] | None = None,
+                              overrides: list[dict] | None = None,
+                              project_path: str | None = None,
+                              state_var: str = "state",
+                              timeout_seconds: float = 3.0,
+                              max_cases: int = 12) -> dict:
+    """Execute focused state-transition repro cases in isolated processes.
+
+    Pass explicit `cases` for exact domain states, or omit them to generate a
+    small set from `state_schema`. Built-in invariants include `no_exception`,
+    `return_is_mapping`, `return_has_required_keys`,
+    `no_unknown_return_keys`, and `state_preserves_required_keys`. Results
+    include return values, state mutations, exceptions, captured output, and
+    per-case violations. Use `overrides` to replace a dependency at its runtime
+    lookup path with one explicit `return_value`, `return_sequence`, or `raise`
+    behavior. Override calls and unused overrides are reported per case. This
+    executes project code; import-time side effects cannot be overridden.
+    Module-level sync and async functions are supported in this MVP.
+    """
+    return _with_builder(
+        project_path,
+        lambda b: queries.simulate_state_transition(
+            b, function, state_schema, cases=cases, invariants=invariants,
+            overrides=overrides,
+            state_var=state_var, timeout_seconds=timeout_seconds,
+            max_cases=max_cases,
+        ),
     )
 
 
