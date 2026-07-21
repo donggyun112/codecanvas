@@ -85,6 +85,8 @@ def test_simulator_captures_exception(tmp_path):
     assert out["failed"] == 1
     assert out["results"][0]["exception"]["type"] == "ValueError"
     assert "bad state" in out["results"][0]["exception"]["message"]
+    assert "agent.py" in out["results"][0]["exception"]["traceback"]
+    assert "simulator.py" not in out["results"][0]["exception"]["traceback"]
 
 
 def test_simulator_generates_schema_cases(tmp_path):
@@ -129,6 +131,41 @@ def test_simulator_generated_cases_respect_common_schema_constraints(tmp_path):
     assert "minLength" in out["generated_case_notes"]["supported_keywords_used"]
     assert out["generated_case_notes"]["ignored_keywords"] == []
     assert out["summary"]["status"] == "passed"
+
+
+def test_simulator_generated_case_notes_are_not_branch_coverage(tmp_path):
+    builder = _builder(tmp_path, """
+        def advance(state):
+            if state["step"] >= 3:
+                return {**state, "done": True}
+            return {**state, "step": state["step"] + 1}
+    """)
+    schema = {
+        "type": "object",
+        "properties": {"step": {"type": "integer", "minimum": 0}},
+        "required": ["step"],
+    }
+    out = queries.simulate_state_transition(builder, "advance", schema, max_cases=4)
+
+    notes = out["generated_case_notes"]
+    assert notes["coverage"] == "schema_shape"
+    assert notes["branch_coverage"] is False
+    assert "reaching_conditions" in notes["branch_coverage_note"]
+
+
+def test_simulator_generated_case_notes_report_ignored_keywords(tmp_path):
+    builder = _builder(tmp_path, """
+        def next_step(state):
+            return state
+    """)
+    schema = {
+        "type": "object",
+        "properties": {"email": {"type": "string", "format": "email"}},
+        "required": ["email"],
+    }
+    out = queries.simulate_state_transition(builder, "next_step", schema)
+
+    assert "format" in out["generated_case_notes"]["ignored_keywords"]
 
 
 @pytest.mark.skipif(
@@ -350,6 +387,22 @@ def test_simulator_rejects_additional_required_parameters(tmp_path):
     assert out["failed"] == 1
     assert out["results"][0]["exception"]["type"] == "TypeError"
     assert "client" in out["results"][0]["exception"]["message"]
+
+
+def test_simulator_requires_state_var_to_match_parameter(tmp_path):
+    builder = _builder(tmp_path, """
+        def summarize_items(items):
+            return {"count": len(items), "items": items}
+    """)
+    out = queries.simulate_state_transition(
+        builder,
+        "summarize_items",
+        {"properties": {"items": {"type": "array"}}, "required": ["items"]},
+    )
+
+    assert out["error"].startswith("state_var 'state' must match")
+    assert out["parameters"] == ["items"]
+    assert "results" not in out
 
 
 def test_simulator_overrides_dependency_return_and_records_calls(tmp_path):

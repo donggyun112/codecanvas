@@ -159,9 +159,11 @@ def validate_state_schema(function: str, state_schema: dict,
     reachability alone. `state_schema` may be JSON-schema-like
     (`{"properties": {...}, "required": [...]}`) or a simple field mapping.
     The tool reports state reads/writes, dict-shaped returns, schema-extra
-    fields, and returns missing required fields. This is a focused repro aid:
-    it turns custom state assumptions into checkable evidence, but still does
-    not conclusively prove runtime behavior.
+    fields, and returns missing required fields. `state_var` must match the
+    function parameter that receives the whole state mapping; these tools are
+    designed for node-style functions such as `def node(state)`. This is a
+    focused repro aid: it turns custom state assumptions into checkable evidence,
+    but still does not conclusively prove runtime behavior.
     """
     return _with_builder(
         project_path,
@@ -183,7 +185,9 @@ def simulate_state_transition(function: str, state_schema: dict,
     """Execute focused state-transition repro cases in isolated processes.
 
     Pass explicit `cases` for exact domain states, or omit them to generate a
-    small set from `state_schema`. Built-in invariants include `no_exception`,
+    small schema-shaped set from `state_schema`; generated cases do not derive
+    branch predicates, so use `function_flow`/`reaching_conditions` plus explicit
+    cases when branch coverage matters. Built-in invariants include `no_exception`,
     `return_is_mapping`, `return_has_required_keys`,
     `no_unknown_return_keys`, and `state_preserves_required_keys`. Results
     include return values, state mutations, exceptions, captured output, and
@@ -197,7 +201,8 @@ def simulate_state_transition(function: str, state_schema: dict,
     executes trusted project code in a separate process, not a security sandbox:
     filesystem, network, subprocess, and import-time side effects remain possible
     and cannot be contained or overridden by this tool.
-    Module-level sync and async functions are supported in this MVP.
+    `state_var` must match the parameter receiving the whole state mapping.
+    Module-level sync and async node-style functions are supported in this MVP.
     """
     return _with_builder(
         project_path,

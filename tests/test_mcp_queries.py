@@ -313,6 +313,24 @@ def test_validate_state_schema_flags_return_field_outside_schema(tmp_path):
     ), out["diagnostics"]
 
 
+def test_validate_state_schema_requires_matching_state_var(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "agent.py": """
+            def summarize_items(items):
+                return {"count": len(items), "items": items}
+        """,
+    })
+    out = queries.validate_state_schema(
+        builder,
+        "summarize_items",
+        {"properties": {"count": {}, "items": {}}, "required": ["count"]},
+    )
+
+    assert out["error"].startswith("state_var 'state' must match")
+    assert out["parameters"] == ["items"]
+    assert out["state_var"] == "state"
+
+
 IMPACT_EP_APP = {
     "svc.py": "def helper():\n    return 1\n",
     "app.py": """

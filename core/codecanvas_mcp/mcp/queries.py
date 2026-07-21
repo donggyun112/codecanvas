@@ -665,6 +665,34 @@ def _state_field_from_node(node, state_var: str) -> tuple[str | None, str | None
     return None, None
 
 
+def _ast_state_param_names(node) -> list[str]:
+    names = []
+    names.extend(arg.arg for arg in getattr(node.args, "posonlyargs", []))
+    names.extend(arg.arg for arg in node.args.args)
+    names.extend(arg.arg for arg in node.args.kwonlyargs)
+    return names
+
+
+def _state_var_param_error(func, state_var: str, params: list[str]) -> dict | None:
+    if state_var in params:
+        return None
+    return {
+        "error": (
+            f"state_var {state_var!r} must match the function parameter that "
+            "receives the state mapping."
+        ),
+        "function": func.qualified_name,
+        "location": _location(func),
+        "state_var": state_var,
+        "parameters": params,
+        "hint": (
+            "These state tools expect node-style functions such as "
+            "def node(state). For ordinary functions, add a small wrapper or "
+            "set state_var to the parameter that receives the whole state mapping."
+        ),
+    }
+
+
 def _target_name(node) -> str | None:
     import ast
     return node.id if isinstance(node, ast.Name) else None
@@ -863,6 +891,9 @@ def validate_state_schema(builder, function: str, state_schema,
             "error": f"No function body available for '{func.qualified_name}' "
                      f"(it may be a class or an unparsed definition).",
         }
+    param_err = _state_var_param_error(func, state_var, _ast_state_param_names(node))
+    if param_err is not None:
+        return param_err
 
     visitor = _StateSchemaVisitor(state_var)
     for stmt in node.body:
@@ -954,6 +985,7 @@ def simulate_state_transition(builder, function: str, state_schema: dict,
                               import_timeout_seconds: float = 10.0,
                               max_cases: int = 12) -> dict:
     """Run focused state cases against a module-level function in isolation."""
+    import ast
     from codecanvas_mcp.mcp.simulator import simulate
 
     if not state_var:
@@ -967,6 +999,15 @@ def simulate_state_transition(builder, function: str, state_schema: dict,
             "function": func.qualified_name,
             "location": _location(func),
         }
+    node = builder.call_graph.get_ast_node(func.qualified_name)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        param_err = _state_var_param_error(
+            func, state_var, _ast_state_param_names(node))
+    else:
+        param_err = _state_var_param_error(
+            func, state_var, [p for p in func.params if not p.startswith("*")])
+    if param_err is not None:
+        return param_err
 
     out = simulate(
         project_root=builder.project_root,

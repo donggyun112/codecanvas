@@ -258,6 +258,13 @@ def _schema_generation_notes(state_schema: dict) -> dict:
     ignored = encountered - SUPPORTED_SCHEMA_KEYWORDS - SCHEMA_METADATA_KEYWORDS
     return {
         "strategy": "required-field baseline plus one-property variations",
+        "coverage": "schema_shape",
+        "branch_coverage": False,
+        "branch_coverage_note": (
+            "Generated cases vary schema fields only; they do not derive "
+            "branch predicates. Use explicit cases with function_flow or "
+            "reaching_conditions when branch/path coverage matters."
+        ),
         "supported_keywords_used": sorted(encountered & SUPPORTED_SCHEMA_KEYWORDS),
         "ignored_keywords": sorted(ignored),
     }
@@ -306,6 +313,42 @@ def _redact_text(text: str) -> str:
         r"\1<redacted>",
         text,
     )
+
+
+def _compact_traceback(exc: Exception, project_root: str | None = None) -> str:
+    internal_file = Path(__file__).resolve()
+    root = Path(project_root).resolve() if project_root is not None else None
+    extracted = traceback.extract_tb(exc.__traceback__)
+    frames = []
+    for frame in extracted:
+        try:
+            frame_path = Path(frame.filename).resolve()
+        except OSError:
+            frame_path = Path(frame.filename)
+        if frame_path == internal_file:
+            continue
+        if root is not None:
+            try:
+                frame_path.relative_to(root)
+            except ValueError:
+                continue
+        frames.append(frame)
+    if not frames:
+        return (
+            f"{type(exc).__name__}: {_redact_text(str(exc))}\n"
+            "Traceback omitted because no project frames were available.\n"
+        )
+
+    lines = ["Traceback (most recent call last):\n"]
+    for frame in frames[-6:]:
+        lines.append(
+            f'  File "{_redact_text(frame.filename)}", line {frame.lineno}, '
+            f"in {frame.name}\n"
+        )
+        if frame.line:
+            lines.append(f"    {frame.line.strip()}\n")
+    lines.append(f"{type(exc).__name__}: {_redact_text(str(exc))}\n")
+    return _redact_text("".join(lines))
 
 
 def _json_safe(value: Any, depth: int = 0) -> Any:
@@ -474,17 +517,15 @@ def _invoke(target, state: dict, state_var: str):
     params = list(signature.parameters.values())
     state_param = signature.parameters.get(state_var)
     if state_param is None:
-        candidates = [
-            p for p in params
-            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
-            and p.name not in {"self", "cls"}
-        ]
-        if len(candidates) == 1:
-            state_param = candidates[0]
-        else:
-            raise TypeError(
-                f"Could not identify state parameter {state_var!r} in {signature}."
-            )
+        raise TypeError(
+            f"state_var {state_var!r} must match the function parameter that "
+            f"receives the state mapping in {signature}."
+        )
+    if state_param.kind in (state_param.VAR_POSITIONAL, state_param.VAR_KEYWORD):
+        raise TypeError(
+            f"state_var {state_var!r} must name a concrete state parameter in "
+            f"{signature}."
+        )
 
     missing = [
         p.name for p in params
@@ -572,7 +613,7 @@ def _run_case(request: dict) -> dict:
         exception = {
             "type": type(exc).__name__,
             "message": _redact_text(str(exc)),
-            "traceback": _redact_text(traceback.format_exc(limit=8)),
+            "traceback": _compact_traceback(exc, request.get("project_root")),
         }
     if exception is not None and exception.get("phase") in {"import", "execution"}:
         violations = [{
