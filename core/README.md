@@ -11,7 +11,7 @@ impact — instead of grepping and guessing.
 - `what_does` — signature, docstring, db/http/raise effects, risk
 - `function_flow` — de-noised control-flow outline of a function
 - `reaching_conditions` — the guard conditions behind every return/raise
-- `analyze_impact` — changed functions and affected endpoints for a diff or git ref
+- `analyze_impact` — changed functions and affected entrypoints/public surface for a diff or git ref
 
 ## Usage
 

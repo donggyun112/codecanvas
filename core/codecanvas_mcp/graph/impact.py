@@ -35,11 +35,12 @@ class AffectedFunction:
     change_type: str      # modified, added, deleted
     hunks: list[ChangedHunk] = field(default_factory=list)
     risk_score: float = 0
+    risk_factors: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
 class AffectedEndpoint:
-    """An endpoint affected through the call chain."""
+    """An entry point/public surface affected through the call chain."""
     endpoint_id: str
     label: str
     method: str
@@ -48,6 +49,9 @@ class AffectedEndpoint:
     max_depth: int = 0             # how far the change is from the handler
     aggregate_risk: float = 0
     handler_file: str = ""         # source file of the handler (for filtering)
+    handler_name: str = ""
+    handler_line: int = 0
+    kind: str = "api"
 
 
 @dataclass
@@ -69,14 +73,17 @@ class ImpactResult:
                 {"qualifiedName": f.qualified_name, "name": f.name,
                  "filePath": f.file_path, "lineStart": f.line_start,
                  "lineEnd": f.line_end, "changeType": f.change_type,
-                 "riskScore": f.risk_score}
+                 "riskScore": f.risk_score, "riskFactors": f.risk_factors}
                 for f in self.affected_functions
             ],
             "affectedEndpoints": [
                 {"endpointId": e.endpoint_id, "label": e.label,
+                 "entrypointId": e.endpoint_id, "kind": e.kind,
                  "method": e.method, "path": e.path,
                  "affectedFunctions": e.affected_functions,
-                 "maxDepth": e.max_depth, "aggregateRisk": e.aggregate_risk}
+                 "maxDepth": e.max_depth, "aggregateRisk": e.aggregate_risk,
+                 "handlerFile": e.handler_file, "handlerName": e.handler_name,
+                 "handlerLine": e.handler_line}
                 for e in self.affected_endpoints
             ],
             "summary": self.summary,
@@ -202,10 +209,11 @@ class ImpactAnalyzer:
             for af in result.affected_functions:
                 func = self.cg.get_function(af.qualified_name)
                 if func is not None:
-                    af.risk_score = self._compute_function_risk(func)
+                    af.risk_score, af.risk_factors = self._compute_function_risk_details(func)
 
         # 1b. Compute risk scores — use FlowGraph risk if builder available
         risk_cache: dict[str, float] = {}  # qname → score from flow graphs
+        risk_factor_cache: dict[str, list[dict[str, Any]]] = {}
 
         # 2. Trace upstream to find affected endpoints
         all_entrypoints = self._entrypoints
@@ -235,6 +243,9 @@ class ImpactAnalyzer:
                             score = node.metadata.get("risk_score", 0)
                             if score and node.id not in risk_cache:
                                 risk_cache[node.id] = score
+                            factors = node.metadata.get("risk_factors", [])
+                            if factors and node.id not in risk_factor_cache:
+                                risk_factor_cache[node.id] = list(factors)
                     except Exception:
                         pass
 
@@ -242,6 +253,8 @@ class ImpactAnalyzer:
                 for af in result.affected_functions:
                     if af.risk_score == 0 and af.qualified_name in risk_cache:
                         af.risk_score = risk_cache[af.qualified_name]
+                    if not af.risk_factors and af.qualified_name in risk_factor_cache:
+                        af.risk_factors = risk_factor_cache[af.qualified_name]
 
                 agg_risk = sum(
                     af.risk_score for af in result.affected_functions
@@ -256,17 +269,30 @@ class ImpactAnalyzer:
                     max_depth=max_depth,
                     aggregate_risk=round(agg_risk, 1),
                     handler_file=ep.handler_file,
+                    handler_name=ep.handler_name,
+                    handler_line=ep.handler_line,
+                    kind=ep.kind,
                 ))
 
         # 3. Summary
         nf = len(result.affected_functions)
         ne = len(result.affected_endpoints)
-        result.summary = f"{nf} function(s) changed, {ne} endpoint(s) affected."
+        surface = (
+            "endpoint"
+            if ne and all(e.kind == "api" for e in result.affected_endpoints)
+            else "entrypoint"
+        )
+        result.summary = f"{nf} function(s) changed, {ne} {surface}(s) affected."
 
         return result
 
     @staticmethod
     def _compute_function_risk(func) -> float:
+        score, _factors = ImpactAnalyzer._compute_function_risk_details(func)
+        return score
+
+    @staticmethod
+    def _compute_function_risk_details(func) -> tuple[float, list[dict[str, Any]]]:
         """Compute risk score for a single function.
 
         This is the flat, per-function variant of the flow-graph scorer in
@@ -277,14 +303,24 @@ class ImpactAnalyzer:
         SIGNAL_POINTS = REVIEW_SIGNAL_POINTS
         signals = CallGraphBuilder._aggregate_review_signals(func)
         raw = 0
+        factors: list[dict[str, Any]] = []
         for sig in signals:
             if sig == "raises" and ("raises_4xx" in signals or "raises_5xx" in signals):
                 continue
-            raw += SIGNAL_POINTS.get(sig, 0)
+            pts = SIGNAL_POINTS.get(sig, 0)
+            if pts > 0:
+                raw += pts
+                factors.append({"factor": sig, "points": pts})
         # Error paths from calls
         err_count = sum(1 for c in func.calls if c.is_raise)
         raw += err_count
-        return round(raw, 1)
+        if err_count:
+            factors.append({
+                "factor": "raise_calls",
+                "points": err_count,
+                "detail": f"{err_count} raise call(s)",
+            })
+        return round(raw, 1), factors
 
     def _find_functions_at(self, rel_path: str, start: int, end: int) -> list:
         """Find functions whose line range overlaps [start, end]."""

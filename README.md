@@ -2,7 +2,7 @@
 
 A VS Code extension that statically analyzes Python codebases and visualizes execution flows, call graphs, control flow, and data flow — so you can understand code without reading every line.
 
-Automatically traces function calls, data transformations, branch structures, and dependency injection chains. Detects which API endpoints are affected when you change code.
+Automatically traces function calls, data transformations, branch structures, and dependency injection chains. Detects which entrypoints and public surfaces are affected when you change code.
 
 ## Features
 
@@ -18,12 +18,12 @@ Automatically traces function calls, data transformations, branch structures, an
 
 ### Change Impact Analysis
 
-Automatically detects which API endpoints are affected by code changes.
+Automatically detects which entrypoints/public surfaces are affected by code changes.
 
 - Click **"Analyze Uncommitted Changes"** in the sidebar
-- Maps changed functions → call graph → affected endpoints
+- Maps changed functions → call graph → affected entrypoints
 - Follows `Depends()` dependency injection chains
-- Shows risk score + call depth per endpoint
+- Shows risk score + call depth per affected surface
 
 ### Runtime Tracing
 
@@ -149,7 +149,7 @@ Tools:
 | `who_calls` | Who calls this function? (ground-truth reverse edges) |
 | `what_does` | What does this function do? (signature, effects, risk) |
 | `function_flow` | How does this function work? (de-noised control-flow outline: branches, loops, try/finally, early returns, key calls) |
-| `analyze_impact` | What endpoints break if I apply this diff? |
+| `analyze_impact` | What entrypoints/public surfaces break if I apply this diff? |
 
 `list_entrypoints` also accepts `filter` / `kind` to narrow large projects.
 All tools take a `project_path`; outputs are compact and token-bounded.

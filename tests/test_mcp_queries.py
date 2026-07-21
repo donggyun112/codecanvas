@@ -386,6 +386,56 @@ def test_analyze_impact_mixed_diff_reports_both():
     assert out["skipped_files"] == ["README.md"]
 
 
+LIBRARY_IMPACT_APP = {
+    "simulator.py": """
+        class FakeDB:
+            def execute(self, sql):
+                pass
+
+        def _invoke(db):
+            db.execute("INSERT INTO events VALUES (1)")
+
+        def run():
+            return _invoke(FakeDB())
+    """,
+}
+
+LIBRARY_INVOKE_DIFF = """\
+--- a/simulator.py
++++ b/simulator.py
+@@ -5,2 +5,3 @@
+ def _invoke(db):
++    # changed
+     db.execute("INSERT INTO events VALUES (1)")
+"""
+
+
+def test_analyze_impact_reports_library_public_surface(tmp_path):
+    out = queries.analyze_impact(
+        _tmp_builder(tmp_path, LIBRARY_IMPACT_APP),
+        diff_text=LIBRARY_INVOKE_DIFF,
+    )
+
+    changed = next(
+        c for c in out["changed_functions"]
+        if c["function"].endswith("._invoke")
+    )
+    assert changed["risk"] >= 3
+    assert changed["risk_level"] == "medium"
+    assert any(f["factor"] == "db_write" for f in changed["risk_factors"])
+    assert out["risk_scale"]["weights"]["db_write"] == 3
+
+    surface = out["affected_entrypoints"][0]
+    assert surface["kind"] == "function"
+    assert surface["surface"] == "run()"
+    assert surface["module"] == "simulator.py"
+    assert "method" not in surface
+
+    legacy = out["affected_endpoints"][0]
+    assert legacy["method"] == ""
+    assert legacy["path"] == "simulator.py"
+
+
 REACH_APP = {
     "svc.py": """
         def save():
@@ -510,6 +560,26 @@ def test_call_tree_tags_effects(tmp_path):
     out = queries.call_tree(_tmp_builder(tmp_path, CALLTREE_APP), "top", depth=2)
     leaf = next(n for n in out["nodes"] if n["function"].endswith("leaf"))
     assert "http" in leaf["effects"], leaf
+
+
+STUB_CALLTREE_APP = {
+    "svc.py": """
+        class FakeDB:
+            def write(self):
+                pass
+
+        def run():
+            db = FakeDB()
+            return db.write()
+    """,
+}
+
+
+def test_call_tree_marks_stub_effects(tmp_path):
+    out = queries.call_tree(_tmp_builder(tmp_path, STUB_CALLTREE_APP), "run", depth=1)
+    write = next(n for n in out["nodes"] if n["function"].endswith("FakeDB.write"))
+    assert write["effects"] == ["stub"]
+    assert "stub" in out["effect_legend"]
 
 
 DI_CALLTREE_APP = {

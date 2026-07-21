@@ -9,10 +9,75 @@ import difflib
 import os
 
 from codecanvas_mcp.mcp.answers import capped
+from codecanvas_mcp.parser.call_graph import REVIEW_SIGNAL_POINTS
 
 
 def _location(func) -> str:
     return f"{func.file_path}:{func.line_start}"
+
+
+def _risk_level(score: float) -> str:
+    if score >= 10:
+        return "critical"
+    if score >= 6:
+        return "high"
+    if score >= 3:
+        return "medium"
+    if score > 0:
+        return "low"
+    return "none"
+
+
+def _risk_scale() -> dict:
+    return {
+        "kind": "static heuristic",
+        "weights": dict(REVIEW_SIGNAL_POINTS),
+        "levels": {
+            "0": "none",
+            "1-2": "low",
+            "3-5": "medium",
+            "6-9": "high",
+            "10+": "critical",
+        },
+        "aggregation": (
+            "Function risk sums direct static review-signal weights. "
+            "Entry point risk sums the changed functions reachable from that surface."
+        ),
+    }
+
+
+def _entrypoint_row(e) -> dict:
+    kind = getattr(e, "kind", "api") or "api"
+    handler_file = getattr(e, "handler_file", "") or ""
+    handler_line = getattr(e, "handler_line", 0) or 0
+    row = {
+        "kind": kind,
+        "entrypoint_id": e.endpoint_id,
+        "surface": e.label or e.path,
+        "handler": getattr(e, "handler_name", "") or "",
+        "location": f"{handler_file}:{handler_line}" if handler_file else "",
+        "via": e.affected_functions,
+        "call_depth": e.max_depth,
+        "risk": e.aggregate_risk,
+        "risk_level": _risk_level(e.aggregate_risk),
+    }
+    if kind == "api":
+        row["method"] = e.method
+        row["path"] = e.path
+    elif e.path:
+        row["module"] = e.path
+    return row
+
+
+def _legacy_endpoint_row(e) -> dict:
+    return {
+        "method": e.method,
+        "path": e.path,
+        "via": e.affected_functions,
+        "call_depth": e.max_depth,
+        "risk": e.aggregate_risk,
+        "risk_level": _risk_level(e.aggregate_risk),
+    }
 
 
 def _is_test_path(fp: str) -> bool:
@@ -354,7 +419,7 @@ def _diff_non_python_files(diff_text: str) -> list[str]:
 
 def analyze_impact(builder, diff_text: str | None = None,
                    git_ref: str | None = None, include_tests=False) -> dict:
-    """Impact of a change: changed functions -> affected endpoints.
+    """Impact of a change: changed functions -> affected entrypoints.
 
     Uses flow_builder=None so no FlowGraph is ever built (risk comes from
     the standalone signal-based score).
@@ -383,7 +448,8 @@ def analyze_impact(builder, diff_text: str | None = None,
 
     changed = [
         {"function": f.qualified_name, "location": f"{f.file_path}:{f.line_start}",
-         "risk": f.risk_score, "change_type": f.change_type}
+         "risk": f.risk_score, "risk_level": _risk_level(f.risk_score),
+         "risk_factors": f.risk_factors, "change_type": f.change_type}
         for f in result.affected_functions
     ]
     affected_eps = result.affected_endpoints
@@ -393,13 +459,11 @@ def analyze_impact(builder, diff_text: str | None = None,
                 if not _is_test_path(getattr(e, "handler_file", "") or "")]
         hidden_test_eps = len(affected_eps) - len(kept)
         affected_eps = kept
-    endpoints = [
-        {"method": e.method, "path": e.path, "via": e.affected_functions,
-         "call_depth": e.max_depth, "risk": e.aggregate_risk}
-        for e in affected_eps
-    ]
+    entrypoints = [_entrypoint_row(e) for e in affected_eps]
+    endpoints = [_legacy_endpoint_row(e) for e in affected_eps]
     changed, cnote = capped(changed)
-    endpoints, enote = capped(endpoints)
+    entrypoints, enote = capped(entrypoints)
+    endpoints = endpoints[:len(entrypoints)]
 
     skipped = _diff_non_python_files(diff_text) if diff_text else []
     summary = result.summary
@@ -410,7 +474,10 @@ def analyze_impact(builder, diff_text: str | None = None,
                    f"{len(skipped)} non-Python file(s) changed.")
 
     out = {"summary": summary,
+           "language": "python",
+           "risk_scale": _risk_scale(),
            "changed_functions": changed,
+           "affected_entrypoints": entrypoints,
            "affected_endpoints": endpoints}
     if skipped:
         out["skipped_files"] = skipped
@@ -1064,7 +1131,7 @@ def simulate_state_transition(builder, function: str, state_schema: dict,
 
 
 def _effect_tags(func) -> list[str]:
-    """Compact per-node effect flags: db / http / raises."""
+    """Compact per-node effect/shape flags: db / http / raises / stub."""
     tags = []
     if any(c.is_db_call for c in func.calls):
         tags.append("db")
@@ -1072,7 +1139,19 @@ def _effect_tags(func) -> list[str]:
         tags.append("http")
     if any(c.is_raise for c in func.calls):
         tags.append("raises")
+    if not tags and (func.is_protocol or func.is_abstract or
+                     (not func.calls and not func.logic_steps)):
+        tags.append("stub")
     return tags
+
+
+def _effect_legend() -> dict:
+    return {
+        "db": "observed static database call",
+        "http": "observed static outbound HTTP/network call",
+        "raises": "observed raise path",
+        "stub": "empty/pass/ellipsis body; db/http effects are not inferred",
+    }
 
 
 def call_tree(builder, function: str, depth: int = 2, filter=None,
@@ -1081,8 +1160,8 @@ def call_tree(builder, function: str, depth: int = 2, filter=None,
 
     Complements ``who_calls`` (reverse). Instead of hopping node-by-node,
     get the whole downstream tree in one call, each node tagged with its
-    ``depth``, the ``via`` caller on the traced path, effect flags
-    (db/http/raises), and risk. Only project-internal functions are nodes;
+    ``depth``, the ``via`` caller on the traced path, effect/shape flags
+    (db/http/raises/stub), and risk. Only project-internal functions are nodes;
     library/builtin calls are surfaced as the parent's effect tags, not
     walked. Breadth-first with dedup by qualified name, so recursion/cycles
     terminate and no function appears twice.
@@ -1138,7 +1217,7 @@ def call_tree(builder, function: str, depth: int = 2, filter=None,
 
     nodes, note = capped(nodes)
     out = {"function": func.qualified_name, "location": _location(func),
-           "nodes": nodes}
+           "nodes": nodes, "effect_legend": _effect_legend()}
     if note:
         out["note"] = note
     return out

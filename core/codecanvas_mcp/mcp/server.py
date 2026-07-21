@@ -106,14 +106,17 @@ def what_does(function: str, project_path: str | None = None) -> dict:
 def analyze_impact(project_path: str | None = None, diff_text: str | None = None,
                    git_ref: str | None = None, include_tests: bool = False) -> dict:
     """Assess the blast radius of a change — given a diff or git ref, list the
-    changed functions and which API endpoints they affect. Reach for this when
+    changed functions and which entry points/public surfaces they affect
+    (HTTP routes, scripts, or public function fallbacks). Reach for this when
     reviewing a PR or before merging, to see what a set of edits could break
     downstream.
 
     Pass `diff_text` for an inline diff, or `git_ref` to diff against a ref.
-    Endpoints whose handler is under a test path are hidden by default
+    Entry points whose handler is under a test path are hidden by default
     (consistent with `list_entrypoints`); set `include_tests=True` to keep
-    them. Non-Python changed files are reported under `skipped_files`."""
+    them. Non-Python changed files are reported under `skipped_files`. Prefer
+    `affected_entrypoints`; `affected_endpoints` is a legacy compatibility
+    alias."""
     return _with_builder(
         project_path,
         lambda b: queries.analyze_impact(b, diff_text=diff_text, git_ref=git_ref,
@@ -226,7 +229,7 @@ def call_tree(function: str, project_path: str | None = None, depth: int = 2,
     opposite direction (upstream, who calls it).
 
     Each node carries its `depth`, the `via` caller on the traced path, effect
-    flags (db/http/raises), and risk. Only project-internal functions are
+    flags (db/http/raises/stub), and risk. Only project-internal functions are
     nodes; library calls show up as the parent's effect tags. Cycle-safe
     (dedup by name). Callees resolving into a test path are dropped by default
     (usually a misresolution); set `include_tests=True` to keep them. `filter`
