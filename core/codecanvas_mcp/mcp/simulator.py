@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import builtins
+from collections.abc import Mapping, MutableMapping
 import contextlib
 import copy
 import importlib
@@ -20,7 +21,16 @@ import subprocess
 import sys
 import time
 import traceback
-from typing import Any
+import types
+from typing import (
+    Annotated,
+    Any,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+    is_typeddict,
+)
 
 
 SUPPORTED_INVARIANTS = {
@@ -44,6 +54,35 @@ SUPPORTED_SCHEMA_KEYWORDS = {
     "minimum", "properties", "required", "type",
 }
 SCHEMA_METADATA_KEYWORDS = {"description", "title"}
+
+_MAPPING_ANNOTATION_NAMES = {
+    "Any",
+    "dict",
+    "Dict",
+    "Mapping",
+    "MutableMapping",
+    "TypedDict",
+}
+_NON_MAPPING_ANNOTATION_NAMES = {
+    "bool",
+    "bytes",
+    "bytearray",
+    "complex",
+    "float",
+    "frozenset",
+    "FrozenSet",
+    "int",
+    "Iterable",
+    "list",
+    "List",
+    "Sequence",
+    "set",
+    "Set",
+    "str",
+    "tuple",
+    "Tuple",
+}
+_NONE_ANNOTATION_NAMES = {"None", "NoneType"}
 
 
 class _DeadlineExceeded(BaseException):
@@ -424,6 +463,117 @@ def _load_target(request: dict):
     return target, module
 
 
+def _annotation_label(annotation: Any) -> str:
+    if isinstance(annotation, str):
+        return " ".join(annotation.strip().strip("\"'").split())
+    if annotation is inspect.Signature.empty:
+        return ""
+    if annotation is Any:
+        return "Any"
+    name = getattr(annotation, "__name__", None)
+    module = getattr(annotation, "__module__", "")
+    if name and module == "builtins":
+        return name
+    text = str(annotation).replace("typing.", "")
+    return " ".join(text.strip().split())
+
+
+def _annotation_text_status(text: str) -> bool | None:
+    normalized = (
+        text.strip()
+        .strip("\"'")
+        .replace("typing.", "")
+        .replace("collections.abc.", "")
+    )
+    if normalized.startswith("Annotated[") and normalized.endswith("]"):
+        normalized = normalized[len("Annotated["):-1].split(",", 1)[0].strip()
+    if "|" in normalized:
+        statuses = [
+            _annotation_text_status(part)
+            for part in normalized.split("|")
+            if part.strip() not in _NONE_ANNOTATION_NAMES
+        ]
+        if any(status is True for status in statuses):
+            return True
+        if statuses and all(status is False for status in statuses):
+            return False
+        return None
+    base = normalized.split("[", 1)[0].strip()
+    base_name = base.rsplit(".", 1)[-1]
+    if base_name in _MAPPING_ANNOTATION_NAMES:
+        return True
+    if base_name in _NONE_ANNOTATION_NAMES or base_name in _NON_MAPPING_ANNOTATION_NAMES:
+        return False
+    return None
+
+
+def _annotation_status(annotation: Any) -> bool | None:
+    if annotation is inspect.Signature.empty:
+        return True
+    if annotation is Any:
+        return True
+    if isinstance(annotation, str):
+        return _annotation_text_status(annotation)
+    if is_typeddict(annotation):
+        return True
+
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        args = get_args(annotation)
+        return _annotation_status(args[0]) if args else None
+    if origin in (Union, types.UnionType):
+        statuses = [
+            _annotation_status(arg)
+            for arg in get_args(annotation)
+            if arg is not type(None)
+        ]
+        if any(status is True for status in statuses):
+            return True
+        if statuses and all(status is False for status in statuses):
+            return False
+        return None
+    if origin is not None:
+        if origin in (dict, Mapping, MutableMapping):
+            return True
+        if inspect.isclass(origin):
+            try:
+                if issubclass(origin, Mapping):
+                    return True
+            except TypeError:
+                pass
+        text_status = _annotation_text_status(_annotation_label(annotation))
+        return text_status if text_status is not None else False
+
+    if inspect.isclass(annotation):
+        try:
+            if issubclass(annotation, Mapping):
+                return True
+        except TypeError:
+            pass
+        text_status = _annotation_text_status(_annotation_label(annotation))
+        return text_status if text_status is not None else False
+    return _annotation_text_status(_annotation_label(annotation))
+
+
+def _state_mapping_annotation_error(param_name: str, annotation: Any) -> str | None:
+    if annotation is None or annotation is inspect.Signature.empty:
+        return None
+    if _annotation_status(annotation) is False:
+        return (
+            f"param {param_name!r} is annotated "
+            f"{_annotation_label(annotation)!r}, not a state mapping."
+        )
+    return None
+
+
+def _state_param_annotation(target, parameter: inspect.Parameter) -> Any:
+    try:
+        hints = get_type_hints(target, include_extras=True)
+    except Exception:
+        return parameter.annotation
+    return hints.get(parameter.name, parameter.annotation)
+
+
 def _resolve_override_target(target: str, target_module):
     candidates = [target]
     if not target.startswith(target_module.__name__ + "."):
@@ -526,6 +676,11 @@ def _invoke(target, state: dict, state_var: str):
             f"state_var {state_var!r} must name a concrete state parameter in "
             f"{signature}."
         )
+    annotation_error = _state_mapping_annotation_error(
+        state_param.name, _state_param_annotation(target, state_param)
+    )
+    if annotation_error is not None:
+        raise TypeError(annotation_error)
 
     missing = [
         p.name for p in params

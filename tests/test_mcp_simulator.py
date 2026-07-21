@@ -405,6 +405,62 @@ def test_simulator_requires_state_var_to_match_parameter(tmp_path):
     assert "results" not in out
 
 
+def test_simulator_rejects_scalar_state_var_annotation(tmp_path):
+    builder = _builder(tmp_path, """
+        def get_current_user(token: str):
+            raise AssertionError("should not execute")
+    """)
+    out = queries.simulate_state_transition(
+        builder,
+        "get_current_user",
+        {"properties": {"token": {"type": "string"}}, "required": ["token"]},
+        cases=[{"token": "bearer token"}],
+        state_var="token",
+    )
+
+    assert out["error"] == "param 'token' is annotated 'str', not a state mapping."
+    assert out["annotation"] == "str"
+    assert "results" not in out
+
+
+def test_simulator_accepts_mapping_state_annotation(tmp_path):
+    builder = _builder(tmp_path, """
+        from typing import Mapping
+
+        def next_step(state: Mapping[str, object]):
+            return {
+                "messages": state["messages"],
+                "remaining_steps": state["remaining_steps"],
+            }
+    """)
+    out = queries.simulate_state_transition(
+        builder, "next_step", SCHEMA, cases=[{"messages": [], "remaining_steps": 1}]
+    )
+
+    assert out["passed"] == 1
+
+
+def test_simulator_accepts_typeddict_state_annotation(tmp_path):
+    builder = _builder(tmp_path, """
+        from typing import TypedDict
+
+        class AgentState(TypedDict):
+            messages: list
+            remaining_steps: int
+
+        def next_step(state: AgentState):
+            return {
+                "messages": state["messages"],
+                "remaining_steps": state["remaining_steps"],
+            }
+    """)
+    out = queries.simulate_state_transition(
+        builder, "next_step", SCHEMA, cases=[{"messages": [], "remaining_steps": 1}]
+    )
+
+    assert out["passed"] == 1
+
+
 def test_simulator_overrides_dependency_return_and_records_calls(tmp_path):
     builder = _builder(tmp_path, """
         def load_steps(user_id):

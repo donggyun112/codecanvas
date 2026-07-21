@@ -673,6 +673,17 @@ def _ast_state_param_names(node) -> list[str]:
     return names
 
 
+def _ast_state_param_annotation(node, state_var: str) -> str | None:
+    args = []
+    args.extend(getattr(node.args, "posonlyargs", []))
+    args.extend(node.args.args)
+    args.extend(node.args.kwonlyargs)
+    for arg in args:
+        if arg.arg == state_var and arg.annotation is not None:
+            return _expr_text(arg.annotation)
+    return None
+
+
 def _state_var_param_error(func, state_var: str, params: list[str]) -> dict | None:
     if state_var in params:
         return None
@@ -689,6 +700,27 @@ def _state_var_param_error(func, state_var: str, params: list[str]) -> dict | No
             "These state tools expect node-style functions such as "
             "def node(state). For ordinary functions, add a small wrapper or "
             "set state_var to the parameter that receives the whole state mapping."
+        ),
+    }
+
+
+def _state_var_annotation_error(func, state_var: str, annotation: str | None) -> dict | None:
+    from codecanvas_mcp.mcp.simulator import _state_mapping_annotation_error
+
+    message = _state_mapping_annotation_error(state_var, annotation)
+    if message is None:
+        return None
+    return {
+        "error": message,
+        "function": func.qualified_name,
+        "location": _location(func),
+        "state_var": state_var,
+        "annotation": annotation,
+        "hint": (
+            "These state tools expect node-style functions such as "
+            "def node(state: dict). Use dict, Mapping, MutableMapping, "
+            "or a TypedDict-like state annotation; for ordinary scalar "
+            "functions, add a small wrapper."
         ),
     }
 
@@ -1001,8 +1033,12 @@ def simulate_state_transition(builder, function: str, state_schema: dict,
         }
     node = builder.call_graph.get_ast_node(func.qualified_name)
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        param_err = _state_var_param_error(
-            func, state_var, _ast_state_param_names(node))
+        params = _ast_state_param_names(node)
+        param_err = _state_var_param_error(func, state_var, params)
+        if param_err is None:
+            param_err = _state_var_annotation_error(
+                func, state_var, _ast_state_param_annotation(node, state_var)
+            )
     else:
         param_err = _state_var_param_error(
             func, state_var, [p for p in func.params if not p.startswith("*")])
