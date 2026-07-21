@@ -279,9 +279,12 @@ def who_calls(builder, function: str, depth: int = 1, filter=None) -> dict:
     return out
 
 
-def _summarize_calls(func) -> dict:
-    db, http, raises, callees = [], [], [], []
+def _summarize_calls(cg, func) -> dict:
+    db, http, raises, callees, resolved_callees = [], [], [], [], []
     for c in func.calls:
+        resolved_callees.extend(
+            target.qualified_name for target in cg._resolve_call_targets(c, func)
+        )
         if c.is_raise:
             raises.append({"status": c.raise_status, "exception": c.func_name})
         elif c.is_db_call:
@@ -300,7 +303,15 @@ def _summarize_calls(func) -> dict:
             seen.add(name)
             uniq.append(name)
     uniq, _ = capped(uniq)
-    return {"db": db, "http": http, "raises": raises, "callees": uniq}
+    resolved_uniq = list(dict.fromkeys(resolved_callees))
+    resolved_uniq, _ = capped(resolved_uniq)
+    return {
+        "db": db,
+        "http": http,
+        "raises": raises,
+        "callees": uniq,
+        "resolved_callees": resolved_uniq,
+    }
 
 
 def what_does(builder, function: str) -> dict:
@@ -320,7 +331,7 @@ def what_does(builder, function: str) -> dict:
         "async": func.is_async,
         "signature": signature,
         "docstring": (func.docstring or "").strip(),
-        "calls": _summarize_calls(func),
+        "calls": _summarize_calls(builder.call_graph, func),
         "risk": ImpactAnalyzer._compute_function_risk(func),
     }
 
@@ -1022,21 +1033,21 @@ def call_tree(builder, function: str, depth: int = 2, filter=None,
         next_frontier = []
         for caller in frontier:
             for call in caller.calls:
-                callee = cg._resolve_call(call, caller)
-                if callee is None or callee.qualified_name in visited:
-                    continue
-                if not include_tests and _is_test_path(callee.file_path or ""):
-                    continue
-                visited.add(callee.qualified_name)
-                nodes.append({
-                    "function": callee.qualified_name,
-                    "location": _location(callee),
-                    "depth": hop,
-                    "via": caller.qualified_name,
-                    "effects": _effect_tags(callee),
-                    "risk": ImpactAnalyzer._compute_function_risk(callee),
-                })
-                next_frontier.append(callee)
+                for callee in cg._resolve_call_targets(call, caller):
+                    if callee.qualified_name in visited:
+                        continue
+                    if not include_tests and _is_test_path(callee.file_path or ""):
+                        continue
+                    visited.add(callee.qualified_name)
+                    nodes.append({
+                        "function": callee.qualified_name,
+                        "location": _location(callee),
+                        "depth": hop,
+                        "via": caller.qualified_name,
+                        "effects": _effect_tags(callee),
+                        "risk": ImpactAnalyzer._compute_function_risk(callee),
+                    })
+                    next_frontier.append(callee)
         if not next_frontier:
             break
         frontier = next_frontier

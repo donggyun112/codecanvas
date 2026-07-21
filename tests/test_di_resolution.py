@@ -53,6 +53,43 @@ def test_unique_impl_of_helper(tmp_path):
     assert cg._unique_impl_of("Nonexistent") is None       # unknown
 
 
+def test_unique_structural_protocol_impl_requires_full_shape(tmp_path):
+    cg = _build(tmp_path, '''
+from typing import Protocol
+
+class BackendPort(Protocol):
+    def run(self): ...
+    def stop(self): ...
+
+class PartialBackend:
+    def run(self): return "partial"
+
+class FakeBackend:
+    def run(self): return "run"
+    def stop(self): return "stop"
+''')
+    assert cg._unique_impl_of("BackendPort") == "FakeBackend"
+
+
+def test_multiple_structural_protocol_impls_remain_ambiguous(tmp_path):
+    cg = _build(tmp_path, '''
+from typing import Protocol
+
+class BackendPort(Protocol):
+    def run(self): ...
+    def stop(self): ...
+
+class FakeBackend:
+    def run(self): return "fake"
+    def stop(self): return "fake"
+
+class RealBackend:
+    def run(self): return "real"
+    def stop(self): return "real"
+''')
+    assert cg._unique_impl_of("BackendPort") is None
+
+
 SINGLE = '''
 from typing import Protocol
 

@@ -494,6 +494,172 @@ def test_call_tree_tags_effects(tmp_path):
     assert "http" in leaf["effects"], leaf
 
 
+DI_CALLTREE_APP = {
+    "app.py": """
+        from typing import Protocol
+        from fastapi import Depends, FastAPI
+
+        app = FastAPI()
+
+        class SandboxBackend(Protocol):
+            def create_session(self): ...
+            def exec(self): ...
+            def read_file(self): ...
+            def write_file(self): ...
+            def stat(self): ...
+            def readdir(self): ...
+            def persist(self): ...
+            def hydrate(self): ...
+
+        class FakeBackend:
+            def create_session(self): return "session"
+            def exec(self): return "exec"
+            def read_file(self): return "read"
+            def write_file(self): return "write"
+            def stat(self): return "stat"
+            def readdir(self): return "readdir"
+            def persist(self): return "persist"
+            def hydrate(self): return "hydrate"
+
+        def get_backend() -> SandboxBackend:
+            return FakeBackend()
+
+        @app.post("/session")
+        def create_session(backend=Depends(get_backend)):
+            return backend.create_session()
+
+        @app.post("/exec")
+        def exec_cmd(backend=Depends(get_backend)):
+            return backend.exec()
+
+        @app.get("/fs")
+        def fs_get(backend=Depends(get_backend)):
+            return backend.read_file()
+
+        @app.put("/fs")
+        def fs_put(backend=Depends(get_backend)):
+            return backend.write_file()
+
+        @app.get("/stat")
+        def stat_path(backend=Depends(get_backend)):
+            return backend.stat()
+
+        @app.get("/readdir")
+        def readdir_path(backend=Depends(get_backend)):
+            return backend.readdir()
+
+        @app.post("/persist")
+        def persist(backend=Depends(get_backend)):
+            return backend.persist()
+
+        @app.post("/hydrate")
+        def hydrate(backend=Depends(get_backend)):
+            return backend.hydrate()
+    """,
+}
+
+
+def test_call_tree_includes_di_runtime_targets_for_handlers(tmp_path):
+    builder = _tmp_builder(tmp_path, DI_CALLTREE_APP)
+    expected = {
+        "create_session": "FakeBackend.create_session",
+        "exec_cmd": "FakeBackend.exec",
+        "fs_get": "FakeBackend.read_file",
+        "fs_put": "FakeBackend.write_file",
+        "stat_path": "FakeBackend.stat",
+        "readdir_path": "FakeBackend.readdir",
+        "persist": "FakeBackend.persist",
+        "hydrate": "FakeBackend.hydrate",
+    }
+
+    for handler, implementation in expected.items():
+        out = queries.call_tree(builder, f"app.{handler}", depth=1)
+        functions = {node["function"] for node in out["nodes"]}
+        assert any(name.endswith(implementation) for name in functions), out
+
+
+def test_build_flow_includes_di_runtime_target(tmp_path):
+    builder = _tmp_builder(tmp_path, DI_CALLTREE_APP)
+    nodes, _edges = builder.call_graph.build_flow_from(
+        "exec_cmd", str(tmp_path / "app.py"), max_depth=1,
+    )
+    assert any(name.endswith("FakeBackend.exec") for name in nodes), nodes
+
+
+FACTORY_DI_APP = {
+    "app.py": """
+        from typing import Protocol
+        from fastapi import FastAPI
+
+        class SandboxBackend(Protocol):
+            def exec(self): ...
+            def read_file(self): ...
+            def write_file(self): ...
+            def persist(self): ...
+            def hydrate(self): ...
+
+        class FakeBackend:
+            def exec(self): return "exec"
+            def read_file(self): return "read"
+            def write_file(self): return "write"
+            def persist(self): return "persist"
+            def hydrate(self): return "hydrate"
+
+        def create_app(backend: SandboxBackend):
+            app = FastAPI()
+
+            @app.post("/exec")
+            def exec_cmd(): return backend.exec()
+
+            @app.get("/fs")
+            def fs_get(): return backend.read_file()
+
+            @app.put("/fs")
+            def fs_put(): return backend.write_file()
+
+            @app.post("/persist")
+            def persist(): return backend.persist()
+
+            @app.post("/hydrate")
+            def hydrate(): return backend.hydrate()
+
+            return app
+
+        def build_backend():
+            return FakeBackend()
+
+        app = create_app(build_backend())
+    """,
+}
+
+
+def test_app_factory_closure_resolves_contract_and_runtime_targets(tmp_path):
+    builder = _tmp_builder(tmp_path, FACTORY_DI_APP)
+    expected = {
+        "exec_cmd": "exec",
+        "fs_get": "read_file",
+        "fs_put": "write_file",
+        "persist": "persist",
+        "hydrate": "hydrate",
+    }
+
+    for handler, method in expected.items():
+        out = queries.call_tree(builder, f"app.create_app.{handler}", depth=1)
+        functions = {node["function"] for node in out["nodes"]}
+        assert any(name.endswith(f"FakeBackend.{method}") for name in functions), out
+        assert any(name.endswith(f"SandboxBackend.{method}") for name in functions), out
+
+    for target in ("app.FakeBackend.exec", "app.SandboxBackend.exec"):
+        out = queries.who_calls(builder, target)
+        callers = {node["caller"] for node in out["callers"]}
+        assert "app.create_app.exec_cmd" in callers, out
+
+    summary = queries.what_does(builder, "app.create_app.exec_cmd")
+    resolved = set(summary["calls"]["resolved_callees"])
+    assert "app.FakeBackend.exec" in resolved, summary
+    assert "app.SandboxBackend.exec" in resolved, summary
+
+
 TESTNODE_APP = {
     "svc.py": """
         def handler():

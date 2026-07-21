@@ -630,6 +630,7 @@ class CallGraphBuilder:
         self._file_asts: dict[str, ast.Module] = {}
         self._module_map: dict[str, str] = {}          # file_path -> module name
         self._class_attr_types: dict[str, dict[str, str]] = {}
+        self._class_public_method_cache: dict[str, frozenset[str]] = {}
         self._module_global_types: dict[str, dict[str, str]] = {}
         self._module_imports: dict[str, dict[str, str]] = {}
         self._dependency_overrides: dict[str, set[str]] = {}
@@ -676,6 +677,7 @@ class CallGraphBuilder:
         self._infer_dependency_overrides()
         self._infer_dependency_param_types()
         self._infer_param_types_from_callers()
+        self._infer_param_types_from_module_calls()
         self._enrich_logic_step_calls()
         self._analyzed = True
 
@@ -1482,77 +1484,78 @@ class CallGraphBuilder:
                     ))
                     continue
 
-                target_func = self._resolve_call(call, func)
+                target_funcs = self._resolve_call_targets(call, func)
 
-                if target_func:
-                    # Skip schema/DTO constructors — data object assembly is not
-                    # an architectural flow step (e.g. User(...), UserIdentity(...)).
-                    if target_func.definition_type == "schema":
-                        continue
-                    # Nested functions of the current function: include them
-                    # as callees (they are helpers called from within the scope).
-                    # The visibility layer handles noise filtering.
-                    # Skip class constructors used purely as return value wrappers.
-                    # The L4 RETURN node already captures what is being returned;
-                    # a separate L3 node for the constructor adds visual noise.
-                    if call.in_return and target_func.definition_type == "class":
-                        continue
-                    # Definite connection
-                    child_id = traverse(target_func, depth + 1, node.id)
-                    edge_counter += 1
-                    edge_type = EdgeType.CALLS
-                    if call.is_db_call:
-                        edge_type = EdgeType.QUERIES
-                    elif call.is_http_call:
-                        edge_type = EdgeType.REQUESTS
-
-                    edge_meta = self._call_edge_metadata(call, target_func)
-                    return_node_id = None
-                    if call.in_return:
-                        edge_meta["in_return"] = True
-                        return_node_id = self._find_matching_return_node(
-                            call.line, node.id, nodes,
-                        )
-                        if return_node_id:
-                            edge_meta["return_node_id"] = return_node_id
-
-                    label = self._call_edge_label(call, target_func)
-                    evidence = [Evidence(
-                        source="static_analysis",
-                        file_path=func.file_path,
-                        line_number=call.line,
-                        detail=f"Call to {call.func_name} at line {call.line}",
-                    )]
-
-                    # L3→L3 edge (always — call graph contract)
-                    edges.append(FlowEdge(
-                        id=f"e{edge_counter}",
-                        source_id=node.id,
-                        target_id=child_id,
-                        edge_type=edge_type,
-                        label=label,
-                        confidence=Confidence.DEFINITE,
-                        evidence=evidence,
-                        metadata=dict(edge_meta),
-                        condition=call.branch_condition,
-                        is_error_path=call.in_branch in ("except",),
-                    ))
-
-                    # L4→L3 edge (return calls only — detailed view)
-                    if call.in_return and return_node_id:
+                if target_funcs:
+                    for target_func in target_funcs:
+                        # Skip schema/DTO constructors — data object assembly is not
+                        # an architectural flow step (e.g. User(...), UserIdentity(...)).
+                        if target_func.definition_type == "schema":
+                            continue
+                        # Nested functions of the current function: include them
+                        # as callees (they are helpers called from within the scope).
+                        # The visibility layer handles noise filtering.
+                        # Skip class constructors used purely as return value wrappers.
+                        # The L4 RETURN node already captures what is being returned;
+                        # a separate L3 node for the constructor adds visual noise.
+                        if call.in_return and target_func.definition_type == "class":
+                            continue
+                        # Definite connection
+                        child_id = traverse(target_func, depth + 1, node.id)
                         edge_counter += 1
+                        edge_type = EdgeType.CALLS
+                        if call.is_db_call:
+                            edge_type = EdgeType.QUERIES
+                        elif call.is_http_call:
+                            edge_type = EdgeType.REQUESTS
+
+                        edge_meta = self._call_edge_metadata(call, target_func)
+                        return_node_id = None
+                        if call.in_return:
+                            edge_meta["in_return"] = True
+                            return_node_id = self._find_matching_return_node(
+                                call.line, node.id, nodes,
+                            )
+                            if return_node_id:
+                                edge_meta["return_node_id"] = return_node_id
+
+                        label = self._call_edge_label(call, target_func)
+                        evidence = [Evidence(
+                            source="static_analysis",
+                            file_path=func.file_path,
+                            line_number=call.line,
+                            detail=f"Call to {call.func_name} at line {call.line}",
+                        )]
+
+                        # L3→L3 edge (always — call graph contract)
                         edges.append(FlowEdge(
                             id=f"e{edge_counter}",
-                            source_id=return_node_id,
+                            source_id=node.id,
                             target_id=child_id,
                             edge_type=edge_type,
                             label=label,
                             confidence=Confidence.DEFINITE,
                             evidence=evidence,
-                            metadata={**edge_meta, "return_detail_edge": True},
+                            metadata=dict(edge_meta),
                             condition=call.branch_condition,
                             is_error_path=call.in_branch in ("except",),
                         ))
+
+                        # L4→L3 edge (return calls only — detailed view)
+                        if call.in_return and return_node_id:
+                            edge_counter += 1
+                            edges.append(FlowEdge(
+                                id=f"e{edge_counter}",
+                                source_id=return_node_id,
+                                target_id=child_id,
+                                edge_type=edge_type,
+                                label=label,
+                                confidence=Confidence.DEFINITE,
+                                evidence=evidence,
+                                metadata={**edge_meta, "return_detail_edge": True},
+                                condition=call.branch_condition,
+                                is_error_path=call.in_branch in ("except",),
+                            ))
                 else:
                     # Only create stub nodes for semantically meaningful unresolved
                     # calls (database / HTTP).  Plain external library calls like
@@ -1919,12 +1922,9 @@ class CallGraphBuilder:
             if caller.definition_type == "class":
                 continue
             for call in caller.calls:
-                target = self._resolve_call(call, caller)
-                runtime_target = self._resolve_runtime_attribute_call(call, caller)
                 targets = {
                     candidate.qualified_name: candidate
-                    for candidate in (target, runtime_target)
-                    if candidate is not None
+                    for candidate in self._resolve_call_targets(call, caller)
                 }
                 if not targets:
                     continue
@@ -1969,7 +1969,19 @@ class CallGraphBuilder:
         """Resolve the concrete provider type without replacing contract edges."""
         if not call.is_attribute_call or not call.owner_parts:
             return None
-        runtime_type = caller.runtime_types.get(call.owner_parts[0])
+        root = call.owner_parts[0]
+        runtime_type = caller.runtime_types.get(root)
+        if not runtime_type and root not in caller.bound_names:
+            runtime_type = self._closure_type(caller, root, runtime=True)
+        if not runtime_type:
+            declared_type = caller.local_types.get(root)
+            if not declared_type and root not in caller.bound_names:
+                declared_type = self._closure_type(caller, root, runtime=False)
+            if declared_type:
+                runtime_type = self._unique_impl_of(
+                    self._normalize_type_name(declared_type),
+                    caller,
+                )
         if not runtime_type:
             return None
         method_name = call.func_name.split(".")[-1]
@@ -1980,6 +1992,56 @@ class CallGraphBuilder:
         if not runtime_type:
             return None
         return self._resolve_method_on_class(runtime_type, method_name, caller)
+
+    def _resolve_call_targets(
+        self,
+        call: CallSite,
+        caller: FunctionDef,
+    ) -> list[FunctionDef]:
+        """Resolve every static and DI-runtime target for a call site."""
+        targets: list[FunctionDef] = []
+        seen: set[str] = set()
+        for target in (
+            self._resolve_call(call, caller),
+            self._resolve_runtime_attribute_call(call, caller),
+        ):
+            if target is None or target.qualified_name in seen:
+                continue
+            seen.add(target.qualified_name)
+            targets.append(target)
+        return targets
+
+    def _enclosing_function(self, func: FunctionDef) -> FunctionDef | None:
+        """Return the nearest lexical function enclosing ``func``."""
+        parts = func.qualified_name.split(".")
+        for end in range(len(parts) - 1, 0, -1):
+            candidate = self._functions.get(".".join(parts[:end]))
+            if candidate is None or candidate.definition_type == "class":
+                continue
+            if candidate.file_path != func.file_path:
+                continue
+            if candidate.line_start <= func.line_start <= candidate.line_end:
+                return candidate
+        return None
+
+    def _closure_type(
+        self,
+        func: FunctionDef,
+        name: str,
+        *,
+        runtime: bool,
+    ) -> str | None:
+        """Resolve a free variable's type through enclosing function scopes."""
+        current = self._enclosing_function(func)
+        while current is not None:
+            types = current.runtime_types if runtime else current.local_types
+            inferred = types.get(name)
+            if inferred:
+                return inferred
+            if name in current.bound_names:
+                return None
+            current = self._enclosing_function(current)
+        return None
 
     def _resolve_reference(self, ref: ReferenceSite, caller: FunctionDef) -> FunctionDef | None:
         """Resolve a function reference used as a value, not a direct call."""
@@ -2071,7 +2133,7 @@ class CallGraphBuilder:
         interface type. Falls back to the declared type when there is no
         single implementation. DI redirects are tagged 'inferred'.
         """
-        impl = self._unique_impl_of(type_name)
+        impl = self._unique_impl_of(type_name, caller)
         if impl:
             result = self._resolve_method_on_class(impl, method_name, caller)
             if result:
@@ -2131,6 +2193,8 @@ class CallGraphBuilder:
         # --- Local variable / parameter type resolution ---
         attr_parts = owner_parts[1:]
         local_type = caller.local_types.get(root)
+        if local_type is None and root not in caller.bound_names:
+            local_type = self._closure_type(caller, root, runtime=False)
         if local_type is None and root not in caller.bound_names:
             local_type = self._module_global_types.get(caller.file_path, {}).get(root)
         if local_type is None and root not in caller.bound_names:
@@ -2398,7 +2462,27 @@ class CallGraphBuilder:
         # Too ambiguous — don't guess
         return None
 
-    def _unique_impl_of(self, type_name: str) -> str | None:
+    def _class_public_methods(self, class_def: FunctionDef) -> frozenset[str]:
+        """Return public methods available on a class, including its bases."""
+        cached = self._class_public_method_cache.get(class_def.qualified_name)
+        if cached is not None:
+            return cached
+        class_names = set(self._get_mro(class_def.name))
+        methods = frozenset(
+            func.name
+            for func in self._functions.values()
+            if func.class_name in class_names
+            and func.definition_type not in {"class", "schema"}
+            and not func.name.startswith("_")
+        )
+        self._class_public_method_cache[class_def.qualified_name] = methods
+        return methods
+
+    def _unique_impl_of(
+        self,
+        type_name: str,
+        caller: FunctionDef | None = None,
+    ) -> str | None:
         """Return the single concrete implementation's class name for an
         interface (Protocol/ABC), or None if the type is concrete or has
         zero/multiple implementations.
@@ -2428,6 +2512,30 @@ class CallGraphBuilder:
         ]
         if len(implementations) == 1:
             return implementations[0].name
+        if implementations:
+            return None
+
+        # Python Protocols are commonly implemented structurally without an
+        # explicit base class. Match the complete public interface shape and
+        # only accept a single concrete class, never an arbitrary per-method
+        # duck-typing guess.
+        required_methods = self._class_public_methods(type_def)
+        if not required_methods:
+            return None
+        structural = [
+            func for func in self._functions.values()
+            if func.definition_type == "class"
+            and not func.is_protocol
+            and not func.is_abstract
+            and self._normalize_type_name(func.name) != simple_name
+            and required_methods <= self._class_public_methods(func)
+        ]
+        if caller is not None and not _is_test_path(caller.file_path or ""):
+            structural = [
+                func for func in structural if not _is_test_path(func.file_path or "")
+            ]
+        if len(structural) == 1:
+            return structural[0].name
         return None
 
     def _resolve_concrete_type(
@@ -2964,19 +3072,11 @@ class CallGraphBuilder:
         for func in self._functions.values():
             if not func.params:
                 continue
-            # Check which params lack type info
-            untyped_params = [
-                (i, p) for i, p in enumerate(func.params)
-                if p not in func.local_types
-            ]
-            if not untyped_params:
-                continue
-
             callers = call_map.get(func.qualified_name, [])
             if not callers:
                 continue
 
-            for param_idx, param_name in untyped_params:
+            for param_idx, param_name in enumerate(func.params):
                 # Collect types passed at this argument position
                 inferred_types: set[str] = set()
                 for caller_func, call_site in callers:
@@ -2994,7 +3094,10 @@ class CallGraphBuilder:
                             arg_node = node.args[effective_idx]
                             # Try to infer type of the argument
                             if isinstance(arg_node, ast.Name):
-                                arg_type = caller_func.local_types.get(arg_node.id)
+                                arg_type = (
+                                    caller_func.runtime_types.get(arg_node.id)
+                                    or caller_func.local_types.get(arg_node.id)
+                                )
                                 if arg_type:
                                     inferred_types.add(arg_type)
                             elif isinstance(arg_node, ast.Call):
@@ -3007,7 +3110,66 @@ class CallGraphBuilder:
 
                 # If all callers agree on the same type, propagate
                 if len(inferred_types) == 1:
-                    func.local_types[param_name] = inferred_types.pop()
+                    inferred = inferred_types.pop()
+                    declared = func.local_types.get(param_name)
+                    if declared is None:
+                        func.local_types[param_name] = inferred
+                    elif self._normalize_type_name(declared) != inferred:
+                        func.runtime_types[param_name] = inferred
+
+    def _infer_param_types_from_module_calls(self) -> None:
+        """Infer function parameter runtime types from module-level calls."""
+        observations: dict[tuple[str, str], set[str]] = {}
+
+        class ModuleCallVisitor(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.calls: list[ast.Call] = []
+
+            def visit_Call(self, node: ast.Call) -> None:
+                self.calls.append(node)
+                self.generic_visit(node)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                return
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                return
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                return
+
+        for file_path, tree in self._file_asts.items():
+            visitor = ModuleCallVisitor()
+            for stmt in tree.body:
+                visitor.visit(stmt)
+            for node in visitor.calls:
+                target = self._resolve_provider_reference(node.func, file_path)
+                if target is None or target.definition_type == "class":
+                    continue
+                for index, param_name in enumerate(target.params):
+                    if index >= len(node.args):
+                        break
+                    arg = node.args[index]
+                    inferred = self._infer_assigned_type(arg)
+                    if inferred is None and isinstance(arg, ast.Name):
+                        inferred = self._module_global_types.get(file_path, {}).get(arg.id)
+                    if inferred:
+                        observations.setdefault(
+                            (target.qualified_name, param_name), set(),
+                        ).add(inferred)
+
+        for (qualified_name, param_name), inferred_types in observations.items():
+            if len(inferred_types) != 1:
+                continue
+            func = self._functions.get(qualified_name)
+            if func is None:
+                continue
+            inferred = next(iter(inferred_types))
+            declared = func.local_types.get(param_name)
+            if declared is None:
+                func.local_types[param_name] = inferred
+            elif self._normalize_type_name(declared) != inferred:
+                func.runtime_types[param_name] = inferred
 
     def _enrich_logic_step_calls(self) -> None:
         """Attach resolved call targets to each summarized logic step."""
