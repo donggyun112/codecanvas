@@ -78,7 +78,12 @@ def resolve_project(
         resolved = str(Path(project_path).resolve())
         candidates = _candidate_python_roots(Path(resolved))
         narrower = [candidate for candidate in candidates if candidate != resolved]
-        if not allow_ambiguous and (len(candidates) > 1 or narrower):
+        explicit_root_is_candidate = resolved in candidates
+        if (
+            not allow_ambiguous
+            and not explicit_root_is_candidate
+            and (len(candidates) > 1 or narrower)
+        ):
             raise AmbiguousProjectRootError(resolved, candidates)
         _default_project = resolved
         return _default_project
@@ -118,6 +123,14 @@ def project_status(project_path: str) -> dict:
     candidates = set(_candidate_python_roots(root))
     cache_path = root / CACHE_DIR_NAME / CACHE_FILE_NAME
     recommendations = sorted(candidates, key=lambda p: (p.count("/"), p))
+    explicit_root_is_candidate = str(root) in candidates
+    requires_root_selection = (
+        not explicit_root_is_candidate
+        and (
+            len(recommendations) > 1
+            or any(candidate != str(root) for candidate in recommendations)
+        )
+    )
 
     from codecanvas_mcp.mcp.interpreter import resolve_worker_interpreter
 
@@ -141,10 +154,7 @@ def project_status(project_path: str) -> dict:
             "exists": cache_path.is_file(),
         },
         "candidate_roots": recommendations,
-        "requires_root_selection": (
-            len(recommendations) > 1
-            or any(candidate != str(root) for candidate in recommendations)
-        ),
+        "requires_root_selection": requires_root_selection,
         "recommended_root": (
             str(root) if str(root) in candidates
             else recommendations[0] if recommendations
@@ -152,10 +162,7 @@ def project_status(project_path: str) -> dict:
         ),
         "note": (
             "Analysis is blocked for other tools until an explicit candidate root is selected."
-            if (
-                len(recommendations) > 1
-                or any(candidate != str(root) for candidate in recommendations)
-            )
+            if requires_root_selection
             else None
         ),
     }

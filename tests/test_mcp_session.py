@@ -91,6 +91,30 @@ def test_resolve_project_blocks_broad_root_with_nested_python_root(tmp_path):
     assert session._default_project is None
 
 
+def test_resolve_project_allows_explicit_root_with_nested_python_root(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "product"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    nested = tmp_path / "telemetry"
+    nested.mkdir()
+    (nested / "pyproject.toml").write_text(
+        '[project]\nname = "telemetry"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+
+    assert resolve_project(str(tmp_path)) == str(tmp_path.resolve())
+
+    out = session.project_status(str(tmp_path))
+    assert out["requires_root_selection"] is False
+    assert out["recommended_root"] == str(tmp_path.resolve())
+    assert out["note"] is None
+    assert out["candidate_roots"] == [
+        str(tmp_path.resolve()),
+        str(nested.resolve()),
+    ]
+
+
 def test_project_status_allows_inspecting_ambiguous_root(tmp_path):
     from codecanvas_mcp.mcp import server
 

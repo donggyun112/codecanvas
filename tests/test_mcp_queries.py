@@ -1109,3 +1109,58 @@ def test_verify_claim_accepts_root_chat_mode_reachability(tmp_path):
     assert out["verdict"] == "true"
     assert out["counterexample"] is None
     assert out["paths"][0]["edges"][0]["confidence"] in {"definite", "high"}
+
+
+def test_verify_claim_resolves_cls_class_bound_call_as_definite(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "runner.py": """
+            class Runner:
+                @classmethod
+                def start(cls):
+                    return cls.finish()
+
+                @staticmethod
+                def finish():
+                    return None
+        """,
+    })
+
+    out = queries.verify_claim(
+        builder,
+        "Runner.start reaches Runner.finish",
+    )
+
+    assert out["verdict"] == "true"
+    assert out["witness_path"]["edges"][0]["confidence"] == "definite"
+    assert out["evidence_grade"] == "definite"
+    assert out["safe_to_summarize"] is True
+
+
+def test_verify_claim_marks_inferred_only_witness_uncertain(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "caller.py": """
+            def start():
+                shared()
+        """,
+        "target.py": """
+            def target():
+                return None
+        """,
+        "one.py": """
+            def shared():
+                target()
+        """,
+        "two.py": """
+            def shared():
+                return None
+        """,
+    })
+
+    out = queries.verify_claim(builder, "start reaches target")
+
+    assert out["verdict"] == "uncertain"
+    assert out["evidence_grade"] == "inferred"
+    assert out["inferred_edge_count"] == 1
+    assert out["ambiguous_calls"]
+    assert out["safe_to_summarize"] is False
+    assert "unconditional claims" in out["response_guidance"]

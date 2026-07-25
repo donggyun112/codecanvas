@@ -1187,6 +1187,44 @@ def _claim_paths(builder, sources, target, max_depth: int = 6) -> list[dict]:
     return paths
 
 
+def _claim_path_metadata(path: dict | None) -> dict:
+    edges = path["edges"] if path is not None else []
+    inferred_edges = [
+        edge for edge in edges if edge["confidence"] == "inferred"
+    ]
+    grade = (
+        "inferred" if inferred_edges
+        else "high" if any(edge["confidence"] == "high" for edge in edges)
+        else "definite"
+    )
+    ambiguous_calls = [
+        {
+            "caller": edge["caller"],
+            "callee": edge["callee"],
+            "location": edge["at"],
+        }
+        for edge in inferred_edges
+    ]
+    metadata = {
+        "evidence_grade": grade,
+        "inferred_edge_count": len(inferred_edges),
+        "ambiguous_calls": ambiguous_calls,
+        "truncated": False,
+        "safe_to_summarize": not inferred_edges,
+    }
+    if inferred_edges:
+        metadata["response_guidance"] = (
+            "Do not turn inferred call edges into unconditional claims. "
+            "Name every ambiguous candidate or return an uncertain verdict."
+        )
+    return metadata
+
+
+def _claim_path_rank(path: dict) -> tuple[int, int]:
+    grade = _claim_path_metadata(path)["evidence_grade"]
+    return ({"definite": 2, "high": 1, "inferred": 0}[grade], -len(path["edges"]))
+
+
 def _flow_qualification(flow: list[dict], mode: str | None) -> str | None:
     if mode is None:
         return None
@@ -1274,6 +1312,16 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
     else:
         verdict = "true"
 
+    witness_candidates = viable if viable else evaluated
+    witness_path = (
+        max(witness_candidates, key=_claim_path_rank)
+        if witness_candidates
+        else None
+    )
+    alternative_paths = [
+        path for path in evaluated if path is not witness_path
+    ]
+
     evidence_sources = sources
     if paths:
         path_sources = {path["source"] for path in paths}
@@ -1311,10 +1359,13 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
         "counterexample": counterexamples[0] if counterexamples else None,
         "qualification": qualification,
         "paths": evaluated,
+        "witness_path": witness_path,
+        "alternative_paths": alternative_paths,
         "evidence": {
             "function_flow": flows,
             "reaching_conditions": conditions,
         },
+        **_claim_path_metadata(witness_path),
     }
 
 

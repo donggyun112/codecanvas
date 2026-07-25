@@ -91,3 +91,40 @@ class Runner:
     assert out["analysis_root"] == str(tmp_path.resolve())
     assert out["evidence_grade"] in {"definite", "high"}
     assert out["safe_to_summarize"] is True
+
+
+def test_verify_claim_metadata_uses_best_witness_path(tmp_path):
+    (tmp_path / "caller.py").write_text(
+        "def start():\n    target()\n    shared()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "target.py").write_text(
+        "def target():\n    return None\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "one.py").write_text(
+        "def shared():\n    target()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "two.py").write_text(
+        "def shared():\n    return None\n",
+        encoding="utf-8",
+    )
+
+    out = server.verify_claim(
+        "start reaches target",
+        str(tmp_path),
+    )
+
+    assert out["verdict"] == "true"
+    assert out["witness_path"]["edges"][0]["confidence"] == "definite"
+    assert any(
+        edge["confidence"] == "inferred"
+        for path in out["alternative_paths"]
+        for edge in path["edges"]
+    )
+    assert out["evidence_grade"] == "definite"
+    assert out["inferred_edge_count"] == 0
+    assert out["ambiguous_calls"] == []
+    assert out["safe_to_summarize"] is True
+    assert "response_guidance" not in out

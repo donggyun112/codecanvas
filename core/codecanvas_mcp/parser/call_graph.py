@@ -2194,6 +2194,28 @@ class CallGraphBuilder:
 
         root = owner_parts[0]
 
+        # --- cls.method() on a classmethod receiver ---
+        caller_is_classmethod = any(
+            decorator.rsplit(".", 1)[-1] == "classmethod"
+            for decorator in caller.decorators
+        )
+        if (
+            root == "cls"
+            and caller.class_name
+            and len(owner_parts) == 1
+            and caller_is_classmethod
+        ):
+            result = self._resolve_method_on_class(
+                caller.class_name, method_name, caller,
+            )
+            target_is_class_bound = result is not None and any(
+                decorator.rsplit(".", 1)[-1] in {"classmethod", "staticmethod"}
+                for decorator in result.decorators
+            )
+            if target_is_class_bound:
+                self._last_resolve_confidence = "definite"
+                return result
+
         # --- self.x.y.method() chain resolution ---
         if root == "self" and caller.class_name:
             if len(owner_parts) == 1:

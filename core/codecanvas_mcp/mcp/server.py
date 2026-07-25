@@ -70,7 +70,9 @@ def _evidence_metadata(payload: dict) -> dict:
             for nested in value:
                 walk(nested)
 
-    walk(payload)
+    # Claim responses select their strongest viable witness. Alternative paths
+    # remain visible for audit, but must not downgrade the selected evidence.
+    walk(payload.get("witness_path", payload))
     inferred_count = confidences.count("inferred")
     grade = (
         "inferred" if inferred_count
