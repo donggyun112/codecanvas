@@ -93,6 +93,22 @@ class Runner:
     assert out["safe_to_summarize"] is True
 
 
+def test_verify_claim_tool_rejects_unknown_prefix_as_unsafe(tmp_path):
+    (tmp_path / "app.py").write_text(
+        "def run():\n    return target()\n\ndef target():\n    return None\n",
+        encoding="utf-8",
+    )
+
+    out = server.verify_claim(
+        "priority=urgent run reaches target",
+        str(tmp_path),
+    )
+
+    assert "error" in out
+    assert out["unsupported_prefix"] == "priority=urgent"
+    assert out["safe_to_summarize"] is False
+
+
 def test_verify_claim_metadata_uses_best_witness_path(tmp_path):
     (tmp_path / "caller.py").write_text(
         "def start():\n    target()\n    shared()\n",

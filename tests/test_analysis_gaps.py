@@ -94,6 +94,22 @@ class TestClaimConditionQualifiers:
             q["subject"] == "shutdown" for q in out["unsupported_qualifiers"]
         ), out
 
+    def test_non_boolean_assignment_prefix_is_an_input_error(self, tmp_path):
+        b = _builder(tmp_path, GUARDED)
+        out = queries.verify_claim(
+            b, "priority=urgent run reaches _call_api",
+        )
+        assert "error" in out, out
+        assert out["safe_to_summarize"] is False, out
+        assert out["unsupported_prefix"] == "priority=urgent"
+
+    def test_unknown_bare_prefix_is_an_input_error(self, tmp_path):
+        b = _builder(tmp_path, GUARDED)
+        out = queries.verify_claim(b, "banana run reaches _call_api")
+        assert "error" in out, out
+        assert out["safe_to_summarize"] is False, out
+        assert out["unsupported_prefix"] == "banana"
+
     def test_unqualified_claim_is_unaffected(self, tmp_path):
         b = _builder(tmp_path, GUARDED)
         out = queries.verify_claim(b, "run reaches _call_api")
@@ -232,6 +248,18 @@ class TestSemanticSearchQuality:
         b = _builder(tmp_path, SEMANTIC_APP)
         out = queries.find_symbols(b, "concurrency limiter", search_mode="semantic")
         assert "format_report" not in [row["name"] for row in out["symbols"]], out
+
+    def test_hybrid_does_not_promote_one_token_overlap(self, tmp_path):
+        b = _builder(tmp_path, {
+            "app.py": """
+                def analyze(): pass
+                def chat_handler(): pass
+                def data_link(): pass
+            """,
+        })
+        out = queries.find_symbols(b, "analyze chat data", search_mode="hybrid")
+        assert out["count"] == 0, out
+        assert all(row["score"] < out["min_score"] for row in out["suggestions"])
 
 
 # --------------------------------------------------------------- gap 4

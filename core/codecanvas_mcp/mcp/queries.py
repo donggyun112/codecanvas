@@ -467,6 +467,40 @@ def _concept_coverage(query: str, alias: str) -> tuple[float, list[str]]:
     return len(matched) / len(query_tokens), matched
 
 
+def _name_query_coverage(query: str, alias: str) -> float:
+    """Coverage for fuzzy identifier matching, including per-token typos."""
+    query_tokens = [
+        token for token in _symbol_words(query)
+        if token not in _SEARCH_STOPWORDS
+    ]
+    alias_tokens = [
+        token for token in _symbol_words(alias)
+        if token not in _SEARCH_STOPWORDS
+    ]
+    if not query_tokens or not alias_tokens:
+        return 0.0
+    alias_terms = set(alias_tokens) | {_stem(token) for token in alias_tokens}
+    matched = sum(
+        1
+        for query_token in query_tokens
+        if (
+            _expand_token(query_token) & alias_terms
+            or any(
+                fuzz.ratio(query_token, alias_token) >= 80
+                or (
+                    min(len(query_token), len(alias_token)) >= 4
+                    and (
+                        alias_token.startswith(query_token)
+                        or query_token.startswith(alias_token)
+                    )
+                )
+                for alias_token in alias_tokens
+            )
+        )
+    )
+    return matched / len(query_tokens)
+
+
 def _concept_document(func) -> str:
     """Searchable prose for a symbol: what it is called plus what it says."""
     parts = [" ".join(_symbol_words(func.qualified_name))]
@@ -651,6 +685,13 @@ def find_symbols(builder, query: str, kind=None, path=None,
                 continue
             if not _has_common_query_token(needle, aliases[(index, reason)]):
                 continue
+            coverage = _name_query_coverage(needle, aliases[(index, reason)])
+            if coverage <= 0:
+                continue
+            # WRatio can score a one-token subset near 0.9. Preserve typo
+            # tolerance while making incomplete multi-token matches pay for
+            # the query words they do not account for.
+            score *= 0.5 + 0.5 * coverage
             score = _external_penalty(funcs[index][0], score)
             if index not in best or score > best[index][0]:
                 best[index] = (
@@ -1262,6 +1303,28 @@ def _claim_qualifiers(claim: str, source_ref: str) -> list[dict]:
     return found
 
 
+def _unsupported_claim_prefix(claim: str, source_ref: str) -> str:
+    """Return prefix text not covered by the supported qualifier grammar."""
+    remaining = _claim_prefix(claim, source_ref)
+    if not remaining.strip():
+        return ""
+
+    literal = "|".join(sorted(_TRUTHY_LITERALS | _FALSY_LITERALS))
+    supported = (
+        r"\b[A-Za-z_]\w*[-_\s]+mode\b",
+        r"\bmode\s*(?:==|=|is)\s*['\"]?[A-Za-z_]\w*['\"]?",
+        r"\b(?:root(?:[-_ ]?agent)?|sub[-_ ]?agent|child[-_ ]?agent)\b",
+        rf"\b[A-Za-z_][\w.-]*\s*(?:==|=|:)\s*(?:{literal})\b",
+        r"\b(?:without|no|missing|unset|absent|lacking|with|given|having)"
+        r"\s+[A-Za-z_][\w.-]*\b",
+        r"\b[A-Za-z_]\w*(?:-\w+)+\b",
+        r"\b(?:when|while|under|during|the|a|an|it)\b",
+    )
+    for pattern in supported:
+        remaining = re.sub(pattern, " ", remaining, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", remaining).strip(" \t,;")
+
+
 def _mentions_subject(node, subject: str) -> bool:
     """True if an expression names ``subject`` directly or as a string key."""
     import ast
@@ -1667,6 +1730,21 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
             ),
         }
     source_ref, target_ref = parsed
+    unsupported_prefix = _unsupported_claim_prefix(claim, source_ref)
+    if unsupported_prefix:
+        return {
+            "claim": claim,
+            "error": (
+                "Unsupported claim prefix. Use root/sub-agent mode context or "
+                "a boolean qualifier such as flag=true, dry-run, or without FLAG."
+            ),
+            "unsupported_prefix": unsupported_prefix,
+            "safe_to_summarize": False,
+            "response_guidance": (
+                "Correct or remove the unsupported prefix before evaluating "
+                "the reachability claim."
+            ),
+        }
     sources, source_error = _claim_source_functions(builder, source_ref)
     if source_error is not None:
         return source_error

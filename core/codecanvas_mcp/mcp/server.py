@@ -297,7 +297,9 @@ def verify_claim(claim: str, project_path: str | None = None,
     `applied_qualifiers` lists the conditions actually modelled. A condition no
     guard constrains lands in `unsupported_qualifiers`, caps the verdict at
     `uncertain`, and sets `safe_to_summarize: false` — report it as
-    unevaluated rather than answering as if it held.
+    unevaluated rather than answering as if it held. Unknown prefix syntax,
+    such as `priority=urgent` or a bare `banana`, is returned as an input error
+    with `safe_to_summarize: false`.
     """
     return _with_builder(
         project_path,
