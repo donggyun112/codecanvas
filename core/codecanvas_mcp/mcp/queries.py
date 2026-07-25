@@ -6,6 +6,9 @@ JSON-serializable dict. No FlowGraph IR, no coordinates.
 from __future__ import annotations
 
 import difflib
+import base64
+import hashlib
+import json
 import os
 import re
 
@@ -316,16 +319,109 @@ def _symbol_aliases(func) -> dict[str, str]:
         aliases["scope_and_name"] = " ".join(
             _symbol_words(func.class_name) + name_words
         )
+    if func.docstring:
+        aliases["docstring"] = func.docstring
     return {reason: alias for reason, alias in aliases.items() if alias}
 
 
+def _symbol_role(func) -> tuple[str, list[str]]:
+    """Describe intent without pretending static heuristics are certainty."""
+    evidence = []
+    decorators = " ".join(func.decorators).lower()
+    if func.is_protocol or func.is_abstract:
+        evidence.append("abstract_or_protocol")
+        return "contract", evidence
+    if any(marker in decorators for marker in ("route", ".get", ".post", ".put",
+                                                ".patch", ".delete", "command")):
+        evidence.append("entrypoint_decorator")
+        return "entrypoint", evidence
+    if any(marker in decorators for marker in ("wraps", "decorator")):
+        evidence.append("wrapper_decorator")
+        return "wrapper", evidence
+    if len(func.calls) == 1 and len(func.logic_steps) <= 1:
+        evidence.append("single_call_delegation")
+        return "wrapper", evidence
+    if func.class_name:
+        evidence.append("concrete_class_method")
+        return "implementation", evidence
+    if func.name.startswith("_"):
+        evidence.append("non_public_name")
+        return "internal", evidence
+    return "function", evidence
+
+
+def _match_evidence(query: str, alias: str, field: str, strategy: str) -> dict:
+    normalized_query = utils.default_process(query) or ""
+    normalized_alias = utils.default_process(alias) or ""
+    query_tokens = _symbol_words(query)
+    alias_tokens = set(_symbol_words(alias))
+    matched_tokens = [token for token in query_tokens if token in alias_tokens]
+    spans = [
+        {"start": block.b, "end": block.b + block.size,
+         "text": normalized_alias[block.b:block.b + block.size]}
+        for block in difflib.SequenceMatcher(
+            None, normalized_query, normalized_alias
+        ).get_matching_blocks()
+        if block.size
+    ]
+    return {
+        "field": field,
+        "strategy": strategy,
+        "text": alias[:240],
+        "query_tokens": query_tokens,
+        "matched_tokens": matched_tokens,
+        "character_spans": spans,
+    }
+
+
+def _cursor_fingerprint(query: str, kind, path, include_tests: bool,
+                        search_mode: str) -> str:
+    raw = json.dumps(
+        [query, kind, path, include_tests, search_mode],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _encode_symbol_cursor(offset: int, fingerprint: str) -> str:
+    raw = json.dumps({"v": 1, "offset": offset, "q": fingerprint},
+                     separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_symbol_cursor(cursor: str | None, fingerprint: str) -> tuple[int, str | None]:
+    if not cursor:
+        return 0, None
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+        if payload.get("v") != 1 or payload.get("q") != fingerprint:
+            raise ValueError
+        offset = int(payload["offset"])
+        if offset < 0:
+            raise ValueError
+        return offset, None
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return 0, "cursor is invalid or belongs to a different search."
+
+
 def find_symbols(builder, query: str, kind=None, path=None,
-                 include_tests=False, limit: int = 20) -> dict:
-    """Find symbols using RapidFuzz's optimized, tested ranking engine."""
+                 include_tests=False, limit: int = 20, cursor: str | None = None,
+                 search_mode: str = "hybrid") -> dict:
+    """Find symbols by identifier and, optionally, docstring meaning."""
     needle = (query or "").strip()
     if not needle:
         return {"error": "query must not be empty."}
+    if search_mode not in {"name", "semantic", "hybrid"}:
+        return {"error": "search_mode must be name, semantic, or hybrid."}
     limit = max(1, min(int(limit), 100))
+    fingerprint = _cursor_fingerprint(
+        needle, kind, path, include_tests, search_mode,
+    )
+    offset, cursor_error = _decode_symbol_cursor(cursor, fingerprint)
+    if cursor_error:
+        return {"error": cursor_error}
     funcs = []
     for func in builder.call_graph.all_functions():
         symbol_kind = (
@@ -341,16 +437,24 @@ def find_symbols(builder, query: str, kind=None, path=None,
         funcs.append((func, symbol_kind))
 
     choices = {}
+    aliases = {}
     acronym_query = not any(char.isspace() for char in needle) and len(needle) <= 8
     for index, (func, _symbol_kind) in enumerate(funcs):
         for reason, alias in _symbol_aliases(func).items():
+            is_semantic = reason == "docstring"
+            if search_mode == "name" and is_semantic:
+                continue
+            if search_mode == "semantic" and not is_semantic:
+                continue
             if reason == "acronym" and not acronym_query:
                 continue
             choices[(index, reason)] = alias
-    best: dict[int, tuple[float, str]] = {}
+            aliases[(index, reason)] = alias
+    best: dict[int, tuple[float, str, str, str]] = {}
     for scorer_name, scorer in (
         ("weighted", fuzz.WRatio),
         ("token_sort", fuzz.token_sort_ratio),
+        ("token_set", fuzz.token_set_ratio),
     ):
         matches = process.extract(
             needle,
@@ -361,23 +465,33 @@ def find_symbols(builder, query: str, kind=None, path=None,
             limit=None,
         )
         for _alias, score, (index, reason) in matches:
+            if scorer_name == "token_set" and reason != "docstring":
+                continue
+            if reason == "docstring":
+                score *= 0.92
             if index not in best or score > best[index][0]:
-                best[index] = (score, f"{reason}:{scorer_name}")
+                best[index] = (
+                    score, reason, scorer_name, aliases[(index, reason)],
+                )
 
     rows = []
     normalized_needle = utils.default_process(needle)
-    for index, (score, reason) in best.items():
+    for index, (score, field, strategy, alias) in best.items():
         func, symbol_kind = funcs[index]
         if utils.default_process(func.name) == normalized_needle:
-            reason = "exact"
+            field, strategy, alias = "name", "exact", func.name
         rows.append({
+            "_func": func,
+            "_match_alias": alias,
+            "_match_field": field,
+            "_match_strategy": strategy,
             "qualified_name": func.qualified_name,
             "name": func.name,
             "kind": symbol_kind,
             "signature": f"{func.name}({', '.join(func.params)})",
             "location": _location(func),
             "score": round(score / 100.0, 3),
-            "matched_by": reason,
+            "matched_by": strategy if strategy == "exact" else f"{field}:{strategy}",
         })
     rows.sort(key=lambda row: (
         -row["score"],
@@ -385,8 +499,28 @@ def find_symbols(builder, query: str, kind=None, path=None,
         row["qualified_name"],
     ))
     total = len(rows)
-    return {"query": query, "count": total, "symbols": rows[:limit],
-            "has_more": total > limit}
+    page = rows[offset:offset + limit]
+    for row in page:
+        func = row.pop("_func")
+        alias = row.pop("_match_alias")
+        field = row.pop("_match_field")
+        strategy = row.pop("_match_strategy")
+        role, role_evidence = _symbol_role(func)
+        row["match"] = _match_evidence(needle, alias, field, strategy)
+        row["role"] = role
+        row["role_evidence"] = role_evidence
+    next_offset = offset + len(page)
+    has_more = next_offset < total
+    return {
+        "query": query,
+        "count": total,
+        "symbols": page,
+        "has_more": has_more,
+        "next_cursor": (
+            _encode_symbol_cursor(next_offset, fingerprint) if has_more else None
+        ),
+        "search_mode": search_mode,
+    }
 
 
 def who_calls(builder, function: str, depth: int = 1, filter=None) -> dict:

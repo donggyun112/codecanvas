@@ -7,6 +7,7 @@ impact — instead of grepping and guessing.
 ## Tools
 
 - `list_entrypoints` — API routes, scripts, and function entrypoints
+- `find_symbols` — name/docstring search with role and match evidence; cursor pagination
 - `who_calls` / `call_tree` — reverse and forward call graph, N hops
 - `what_does` — signature, docstring, db/http/raise effects, risk
 - `function_flow` — de-noised control-flow outline of a function

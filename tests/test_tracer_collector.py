@@ -310,7 +310,8 @@ def test_async_return_ordering_is_correct(tmp_path: Path) -> None:
 
         async def outer():
             a = await inner()
-            b = helper()  # sync call to create coroutine (not awaited in trace)
+            b = helper()  # create without executing it
+            b.close()  # avoid leaking an intentionally unawaited coroutine
             return a
         """,
     )

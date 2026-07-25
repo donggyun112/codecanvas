@@ -75,15 +75,18 @@ def list_entrypoints(project_path: str | None = None, filter: str | None = None,
 @mcp.tool()
 def find_symbols(query: str, project_path: str | None = None,
                  kind: str | None = None, path: str | None = None,
-                 include_tests: bool = False, limit: int = 20) -> dict:
+                 include_tests: bool = False, limit: int = 20,
+                 cursor: str | None = None,
+                 search_mode: str = "hybrid") -> dict:
     """Find project functions, methods, and classes by name, qualified name,
-    scope, or acronym. Results include a score and matching reason.
-    Narrow with `kind`, `path`, and `include_tests`; `limit` is capped at 100."""
+    scope, acronym, or docstring meaning. Results explain matched tokens,
+    character spans, and likely symbol role. Continue with `next_cursor`;
+    choose `search_mode` name, semantic, or hybrid."""
     return _with_builder(
         project_path,
         lambda b: queries.find_symbols(
             b, query, kind=kind, path=path, include_tests=include_tests,
-            limit=limit,
+            limit=limit, cursor=cursor, search_mode=search_mode,
         ),
     )
 

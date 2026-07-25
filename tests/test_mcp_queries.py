@@ -1,4 +1,5 @@
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from codecanvas_mcp.mcp.session import get_builder
@@ -824,6 +825,93 @@ def test_find_symbols_rejects_empty_query(tmp_path):
         "service.py": "def fetch_user():\n    pass",
     })
     assert "error" in queries.find_symbols(builder, " ")
+
+
+def test_find_symbols_paginates_with_query_bound_cursor(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "symbols.py": """
+            def load_user(): pass
+            def load_users(): pass
+            def load_user_profile(): pass
+        """,
+    })
+    first = queries.find_symbols(builder, "load user", limit=1)
+    second = queries.find_symbols(
+        builder, "load user", limit=1, cursor=first["next_cursor"],
+    )
+
+    assert first["has_more"] is True
+    assert second["symbols"][0] != first["symbols"][0]
+    assert queries.find_symbols(
+        builder, "different", cursor=first["next_cursor"],
+    )["error"].startswith("cursor is invalid")
+
+
+def test_find_symbols_explains_match_and_distinguishes_roles(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "api.py": """
+            from impl import process
+
+            def process_request(value):
+                return process(value)
+        """,
+        "impl.py": """
+            class Processor:
+                def process_request(self, value):
+                    return value + 1
+
+            def process(value):
+                return value + 1
+        """,
+    })
+    out = queries.find_symbols(builder, "process request")
+    by_name = {row["qualified_name"]: row for row in out["symbols"]}
+    wrapper = by_name["api.process_request"]
+    implementation = by_name["impl.Processor.process_request"]
+
+    assert wrapper["role"] == "wrapper"
+    assert implementation["role"] == "implementation"
+    assert wrapper["match"]["matched_tokens"] == ["process", "request"]
+    assert wrapper["match"]["character_spans"]
+
+
+def test_find_symbols_searches_docstring_meaning(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "billing.py": """
+            def settle(invoice):
+                \"\"\"Charge an outstanding customer invoice and record payment.\"\"\"
+                return invoice
+        """,
+    })
+    out = queries.find_symbols(
+        builder, "customer invoice payment", search_mode="semantic",
+    )
+
+    assert out["symbols"][0]["qualified_name"] == "billing.settle"
+    assert out["symbols"][0]["match"]["field"] == "docstring"
+    assert "invoice" in out["symbols"][0]["match"]["matched_tokens"]
+
+
+def test_find_symbols_concurrent_calls_are_stable(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "service.py": """
+            def load_customer(): pass
+            def save_customer(): pass
+            def delete_customer(): pass
+        """,
+    })
+    queries_to_run = ["load customer", "save customer", "delete customer"] * 8
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(
+            lambda query: queries.find_symbols(builder, query, limit=2),
+            queries_to_run,
+        ))
+
+    assert all(result["symbols"] for result in results)
+    assert [
+        result["symbols"][0]["name"] for result in results[:3]
+    ] == ["load_customer", "save_customer", "delete_customer"]
 
 
 def test_find_symbols_usability_corpus(tmp_path):

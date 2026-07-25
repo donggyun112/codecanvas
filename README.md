@@ -146,6 +146,7 @@ Tools:
 | Tool | Answers |
 |---|---|
 | `list_entrypoints` | What entrypoints exist in this project? |
+| `find_symbols` | Find symbols by name or docstring meaning, with role/match evidence and cursor pagination. |
 | `who_calls` | Who calls this function? (ground-truth reverse edges) |
 | `what_does` | What does this function do? (signature, effects, risk) |
 | `function_flow` | How does this function work? (de-noised control-flow outline: branches, loops, try/finally, early returns, key calls) |
