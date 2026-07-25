@@ -15,7 +15,7 @@ import re
 from rapidfuzz import fuzz, process, utils
 
 from codecanvas_mcp.mcp.answers import capped
-from codecanvas_mcp.parser.call_graph import REVIEW_SIGNAL_POINTS
+from codecanvas_mcp.parser.call_graph import REVIEW_SIGNAL_POINTS, db_access_kind
 
 
 def _location(func) -> str:
@@ -382,12 +382,106 @@ def _symbol_role(func) -> tuple[str, list[str]]:
     return "function", evidence
 
 
+# Related wordings that should reach each other in a concept search. Kept
+# deliberately tight: every extra member widens what "semantic" returns, and a
+# loose group floods results with near-misses. Matching stays lexical — this is
+# vocabulary expansion, not embeddings, and the response says so.
+_CONCEPT_GROUPS = (
+    {"auth", "authentication", "authorization", "login", "signin",
+     "credential", "credentials", "identity", "permission"},
+    {"concurrency", "concurrent", "parallel", "simultaneous", "async",
+     "asynchronous", "thread", "threading", "worker"},
+    {"limit", "limiter", "throttle", "throttling", "ratelimit", "quota",
+     "cap", "budget"},
+    {"cache", "caching", "memo", "memoize", "lru"},
+    {"delete", "remove", "destroy", "erase", "purge", "drop"},
+    {"create", "insert", "add", "register", "provision"},
+    {"update", "modify", "change", "edit", "patch", "mutate"},
+    {"fetch", "read", "load", "retrieve", "query", "lookup"},
+    {"save", "persist", "write", "commit", "flush"},
+    {"validate", "verify", "check", "ensure", "assert"},
+    {"error", "exception", "failure", "fault"},
+    {"config", "configuration", "settings", "options"},
+    {"user", "account", "member", "profile"},
+    {"token", "jwt", "apikey", "secret"},
+    {"retry", "backoff", "resilience"},
+    {"send", "deliver", "delivery", "dispatch", "emit", "publish"},
+    {"message", "msg", "notification", "event", "payload"},
+    {"log", "logging", "logger", "trace", "telemetry"},
+    {"schedule", "scheduler", "cron", "timer", "periodic", "interval"},
+    {"serialize", "encode", "marshal", "dump"},
+    {"deserialize", "decode", "unmarshal", "parse"},
+)
+_CONCEPT_SUFFIXES = ("ization", "ations", "ation", "ence", "ance", "ency",
+                     "ancy", "ings", "ing", "ers", "er", "ies", "ed", "es",
+                     "s", "y")
+
+
+def _stem(token: str) -> str:
+    """Crude suffix stripper so `limiter`/`limit` and `requests`/`request` meet."""
+    for suffix in _CONCEPT_SUFFIXES:
+        if len(token) - len(suffix) >= 4 and token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _concept_index() -> dict[str, frozenset[str]]:
+    index: dict[str, set[str]] = {}
+    for group in _CONCEPT_GROUPS:
+        expanded = set(group) | {_stem(word) for word in group}
+        for word in expanded:
+            index.setdefault(word, set()).update(expanded)
+    return {word: frozenset(related) for word, related in index.items()}
+
+
+_CONCEPT_INDEX = _concept_index()
+
+
+def _expand_token(token: str) -> frozenset[str]:
+    forms = {token, _stem(token)}
+    for form in tuple(forms):
+        forms |= _CONCEPT_INDEX.get(form, frozenset())
+    return frozenset(forms)
+
+
+def _concept_coverage(query: str, alias: str) -> tuple[float, list[str]]:
+    """Fraction of the query's content words the alias accounts for.
+
+    Coverage is what stops a one-word-of-four overlap from scoring like a full
+    match: ``token_set_ratio`` saturates at 100 whenever the query's tokens are
+    a subset, which is why partial hits used to flood the results.
+    """
+    query_tokens = [
+        token for token in _symbol_words(query)
+        if token not in _SEARCH_STOPWORDS
+    ]
+    if not query_tokens:
+        return 0.0, []
+    alias_terms = set()
+    for token in _symbol_words(alias):
+        alias_terms.add(token)
+        alias_terms.add(_stem(token))
+    matched = [
+        token for token in query_tokens if _expand_token(token) & alias_terms
+    ]
+    return len(matched) / len(query_tokens), matched
+
+
+def _concept_document(func) -> str:
+    """Searchable prose for a symbol: what it is called plus what it says."""
+    parts = [" ".join(_symbol_words(func.qualified_name))]
+    if func.class_name:
+        parts.append(" ".join(_symbol_words(func.class_name)))
+    if func.docstring:
+        parts.append(func.docstring)
+    return " ".join(part for part in parts if part)
+
+
 def _match_evidence(query: str, alias: str, field: str, strategy: str) -> dict:
     normalized_query = utils.default_process(query) or ""
     normalized_alias = utils.default_process(alias) or ""
     query_tokens = _symbol_words(query)
-    alias_tokens = set(_symbol_words(alias))
-    matched_tokens = [token for token in query_tokens if token in alias_tokens]
+    coverage, matched_tokens = _concept_coverage(query, alias)
     spans = [
         {"start": block.b, "end": block.b + block.size,
          "text": normalized_alias[block.b:block.b + block.size]}
@@ -402,6 +496,7 @@ def _match_evidence(query: str, alias: str, field: str, strategy: str) -> dict:
         "text": alias[:240],
         "query_tokens": query_tokens,
         "matched_tokens": matched_tokens,
+        "coverage": round(coverage, 3),
         "character_spans": spans,
     }
 
@@ -505,21 +600,32 @@ def find_symbols(builder, query: str, kind=None, path=None,
     aliases = {}
     acronym_query = not any(char.isspace() for char in needle) and len(needle) <= 8
     for index, (func, _symbol_kind) in enumerate(funcs):
+        if search_mode == "semantic":
+            # Concept matching owns this mode entirely; identifier aliases
+            # would only reintroduce plain name matching under another label.
+            continue
         for reason, alias in _symbol_aliases(func).items():
-            is_semantic = reason == "docstring"
-            if search_mode == "name" and is_semantic:
-                continue
-            if search_mode == "semantic" and not is_semantic:
+            if reason == "docstring":
+                # Scored by the concept pass below, never by token_set_ratio:
+                # that scorer saturates on partial overlap.
                 continue
             if reason == "acronym" and not acronym_query:
                 continue
             choices[(index, reason)] = alias
             aliases[(index, reason)] = alias
+
+    def _external_penalty(func, score: float) -> float:
+        normalized_path = (func.file_path or "").replace("\\", "/").lower()
+        if any(segment in normalized_path for segment in (
+            "/references/", "/vendor/", "/site-packages/",
+        )):
+            return score * 0.75
+        return score
+
     best: dict[int, tuple[float, str, str, str]] = {}
     for scorer_name, scorer in (
         ("weighted", fuzz.WRatio),
         ("token_sort", fuzz.token_sort_ratio),
-        ("token_set", fuzz.token_set_ratio),
     ):
         matches = process.extract(
             needle,
@@ -532,38 +638,43 @@ def find_symbols(builder, query: str, kind=None, path=None,
         for _alias, score, (index, reason) in matches:
             normalized_alias = utils.default_process(aliases[(index, reason)]) or ""
             normalized_query = utils.default_process(needle) or ""
-            if scorer_name == "token_set" and reason != "docstring":
+            query_tokens = set(_symbol_words(needle))
+            alias_tokens = set(_symbol_words(aliases[(index, reason)]))
+            too_short = len(normalized_alias) < len(normalized_query) * 0.4
+            func_name = utils.default_process(funcs[index][0].name) or ""
+            name_tokens = set(_symbol_words(funcs[index][0].name))
+            name_too_short = len(func_name) < len(normalized_query) * 0.4
+            if (
+                (too_short and not query_tokens.intersection(alias_tokens))
+                or (name_too_short and not query_tokens.intersection(name_tokens))
+            ):
                 continue
-            if reason == "docstring" and scorer_name != "token_set":
+            if not _has_common_query_token(needle, aliases[(index, reason)]):
                 continue
-            if reason != "docstring":
-                query_tokens = set(_symbol_words(needle))
-                alias_tokens = set(_symbol_words(aliases[(index, reason)]))
-                too_short = len(normalized_alias) < len(normalized_query) * 0.4
-                func_name = utils.default_process(funcs[index][0].name) or ""
-                name_tokens = set(_symbol_words(funcs[index][0].name))
-                name_too_short = len(func_name) < len(normalized_query) * 0.4
-                if (
-                    (too_short and not query_tokens.intersection(alias_tokens))
-                    or (name_too_short and not query_tokens.intersection(name_tokens))
-                ):
-                    continue
-                if not _has_common_query_token(needle, aliases[(index, reason)]):
-                    continue
-            elif not _has_common_query_token(needle, aliases[(index, reason)]):
-                continue
-            if reason == "docstring":
-                score *= 0.92
-            func = funcs[index][0]
-            normalized_path = (func.file_path or "").replace("\\", "/").lower()
-            if any(segment in normalized_path for segment in (
-                "/references/", "/vendor/", "/site-packages/",
-            )):
-                score *= 0.75
+            score = _external_penalty(funcs[index][0], score)
             if index not in best or score > best[index][0]:
                 best[index] = (
                     score, reason, scorer_name, aliases[(index, reason)],
                 )
+
+    if search_mode in {"semantic", "hybrid"}:
+        # Concept pass: how much of the query the symbol's own words plus its
+        # docstring account for, weighted by coverage so a partial overlap can
+        # never outrank a full one. Vocabulary-expanded lexical matching, not
+        # embeddings — `matched_tokens` shows exactly what carried the hit.
+        for index, (func, _symbol_kind) in enumerate(funcs):
+            document = _concept_document(func)
+            coverage, _matched = _concept_coverage(needle, document)
+            if coverage <= 0:
+                continue
+            similarity = fuzz.token_set_ratio(
+                needle, document, processor=utils.default_process,
+            ) / 100.0
+            score = _external_penalty(
+                func, 100.0 * coverage * (0.8 + 0.2 * similarity) * 0.92,
+            )
+            if index not in best or score > best[index][0]:
+                best[index] = (score, "concept", "coverage", document)
 
     rows = []
     normalized_needle = utils.default_process(needle)
@@ -592,9 +703,13 @@ def find_symbols(builder, query: str, kind=None, path=None,
     ))
     exact_rows = [row for row in rows if row["matched_by"] == "exact"]
     eligible = exact_rows or [row for row in rows if row["score"] >= min_score]
+    # With nothing over the bar, near-misses are more useful than an empty
+    # answer: coverage weighting deliberately pushes partial matches down, so
+    # without a lower floor a half-right query would return silence.
+    suggestion_floor = 0.5 if eligible else 0.2
     suggestion_rows = [
         row for row in rows
-        if row not in eligible and row["score"] >= 0.5
+        if row not in eligible and row["score"] >= suggestion_floor
     ][:5]
     total = len(eligible)
     page = [
@@ -616,6 +731,11 @@ def find_symbols(builder, query: str, kind=None, path=None,
             _encode_symbol_cursor(next_offset, fingerprint) if has_more else None
         ),
         "search_mode": search_mode,
+        "match_method": (
+            "concept-expanded lexical coverage over identifiers and docstrings"
+            if search_mode in {"semantic", "hybrid"}
+            else "identifier fuzzy match"
+        ),
         "min_score": min_score,
         "suggestions": suggestions,
     }
@@ -688,9 +808,18 @@ def _summarize_calls(cg, func) -> dict:
         if c.is_raise:
             raises.append({"status": c.raise_status, "exception": c.func_name})
         elif c.is_db_call:
-            db.append({"op": (c.db_detail or {}).get("operation"),
-                       "model": (c.db_detail or {}).get("model"),
-                       "call": c.func_name})
+            detail = c.db_detail or {}
+            parsed = detail.get("sql_parsed")
+            row = {"op": detail.get("operation"),
+                   "model": detail.get("model"),
+                   "call": c.func_name,
+                   "access": db_access_kind(detail)}
+            table = detail.get("table") or (parsed or {}).get("table")
+            if table:
+                row["table"] = table
+            if parsed:
+                row["sql"] = parsed
+            db.append(row)
         elif c.is_http_call:
             http.append({"method": (c.http_detail or {}).get("method"),
                          "call": c.func_name})
@@ -715,7 +844,13 @@ def _summarize_calls(cg, func) -> dict:
 
 
 def what_does(builder, function: str) -> dict:
-    """Summarize what a function does (signature + effects), no source read."""
+    """Summarize what a function does (signature + effects), no source read.
+
+    ``calls`` and ``effects.direct`` describe this function's own call sites;
+    ``risk`` scores those alone. ``effects.transitive`` names what it reaches
+    only through callees — so a zero-risk wrapper over a database write still
+    shows the write, attributed to the callee that performs it.
+    """
     from codecanvas_mcp.graph.impact import ImpactAnalyzer
 
     func, err = resolve_function(builder, function)
@@ -732,7 +867,10 @@ def what_does(builder, function: str) -> dict:
         "signature": signature,
         "docstring": (func.docstring or "").strip(),
         "calls": _summarize_calls(builder.call_graph, func),
+        "effects": _effect_closure(builder.call_graph, func),
+        "effect_legend": _effect_legend(),
         "risk": ImpactAnalyzer._compute_function_risk(func),
+        "risk_scope": "direct call sites only; see effects.transitive",
     }
 
 
@@ -1052,6 +1190,175 @@ def _claim_scope(claim: str) -> str | None:
     return None
 
 
+_TRUTHY_LITERALS = {"true", "1", "yes", "on", "set", "enabled"}
+_FALSY_LITERALS = {"false", "0", "no", "off", "none", "null", "unset", "disabled"}
+# Words that carry mode/scope meaning (handled by _claim_mode/_claim_scope) or
+# are pure prose, so they never become condition subjects of their own.
+_QUALIFIER_NON_SUBJECTS = {
+    "root", "sub", "agent", "task", "chat", "mode", "child", "self",
+    "when", "while", "under", "during", "the", "a", "an", "it", "reaches",
+}
+
+
+def _claim_prefix(claim: str, source_ref: str) -> str:
+    """The qualifier text sitting in front of the source in a claim."""
+    match = re.search(r"(?P<left>.+?)\s+reaches\s+", claim, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    left = match.group("left")
+    index = left.rfind(source_ref)
+    return left[:index] if index >= 0 else left
+
+
+def _claim_qualifiers(claim: str, source_ref: str) -> list[dict]:
+    """Condition qualifiers stated in a claim, as (subject, expected) facts.
+
+    A claim like ``dry-run publish reaches _call_api`` asserts more than
+    reachability: it fixes ``dry_run`` truthy. These used to be dropped on the
+    floor, so the verdict answered a question nobody asked. Only explicit
+    forms are collected — an ``x=false`` / ``without X`` / ``dry-run`` shape —
+    since bare words are far more often prose than flags.
+    """
+    prefix = _claim_prefix(claim, source_ref)
+    if not prefix.strip():
+        return []
+    found: list[dict] = []
+
+    def add(subject: str, expected: bool, text: str) -> None:
+        normalized = subject.strip().replace("-", "_")
+        if not normalized or normalized.lower() in _QUALIFIER_NON_SUBJECTS:
+            return
+        if normalized.lower().endswith(("_mode", "_agent")):
+            return
+        if any(item["subject"] == normalized for item in found):
+            return
+        found.append({
+            "subject": normalized,
+            "expected": expected,
+            "text": text.strip(),
+        })
+
+    literal = "|".join(sorted(_TRUTHY_LITERALS | _FALSY_LITERALS))
+    for match in re.finditer(
+        rf"(?P<subject>[A-Za-z_][\w.-]*)\s*(?:==|=|:)\s*(?P<value>{literal})\b",
+        prefix,
+        flags=re.IGNORECASE,
+    ):
+        add(
+            match.group("subject"),
+            match.group("value").lower() in _TRUTHY_LITERALS,
+            match.group(0),
+        )
+    for match in re.finditer(
+        r"\b(?P<polarity>without|no|missing|unset|absent|lacking|with|given|having)"
+        r"\s+(?P<subject>[A-Za-z_][\w.-]*)",
+        prefix,
+        flags=re.IGNORECASE,
+    ):
+        expected = match.group("polarity").lower() in {"with", "given", "having"}
+        add(match.group("subject"), expected, match.group(0))
+    for match in re.finditer(r"\b[A-Za-z_]\w*(?:-\w+)+\b", prefix):
+        add(match.group(0), True, match.group(0))
+    return found
+
+
+def _mentions_subject(node, subject: str) -> bool:
+    """True if an expression names ``subject`` directly or as a string key."""
+    import ast
+
+    target = subject.lower()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id.lower() == target:
+            return True
+        if isinstance(child, ast.Attribute) and child.attr.lower() == target:
+            return True
+        if (
+            isinstance(child, ast.Constant)
+            and isinstance(child.value, str)
+            and child.value.lower() == target
+        ):
+            return True
+    return False
+
+
+def _literal_truthiness(node) -> bool | None:
+    """Truthiness of a ``True``/``False``/``None`` literal, else None."""
+    import ast
+
+    if isinstance(node, ast.Constant) and (
+        node.value is None or isinstance(node.value, bool)
+    ):
+        return bool(node.value)
+    return None
+
+
+def _guard_subject_polarity(guard: str, subject: str) -> bool | None:
+    """Truthiness a guard requires of ``subject``; None if it says nothing.
+
+    Guards arrive as source text (``not (dry_run)``, ``not (not wake)``,
+    ``not (os.getenv('OPENAI_API_KEY'))``), so they are parsed rather than
+    pattern-matched — negation has to nest correctly to be trustworthy.
+    Non-expression guards (``loop``, ``except ValueError``) simply do not parse.
+    """
+    import ast
+
+    try:
+        tree = ast.parse((guard or "").strip(), mode="eval")
+    except SyntaxError:
+        return None
+    return _polarity_of(tree.body, subject, True)
+
+
+def _polarity_of(node, subject: str, truth: bool) -> bool | None:
+    import ast
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return _polarity_of(node.operand, subject, not truth)
+    if isinstance(node, ast.BoolOp):
+        if isinstance(node.op, ast.Or):
+            # Either side may carry the guard, so nothing is required of one.
+            return None
+        for value in node.values:
+            found = _polarity_of(value, subject, truth)
+            if found is not None:
+                return found
+        return None
+    if isinstance(node, ast.Compare) and len(node.ops) == 1:
+        left, op, right = node.left, node.ops[0], node.comparators[0]
+        for subject_side, literal_side in ((left, right), (right, left)):
+            literal = _literal_truthiness(literal_side)
+            if literal is None or not _mentions_subject(subject_side, subject):
+                continue
+            positive = isinstance(op, (ast.Eq, ast.Is))
+            required = literal if positive else not literal
+            return truth == required
+    if _mentions_subject(node, subject):
+        return truth
+    return None
+
+
+def _condition_contradictions(
+    path: dict,
+    qualifiers: list[dict],
+    recognized: set[str],
+) -> list[str]:
+    """Qualifiers a path's guards rule out; records the ones it can model."""
+    conflicts = []
+    for edge in path["edges"]:
+        for guard in edge["guards"]:
+            for qualifier in qualifiers:
+                polarity = _guard_subject_polarity(guard, qualifier["subject"])
+                if polarity is None:
+                    continue
+                recognized.add(qualifier["subject"])
+                if polarity != qualifier["expected"]:
+                    conflicts.append(
+                        f"`{qualifier['text']}` contradicts guard `{guard}` "
+                        f"on {edge['caller']} -> {edge['callee']}"
+                    )
+    return conflicts
+
+
 def _line_guards(node, line: int) -> list[str]:
     import ast
     from codecanvas_mcp.mcp import outline
@@ -1369,6 +1676,8 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
 
     mode = _claim_mode(claim)
     scope = _claim_scope(claim)
+    qualifiers = _claim_qualifiers(claim, source_ref)
+    modelled_subjects: set[str] = set()
     paths = _claim_paths(builder, sources, target, max_depth=max_depth)
     evaluated = []
     for path in paths:
@@ -1386,8 +1695,18 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
             )
         ]
         contradictions = guard_contradictions + type_contradictions
-        evaluated.append({**path, "contradictions": list(dict.fromkeys(contradictions))})
-    viable = [path for path in evaluated if not path["contradictions"]]
+        condition_conflicts = _condition_contradictions(
+            path, qualifiers, modelled_subjects,
+        )
+        evaluated.append({
+            **path,
+            "contradictions": list(dict.fromkeys(contradictions)),
+            "condition_contradictions": list(dict.fromkeys(condition_conflicts)),
+        })
+    viable = [
+        path for path in evaluated
+        if not path["contradictions"] and not path["condition_contradictions"]
+    ]
     inferred_viable = [
         path for path in viable
         if any(edge["confidence"] == "inferred" for edge in path["edges"])
@@ -1427,6 +1746,7 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
             counterexamples.append(
                 f"{scope or 'subject'} mode={mode} contradicts required {contradiction}"
             )
+        counterexamples.extend(path["condition_contradictions"])
     if not paths:
         counterexamples.append(
             f"No static call path from {source_ref} to {target_ref}."
@@ -1439,6 +1759,26 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
         ),
         None,
     )
+    applied_qualifiers = [
+        item for item in qualifiers if item["subject"] in modelled_subjects
+    ]
+    unsupported_qualifiers = [
+        item for item in qualifiers if item["subject"] not in modelled_subjects
+    ]
+    metadata = _claim_path_metadata(witness_path)
+    if unsupported_qualifiers:
+        # A condition no guard on the path speaks to was silently dropped
+        # before; a verdict that ignores it must not read as settled.
+        if verdict == "true":
+            verdict = "uncertain"
+        metadata["safe_to_summarize"] = False
+        named = ", ".join(item["text"] for item in unsupported_qualifiers)
+        metadata["response_guidance"] = " ".join(filter(None, [
+            metadata.get("response_guidance"),
+            f"The claim states conditions ({named}) that no guard on any "
+            f"call path constrains, so the verdict does not cover them. "
+            f"Say so instead of answering as if it did.",
+        ]))
     return {
         "claim": claim,
         "verdict": verdict,
@@ -1450,6 +1790,8 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
             else None
         ),
         "qualification": qualification,
+        "applied_qualifiers": applied_qualifiers,
+        "unsupported_qualifiers": unsupported_qualifiers,
         "paths": evaluated,
         "witness_path": witness_path,
         "alternative_paths": alternative_paths,
@@ -1457,7 +1799,7 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
             "function_flow": flows,
             "reaching_conditions": conditions,
         },
-        **_claim_path_metadata(witness_path),
+        **metadata,
     }
 
 
@@ -1944,7 +2286,65 @@ def _effect_legend() -> dict:
         "http": "observed static outbound HTTP/network call",
         "raises": "observed raise path",
         "stub": "empty/pass/ellipsis body; db/http effects are not inferred",
+        "direct": "effect at this function's own call sites",
+        "transitive": (
+            "effect this function only reaches through a callee; `via` names "
+            "the nearest callee that carries it"
+        ),
     }
+
+
+def _effect_closure(cg, func, depth: int = 3, include_tests: bool = False) -> dict:
+    """Split a function's effects into its own and those it merely reaches.
+
+    ``what_does`` answers for one function and ``call_tree`` walks downstream;
+    without this split a wrapper that reaches a database write and one that
+    performs it were reported identically (both simply "db", or neither).
+    """
+    direct = [tag for tag in _effect_tags(func) if tag != "stub"]
+    seen_effects = set(direct)
+    transitive: list[str] = []
+    via: list[dict] = []
+    visited = {func.qualified_name}
+    frontier = [func]
+    for hop in range(1, max(1, int(depth)) + 1):
+        next_frontier = []
+        for caller in frontier:
+            for call in caller.calls:
+                for callee, _confidence in cg.resolve_call_candidates(call, caller):
+                    if callee.qualified_name in visited:
+                        continue
+                    if not include_tests and _is_test_path(callee.file_path or ""):
+                        continue
+                    visited.add(callee.qualified_name)
+                    next_frontier.append(callee)
+                    for tag in _effect_tags(callee):
+                        if tag == "stub" or tag in seen_effects:
+                            continue
+                        seen_effects.add(tag)
+                        transitive.append(tag)
+                        via.append({
+                            "effect": tag,
+                            "through": callee.qualified_name,
+                            "depth": hop,
+                        })
+        if not next_frontier:
+            return _effect_summary(func, direct, transitive, via, hop, False)
+        frontier = next_frontier
+    return _effect_summary(func, direct, transitive, via, depth, True)
+
+
+def _effect_summary(func, direct, transitive, via, scanned, truncated) -> dict:
+    summary = {
+        "direct": direct,
+        "transitive": transitive,
+        "via": via,
+        "depth_scanned": scanned,
+        "truncated": truncated,
+    }
+    if not direct and not transitive:
+        summary["stub"] = "stub" in _effect_tags(func)
+    return summary
 
 
 def call_tree(builder, function: str, depth: int = 2, filter=None,
@@ -1995,6 +2395,7 @@ def call_tree(builder, function: str, depth: int = 2, filter=None,
                         "via": caller.qualified_name,
                         "confidence": confidence,
                         "effects": _effect_tags(callee),
+                        "effect_scope": "direct",
                         "risk": ImpactAnalyzer._compute_function_risk(callee),
                     })
                     next_frontier.append(callee)
@@ -2011,7 +2412,11 @@ def call_tree(builder, function: str, depth: int = 2, filter=None,
 
     nodes, note = capped(nodes)
     out = {"function": func.qualified_name, "location": _location(func),
-           "nodes": nodes, "effect_legend": _effect_legend()}
+           "nodes": nodes,
+           "effects": _effect_closure(
+               cg, func, depth=depth, include_tests=include_tests,
+           ),
+           "effect_legend": _effect_legend()}
     if note:
         out["note"] = note
     return out

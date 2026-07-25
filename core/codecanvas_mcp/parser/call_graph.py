@@ -525,12 +525,30 @@ def _parse_simple_sql(sql: str) -> dict[str, Any] | None:
 
 
 DB_PATTERNS = {
-    "execute", "query", "fetch", "fetchone", "fetchall", "fetchmany",
+    "execute", "executemany", "executescript",
+    "query", "fetch", "fetchone", "fetchall", "fetchmany",
     "commit", "rollback", "add", "delete", "merge", "flush", "refresh",
     "scalar", "scalars", "all", "first", "one", "one_or_none", "get",
     "filter", "filter_by", "where", "select", "insert", "update",
 }
+# DB-API / ORM methods distinctive enough that a session-like receiver
+# anywhere in the attribute path settles it (`self.conn.execute(...)`,
+# `self.session.query(User)`). The rest of DB_PATTERNS collides with
+# ordinary object methods, so those keep requiring an unambiguous receiver.
+DB_STRONG_METHODS = {
+    "execute", "executemany", "executescript",
+    "fetchone", "fetchall", "fetchmany",
+    "commit", "rollback", "flush", "refresh", "merge", "query",
+    "scalar", "scalars", "filter_by",
+    "bulk_save_objects", "bulk_insert_mappings", "bulk_update_mappings",
+}
 DB_OBJECT_HINTS = {"session", "db", "database", "conn", "connection", "cursor", "engine", "supabase", "collection"}
+# Receiver names that mean a database even mid-chain. "session" and
+# "collection" are excluded: `request.session.get(...)` is a web session,
+# not a query, so those two only count as the root of the chain.
+DB_UNAMBIGUOUS_OBJECTS = {
+    "db", "database", "conn", "connection", "cursor", "engine", "supabase",
+}
 
 # MongoDB (pymongo / motor / beanie) collection methods. The suffixed forms
 # (`_one`, `_many`, `_documents`, `_and_`, `bulk_write`) are distinctive enough
@@ -558,13 +576,68 @@ REVIEW_SIGNAL_POINTS = {
     "auth": 2,
 }
 
+# Cursor methods whose access kind depends on the statement handed to them:
+# execute(select(...)) reads, execute("INSERT ...") writes.
+DB_EXECUTE_OPS = {"execute", "executemany", "executescript"}
+# Operations that mutate storage. Shared by the review-signal scorer and the
+# MCP effect summaries through ``db_access_kind``.
+DB_WRITE_OPS = {
+    "add", "delete", "merge", "insert", "update", "remove",
+    "commit", "flush",
+    "bulk_save_objects", "bulk_insert_mappings", "bulk_update_mappings",
+} | DB_EXECUTE_OPS | MONGO_WRITE_METHODS
 
-def _is_db_object_name(name: str | None) -> bool:
-    """True if a receiver name looks like a DB session/collection object."""
+
+def _is_db_object_name(name: str | None, hints: set[str] | None = None) -> bool:
+    """True if a receiver name looks like a DB session/collection object.
+
+    Leading underscores are stripped so a private handle (``self._conn``)
+    reads the same as a public one.
+    """
     if not name:
         return False
-    low = name.lower()
-    return low in DB_OBJECT_HINTS or low.endswith("_collection")
+    low = name.lower().lstrip("_")
+    return low in (hints or DB_OBJECT_HINTS) or low.endswith("_collection")
+
+
+def _chain_has_db_object(node: ast.expr, strong: bool) -> bool:
+    """True if any receiver segment in a chain names a database handle.
+
+    ``_chain_root_name`` only reports the outermost root, so ``self.conn`` and
+    ``self.session`` both reduce to ``self`` and every attribute-held database
+    handle went undetected. ``strong`` selects the wider hint set, reserved for
+    methods that only databases have.
+    """
+    hints = DB_OBJECT_HINTS if strong else DB_UNAMBIGUOUS_OBJECTS
+    current = node
+    while True:
+        if isinstance(current, ast.Attribute):
+            if _is_db_object_name(current.attr, hints):
+                return True
+            current = current.value
+            continue
+        if isinstance(current, ast.Call):
+            current = current.func
+            continue
+        if isinstance(current, ast.Name):
+            return _is_db_object_name(current.id, hints)
+        return False
+
+
+def db_access_kind(detail: dict[str, Any] | None) -> str:
+    """Classify a DB call's detail as a ``read`` or a ``write``.
+
+    Single source of truth for the review-signal scorer and the MCP effect
+    summaries, so the two can never disagree about the same call site.
+    """
+    detail = detail or {}
+    op = str(detail.get("operation") or "").lower()
+    if op in DB_EXECUTE_OPS:
+        access = detail.get("execute_access")
+        if access in ("read", "write"):
+            return access
+        return "write"
+    return "write" if op in DB_WRITE_OPS else "read"
 
 HTTP_PATTERNS = {
     "get", "post", "put", "delete", "patch", "head", "options",
@@ -1143,10 +1216,21 @@ class CallGraphBuilder:
         return_ctx: bool = False,
     ) -> None:
         """Recursively visit AST nodes, tracking branch context with proper push/pop."""
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             # Nested scopes are indexed separately; do not flatten them into
             # the parent's call list.  Logic step extraction (_flatten_stmt)
             # handles nested function body flattening for L4 step purposes.
+            return
+
+        if isinstance(node, ast.Lambda):
+            # A lambda is never indexed as a function of its own, so unlike a
+            # nested def its calls have nowhere else to land: attribute them to
+            # the enclosing function, or a callback such as
+            # `run(lambda b: handler(b))` yields no edge at all. The body runs
+            # when the callback is invoked, not at the enclosing return, so the
+            # return context deliberately does not carry into it.
+            for child in ast.iter_child_nodes(node):
+                self._visit_calls(child, calls, branch_ctx)
             return
 
         # Determine branch context for children of control-flow nodes
@@ -2194,6 +2278,15 @@ class CallGraphBuilder:
 
         root = owner_parts[0]
 
+        # --- module.function() through the file's imports ---
+        # The receiver is a module, not an object, so no type inference below
+        # can reach it; without this every `queries.what_does(...)`-style call
+        # is dropped and the callee looks unreachable.
+        module_target = self._resolve_module_attribute_call(call, caller)
+        if module_target is not None:
+            self._last_resolve_confidence = "definite"
+            return module_target
+
         # --- cls.method() on a classmethod receiver ---
         caller_is_classmethod = any(
             decorator.rsplit(".", 1)[-1] == "classmethod"
@@ -2306,6 +2399,27 @@ class CallGraphBuilder:
                 self._last_resolve_confidence = "inferred"
             return result
         return None
+
+    def _resolve_module_attribute_call(
+        self,
+        call: CallSite,
+        caller: FunctionDef,
+    ) -> FunctionDef | None:
+        """Resolve ``module.function()`` via the caller file's import bindings.
+
+        ``from x import mod`` / ``import x.mod as mod`` bind a module, so the
+        receiver has no inferable type — the qualified name is simply looked up
+        instead. A local variable shadowing the alias would not produce a
+        qualified-name hit, so a miss here just falls through to type inference.
+        """
+        owner_parts = call.owner_parts
+        if not owner_parts or not caller.file_path:
+            return None
+        reference = ".".join((*owner_parts, call.func_name.split(".")[-1]))
+        expanded = self._expand_import_reference(reference, caller.file_path)
+        if expanded == reference:
+            return None
+        return self._functions.get(expanded)
 
     def _resolve_imported_global_type(
         self,
@@ -3737,9 +3851,6 @@ class CallGraphBuilder:
         Returns a list of signal tags:
           db_read, db_write, http_call, raises, raises_4xx, raises_5xx, auth
         """
-        DB_WRITE_OPS = {"add", "delete", "merge", "insert", "update", "execute",
-                        "commit", "flush", "remove", "bulk_save_objects",
-                        "bulk_insert_mappings", "bulk_update_mappings"} | MONGO_WRITE_METHODS
         signals: set[str] = set()
         for call in func.calls:
             if call.is_raise:
@@ -3751,16 +3862,9 @@ class CallGraphBuilder:
                         signals.add("raises_5xx")
                 continue
             if call.is_db_call:
-                detail = call.db_detail or {}
-                op = detail.get("operation", "").lower()
                 # execute() is a write op by name, but execute(select(...)) is a
-                # read — trust the classified access kind when we have it.
-                if op == "execute" and detail.get("execute_access") == "read":
-                    signals.add("db_read")
-                elif op in DB_WRITE_OPS:
-                    signals.add("db_write")
-                else:
-                    signals.add("db_read")
+                # read — db_access_kind trusts the classified access kind.
+                signals.add(f"db_{db_access_kind(call.db_detail)}")
                 continue
             if call.is_http_call:
                 signals.add("http_call")
@@ -4481,12 +4585,18 @@ class CallGraphBuilder:
                 root = _chain_root_name(node.func.value)
                 if _is_db_object_name(root):
                     return True
+                # Handles held on an attribute (self.conn, self.session) —
+                # the root is `self`, so the whole path has to be inspected.
+                if _chain_has_db_object(
+                    node.func.value, strong=node.func.attr in DB_STRONG_METHODS,
+                ):
+                    return True
                 # Chain calls like client.table().insert().execute():
                 # if intermediate methods are DB-specific, it's a DB call.
                 if _chain_has_any(node.func.value, _DB_CHAIN_HINTS):
                     return True
             # Supabase-style: .execute() at the end of a chain with table()/from_()
-            if node.func.attr == "execute":
+            if node.func.attr in DB_EXECUTE_OPS:
                 if _chain_has_any(node.func.value, {"table", "from_", "rpc"}):
                     return True
         # Top-level function calls: select(User), insert(User)
@@ -4643,7 +4753,7 @@ class CallGraphBuilder:
             detail["limit"] = limit_val
 
         # Extract raw SQL from execute(text("SELECT ...")) or execute("SELECT ...")
-        if node.func.attr == "execute" and node.args:
+        if node.func.attr in DB_EXECUTE_OPS and node.args:
             sql_arg = node.args[0]
             # Classify the executed construct so a read is not mistaken for a
             # write. `execute` is a write op by name, but execute(select(...))

@@ -178,7 +178,15 @@ def find_symbols(query: str, project_path: str | None = None,
     """Find project functions, methods, and classes by name, qualified name,
     scope, acronym, or docstring meaning. Results explain matched tokens,
     character spans, and likely symbol role. Continue with `next_cursor`;
-    choose `search_mode` name, semantic, or hybrid."""
+    choose `search_mode` name, semantic, or hybrid.
+
+    `semantic` is concept-expanded lexical matching over identifier words plus
+    docstrings — related wordings reach each other (throttle/limiter,
+    parallel/concurrency), but it is not an embedding search, so a query
+    sharing no vocabulary with the code will not find it. Every row reports
+    `match.coverage`: the fraction of the query's content words the symbol
+    accounts for. Ranking multiplies by coverage, so a partial overlap can
+    never outrank a full one — raise `min_score` to cut partial hits."""
     return _with_builder(
         project_path,
         lambda b: queries.find_symbols(
@@ -228,7 +236,13 @@ def what_does(function: str, project_path: str | None = None) -> dict:
     or makes HTTP calls), the exceptions it can raise, and a risk rating. Use
     it to triage an unfamiliar function before deciding whether to dig into
     `function_flow` or the full source. `function` = qualified name, bare name,
-    file:line, or a scope-skipping suffix like `Class.nested`."""
+    file:line, or a scope-skipping suffix like `Class.nested`.
+
+    `calls` and `effects.direct` cover this function's own call sites, and
+    `risk` scores only those. `effects.transitive` names what it reaches
+    through callees, each attributed to the callee that carries it via
+    `effects.via` — so a thin wrapper scoring risk 0 still shows the database
+    write underneath it. Use `call_tree` for the full downstream picture."""
     return _with_builder(project_path, lambda b: queries.what_does(b, function))
 
 
@@ -274,6 +288,16 @@ def verify_claim(claim: str, project_path: str | None = None,
     `function_flow`, and `reaching_conditions`, returning `true`, `false`, or
     `uncertain` plus a counterexample/qualification. Inferred-only paths never
     receive a true verdict.
+
+    Condition qualifiers on the prefix are evaluated, not ignored:
+    `dry-run publish reaches _call_api`, `wake=false deliver reaches _send`,
+    and `without OPENAI_API_KEY analyze reaches run_ai` each get checked
+    against the guards on every path, and a guard requiring the opposite makes
+    the verdict `false` with that guard as the counterexample.
+    `applied_qualifiers` lists the conditions actually modelled. A condition no
+    guard constrains lands in `unsupported_qualifiers`, caps the verdict at
+    `uncertain`, and sets `safe_to_summarize: false` — report it as
+    unevaluated rather than answering as if it held.
     """
     return _with_builder(
         project_path,
@@ -383,8 +407,12 @@ def call_tree(function: str, project_path: str | None = None, depth: int = 2,
     opposite direction (upstream, who calls it).
 
     Each node carries its `depth`, the `via` caller on the traced path, effect
-    flags (db/http/raises/stub), and risk. Only project-internal functions are
-    nodes; library calls show up as the parent's effect tags. Cycle-safe
+    flags (db/http/raises/stub) with `effect_scope: "direct"` — a node's flags
+    are always its own, never its subtree's — and risk. The top-level
+    `effects` splits the queried function's own effects (`direct`) from those
+    it only reaches through callees (`transitive`, attributed by `via`). Only
+    project-internal functions are nodes; library calls show up as the
+    parent's effect tags. Cycle-safe
     (dedup by name). Callees resolving into a test path are dropped by default
     (usually a misresolution); set `include_tests=True` to keep them. `filter`
     narrows by substring before the cap. `function` = qualified name, bare

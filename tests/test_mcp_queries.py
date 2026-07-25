@@ -973,8 +973,11 @@ def test_find_symbols_searches_docstring_meaning(tmp_path):
     )
 
     assert out["symbols"][0]["qualified_name"] == "billing.settle"
-    assert out["symbols"][0]["match"]["field"] == "docstring"
+    # Semantic mode matches a concept document (identifier words + docstring)
+    # rather than the docstring alone, so the field reports "concept".
+    assert out["symbols"][0]["match"]["field"] == "concept"
     assert "invoice" in out["symbols"][0]["match"]["matched_tokens"]
+    assert out["symbols"][0]["match"]["coverage"] == 1.0
 
 
 def test_find_symbols_concurrent_calls_are_stable(tmp_path):
