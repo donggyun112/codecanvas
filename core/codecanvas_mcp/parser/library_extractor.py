@@ -29,6 +29,7 @@ from codecanvas_mcp.graph.models import EntryPoint
 EXCLUDED_DIRS = {
     ".venv", "venv", "node_modules", "__pycache__", ".git",
     "migrations", ".tox", ".eggs", "dist", "build",
+    "references", "reference", "vendor", "vendored", "third_party",
 }
 
 _FIXTURE_DIR_NAMES = {"examples"}

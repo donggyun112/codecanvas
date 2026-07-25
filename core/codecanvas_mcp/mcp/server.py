@@ -12,7 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from codecanvas_mcp.mcp import queries
 from codecanvas_mcp.mcp.session import (
     get_builder, project_status as inspect_project_status, resolve_project,
-    ProjectNotFoundError, NoDefaultProjectError,
+    AmbiguousProjectRootError, ProjectNotFoundError, NoDefaultProjectError,
 )
 from codecanvas_mcp.parser.call_graph import ProjectTooLargeError
 
@@ -28,7 +28,9 @@ mcp = FastMCP(
         "glance (what_does); how its logic branches (function_flow); the exact "
         "conditions guarding each return/raise (reaching_conditions); where a "
         "codebase's entry points and HTTP routes live (list_entrypoints); and "
-        "the blast radius of a diff or PR (analyze_impact). When a suspected "
+        "the blast radius of a diff or PR (analyze_impact). Use verify_claim to "
+        "combine call paths and branch guards before stating a reachability "
+        "claim as fact. When a suspected "
         "bug depends on state shape, validate fields statically with "
         "validate_state_schema, then run focused synthetic or custom cases "
         "with simulate_state_transition.\n\n"
@@ -40,14 +42,100 @@ mcp = FastMCP(
 )
 
 
+def _evidence_metadata(payload: dict) -> dict:
+    confidences: list[str] = []
+    ambiguous: list[dict] = []
+    truncated = bool(payload.get("truncated"))
+
+    def walk(value):
+        nonlocal truncated
+        if isinstance(value, dict):
+            confidence = value.get("confidence")
+            if confidence in {"definite", "high", "inferred"}:
+                confidences.append(confidence)
+                if confidence == "inferred":
+                    identity = {
+                        key: value[key]
+                        for key in ("function", "caller", "callee", "via", "location")
+                        if key in value
+                    }
+                    if identity and identity not in ambiguous:
+                        ambiguous.append(identity)
+            note = value.get("note")
+            if isinstance(note, str) and "truncated" in note.lower():
+                truncated = True
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    walk(payload)
+    inferred_count = confidences.count("inferred")
+    grade = (
+        "inferred" if inferred_count
+        else "high" if "high" in confidences
+        else "definite"
+    )
+    safe = (
+        not inferred_count
+        and not ambiguous
+        and not truncated
+        and not payload.get("requires_root_selection", False)
+    )
+    metadata = {
+        "evidence_grade": grade,
+        "inferred_edge_count": inferred_count,
+        "ambiguous_calls": ambiguous,
+        "truncated": truncated,
+        "safe_to_summarize": safe,
+    }
+    if inferred_count:
+        metadata["response_guidance"] = (
+            "Do not turn inferred call edges into unconditional claims. "
+            "Name every ambiguous candidate or return an uncertain verdict."
+        )
+    elif truncated:
+        metadata["response_guidance"] = (
+            "Do not summarize this response as complete; narrow the query first."
+        )
+    elif payload.get("requires_root_selection"):
+        metadata["response_guidance"] = (
+            "Select one candidate analysis root before making code claims."
+        )
+    return metadata
+
+
+def _decorate_response(payload: dict, analysis_root: str) -> dict:
+    payload.setdefault("analysis_root", analysis_root)
+    for key, value in _evidence_metadata(payload).items():
+        payload.setdefault(key, value)
+    return payload
+
+
 def _with_builder(project_path, fn):
     try:
-        builder = get_builder(resolve_project(project_path))
+        root = resolve_project(project_path)
+        builder = get_builder(root)
+    except AmbiguousProjectRootError as e:
+        return {
+            "error": str(e),
+            "analysis_root": e.requested,
+            "candidate_roots": e.candidates,
+            "evidence_grade": "inferred",
+            "inferred_edge_count": 0,
+            "ambiguous_calls": [],
+            "truncated": False,
+            "safe_to_summarize": False,
+            "response_guidance": (
+                "Select one candidate analysis root before making code claims."
+            ),
+        }
     except (ProjectNotFoundError, NoDefaultProjectError) as e:
         return {"error": str(e)}
     except ProjectTooLargeError as e:
         return {"error": f"Project too large: {e}"}
-    return fn(builder)
+    return _decorate_response(fn(builder), root)
 
 
 @mcp.tool()
@@ -83,7 +171,8 @@ def find_symbols(query: str, project_path: str | None = None,
                  kind: str | None = None, path: str | None = None,
                  include_tests: bool = False, limit: int = 20,
                  cursor: str | None = None,
-                 search_mode: str = "hybrid") -> dict:
+                 search_mode: str = "hybrid",
+                 min_score: float = 0.68) -> dict:
     """Find project functions, methods, and classes by name, qualified name,
     scope, acronym, or docstring meaning. Results explain matched tokens,
     character spans, and likely symbol role. Continue with `next_cursor`;
@@ -93,6 +182,7 @@ def find_symbols(query: str, project_path: str | None = None,
         lambda b: queries.find_symbols(
             b, query, kind=kind, path=path, include_tests=include_tests,
             limit=limit, cursor=cursor, search_mode=search_mode,
+            min_score=min_score,
         ),
     )
 
@@ -103,8 +193,8 @@ def project_status(project_path: str | None = None) -> dict:
     and nested Python project roots. Use this when results look polluted or
     incomplete and you may need a narrower `project_path`."""
     try:
-        root = resolve_project(project_path)
-        return inspect_project_status(root)
+        root = resolve_project(project_path, allow_ambiguous=True)
+        return _decorate_response(inspect_project_status(root), root)
     except (ProjectNotFoundError, NoDefaultProjectError) as e:
         return {"error": str(e)}
 
@@ -165,13 +255,28 @@ def analyze_impact(project_path: str | None = None, diff_text: str | None = None
 @mcp.tool()
 def function_flow(function: str, project_path: str | None = None) -> dict:
     """Understand how a function works internally without reading the full
-    source — a de-noised control-flow outline showing branch/loop/try nesting,
-    early returns (with their dict-key shape), raises, and the meaningful calls
-    (logging and docstrings stripped out). Reach for this to grasp complex or
-    deeply-nested logic at a glance. For the exact conditions guarding each
-    return/raise, use `reaching_conditions` instead. `function` = qualified
-    name, bare name, file:line, or a scope-skipping suffix like `Class.nested`."""
+    source. `flow` is a structured branch tree with explicit `subject`, `scope`,
+    `condition`, and `nested_subjects`; `outline` is a compatibility rendering.
+    For exact return/raise guards, use `reaching_conditions`. `function` accepts
+    a qualified name, bare name, file:line, or scope-skipping suffix."""
     return _with_builder(project_path, lambda b: queries.function_flow(b, function))
+
+
+@mcp.tool()
+def verify_claim(claim: str, project_path: str | None = None,
+                 max_depth: int = 6) -> dict:
+    """Verify a qualified reachability claim before summarizing it.
+
+    Use `<source> reaches <target>`, optionally prefixed with context such as
+    `root task-mode`. The result combines static call paths, structured
+    `function_flow`, and `reaching_conditions`, returning `true`, `false`, or
+    `uncertain` plus a counterexample/qualification. Inferred-only paths never
+    receive a true verdict.
+    """
+    return _with_builder(
+        project_path,
+        lambda b: queries.verify_claim(b, claim, max_depth=max_depth),
+    )
 
 
 @mcp.tool()

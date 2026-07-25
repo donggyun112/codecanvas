@@ -369,3 +369,75 @@ def test_application_project_entrypoints_are_unchanged(tmp_path):
     entrypoints = EntryPointExtractor(str(tmp_path)).analyze()
 
     assert [(e.kind, e.handler_name) for e in entrypoints] == [("script", "main")]
+
+
+def test_main_guard_ignores_timers_constructors_and_nested_helpers(tmp_path):
+    _write(tmp_path, "run.py", """
+        from argparse import ArgumentParser
+        from time import perf_counter
+
+        class TracerProvider:
+            pass
+
+        def main():
+            pass
+
+        if __name__ == "__main__":
+            started = perf_counter()
+            parser = ArgumentParser()
+            tracer = TracerProvider()
+            print(perf_counter())
+            main()
+    """)
+
+    scripts = [
+        entry
+        for entry in EntryPointExtractor(str(tmp_path)).analyze()
+        if entry.kind == "script"
+    ]
+
+    assert [(entry.handler_name, entry.handler_line) for entry in scripts] == [
+        ("main", 7),
+    ]
+
+
+def test_main_guard_accepts_known_launcher_without_local_function(tmp_path):
+    _write(tmp_path, "run.py", """
+        import uvicorn
+
+        if __name__ == "__main__":
+            uvicorn.run("app:app")
+    """)
+
+    scripts = [
+        entry
+        for entry in EntryPointExtractor(str(tmp_path)).analyze()
+        if entry.kind == "script"
+    ]
+
+    assert [entry.handler_name for entry in scripts] == ["run"]
+
+
+def test_references_directory_is_excluded_from_entrypoint_discovery(tmp_path):
+    _write(tmp_path, "app.py", """
+        def main():
+            pass
+
+        if __name__ == "__main__":
+            main()
+    """)
+    _write(tmp_path, "references/copied.py", """
+        def copied_main():
+            pass
+
+        if __name__ == "__main__":
+            copied_main()
+    """)
+
+    scripts = [
+        entry.handler_name
+        for entry in EntryPointExtractor(str(tmp_path)).analyze()
+        if entry.kind == "script"
+    ]
+
+    assert scripts == ["main"]

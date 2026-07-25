@@ -7,10 +7,11 @@ impact — instead of grepping and guessing.
 ## Tools
 
 - `list_entrypoints` — API routes, scripts, and function entrypoints
-- `find_symbols` — name/docstring search with role and match evidence; cursor pagination
+- `find_symbols` — exact-first search with score floor and separated suggestions
 - `who_calls` / `call_tree` — reverse and forward call graph, N hops
 - `what_does` — signature, docstring, db/http/raise effects, risk
-- `function_flow` — de-noised control-flow outline of a function
+- `function_flow` — structured branch subjects/scopes plus compatibility outline
+- `verify_claim` — conservative reachability verdict from call paths and guards
 - `reaching_conditions` — the guard conditions behind every return/raise
 - `analyze_impact` — changed functions and affected entrypoints/public surface for a diff or git ref
 

@@ -146,14 +146,17 @@ Tools:
 | Tool | Answers |
 |---|---|
 | `list_entrypoints` | What entrypoints exist in this project? |
-| `find_symbols` | Find symbols by name or docstring meaning, with role/match evidence and cursor pagination. |
+| `find_symbols` | Exact-first symbol search with a score floor, separated suggestions, role/match evidence, and cursor pagination. |
 | `who_calls` | Who calls this function? (ground-truth reverse edges) |
 | `what_does` | What does this function do? (signature, effects, risk) |
-| `function_flow` | How does this function work? (de-noised control-flow outline: branches, loops, try/finally, early returns, key calls) |
+| `function_flow` | How does this function work? (structured branch subjects/scopes plus a compatibility outline) |
+| `verify_claim` | Is a qualified `source reaches target` claim true, false, or uncertain? |
 | `analyze_impact` | What entrypoints/public surfaces break if I apply this diff? |
 
 `list_entrypoints` also accepts `filter` / `kind` to narrow large projects.
-All tools take a `project_path`; outputs are compact and token-bounded.
+All tools take a `project_path`; outputs are compact and token-bounded. Every
+successful response identifies `analysis_root` and carries evidence/truncation
+metadata that says whether it is safe to summarize as an unconditional claim.
 
 For libraries it reports the public API surface as `kind="export"`, read from
 each distributed package's `__all__` (or, absent one, its `__init__.py` public

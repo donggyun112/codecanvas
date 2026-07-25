@@ -4,7 +4,8 @@ import pytest
 
 from codecanvas_mcp.mcp import session
 from codecanvas_mcp.mcp.session import (
-    get_builder, resolve_project, ProjectNotFoundError, NoDefaultProjectError,
+    AmbiguousProjectRootError, get_builder, resolve_project,
+    ProjectNotFoundError, NoDefaultProjectError,
 )
 
 SAMPLE = Path(__file__).parent.parent / "sample-fastapi"
@@ -52,10 +53,10 @@ def test_resolve_project_no_default_raises():
         resolve_project(None)
 
 
-def test_resolve_project_explicit_updates_default():
+def test_resolve_project_explicit_updates_default(tmp_path):
     resolve_project(str(SAMPLE))
     # A second explicit path becomes the new default (last-explicit-wins).
-    other = str(SAMPLE.parent)
+    other = str(tmp_path)
     resolve_project(other)
     assert resolve_project(None) == str(Path(other).resolve())
 
@@ -72,3 +73,44 @@ def test_server_tool_uses_default_after_first_call():
     # Omitting project_path reuses the last project.
     second = server.who_calls("verify_user")
     assert "callers" in second, second
+
+
+def test_resolve_project_blocks_broad_root_with_nested_python_root(tmp_path):
+    nested = tmp_path / "product"
+    nested.mkdir()
+    (nested / "pyproject.toml").write_text(
+        '[project]\nname = "product"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "loose.py").write_text("x = 1\n", encoding="utf-8")
+
+    with pytest.raises(AmbiguousProjectRootError) as exc:
+        resolve_project(str(tmp_path))
+
+    assert exc.value.candidates == [str(nested.resolve())]
+    assert session._default_project is None
+
+
+def test_project_status_allows_inspecting_ambiguous_root(tmp_path):
+    from codecanvas_mcp.mcp import server
+
+    for name in ("alpha", "beta"):
+        nested = tmp_path / name
+        nested.mkdir()
+        (nested / "pyproject.toml").write_text(
+            f'[project]\nname = "{name}"\nversion = "0.1.0"\n',
+            encoding="utf-8",
+        )
+
+    out = server.project_status(str(tmp_path))
+
+    assert out["requires_root_selection"] is True
+    assert out["safe_to_summarize"] is False
+    assert out["analysis_root"] == str(tmp_path.resolve())
+    assert len(out["candidate_roots"]) == 2
+
+    blocked = server.list_entrypoints(str(tmp_path))
+    assert "ambiguous" in blocked["error"].lower()
+    assert blocked["analysis_root"] == str(tmp_path.resolve())
+    assert blocked["candidate_roots"] == out["candidate_roots"]
+    assert blocked["safe_to_summarize"] is False

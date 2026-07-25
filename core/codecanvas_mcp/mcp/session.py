@@ -6,6 +6,7 @@ The MCP layer reuses FlowGraphBuilder purely as a composition + cache root
 from __future__ import annotations
 
 from collections import OrderedDict
+import os
 from pathlib import Path
 
 from codecanvas_mcp.graph.builder import FlowGraphBuilder
@@ -29,7 +30,41 @@ class NoDefaultProjectError(Exception):
     """Raised when project_path is omitted and no project has been used yet."""
 
 
-def resolve_project(project_path: str | None) -> str:
+class AmbiguousProjectRootError(Exception):
+    """Raised when a broad path contains one or more narrower Python roots."""
+
+    def __init__(self, requested: str, candidates: list[str]):
+        self.requested = requested
+        self.candidates = candidates
+        choices = ", ".join(candidates)
+        super().__init__(
+            f"Analysis root is ambiguous: {requested}. "
+            f"Choose an explicit Python project root: {choices}"
+        )
+
+
+_ROOT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")
+_ROOT_SCAN_EXCLUDES = {
+    ".git", ".venv", "venv", "__pycache__", "node_modules", "migrations",
+    ".tox", ".eggs", "dist", "build", "references", "reference", "vendor",
+    "vendored", "third_party",
+}
+
+
+def _candidate_python_roots(root: Path) -> list[str]:
+    candidates: set[str] = set()
+    for directory, subdirs, files in os.walk(root):
+        subdirs[:] = [d for d in subdirs if d not in _ROOT_SCAN_EXCLUDES]
+        if any(marker in files for marker in _ROOT_MARKERS):
+            candidates.add(str(Path(directory).resolve()))
+    return sorted(candidates, key=lambda path: (path.count(os.sep), path))
+
+
+def resolve_project(
+    project_path: str | None,
+    *,
+    allow_ambiguous: bool = False,
+) -> str:
     """Resolve the effective project path for a tool call.
 
     An explicit ``project_path`` wins and becomes the remembered default
@@ -40,7 +75,12 @@ def resolve_project(project_path: str | None) -> str:
     if project_path:
         if not Path(project_path).is_dir():
             raise ProjectNotFoundError(f"Directory not found: {project_path}")
-        _default_project = str(Path(project_path).resolve())
+        resolved = str(Path(project_path).resolve())
+        candidates = _candidate_python_roots(Path(resolved))
+        narrower = [candidate for candidate in candidates if candidate != resolved]
+        if not allow_ambiguous and (len(candidates) > 1 or narrower):
+            raise AmbiguousProjectRootError(resolved, candidates)
+        _default_project = resolved
         return _default_project
     if _default_project is not None:
         return _default_project
@@ -75,15 +115,7 @@ def project_status(project_path: str) -> dict:
     """Inspect analysis scope and suggest narrower Python project roots."""
     root = Path(project_path).resolve()
     py_files = _iter_project_python_files(root)
-    markers = ("pyproject.toml", "setup.py", "setup.cfg")
-    candidates = set()
-    for marker in markers:
-        for found in root.glob(marker):
-            candidates.add(str(found.parent))
-        for found in root.glob(f"*/{marker}"):
-            candidates.add(str(found.parent))
-        for found in root.glob(f"*/*/{marker}"):
-            candidates.add(str(found.parent))
+    candidates = set(_candidate_python_roots(root))
     cache_path = root / CACHE_DIR_NAME / CACHE_FILE_NAME
     recommendations = sorted(candidates, key=lambda p: (p.count("/"), p))
 
@@ -109,13 +141,21 @@ def project_status(project_path: str) -> dict:
             "exists": cache_path.is_file(),
         },
         "candidate_roots": recommendations,
+        "requires_root_selection": (
+            len(recommendations) > 1
+            or any(candidate != str(root) for candidate in recommendations)
+        ),
         "recommended_root": (
             str(root) if str(root) in candidates
             else recommendations[0] if recommendations
             else str(root)
         ),
         "note": (
-            "Multiple Python project roots detected; consider a narrower project_path."
-            if len(recommendations) > 1 else None
+            "Analysis is blocked for other tools until an explicit candidate root is selected."
+            if (
+                len(recommendations) > 1
+                or any(candidate != str(root) for candidate in recommendations)
+            )
+            else None
         ),
     }

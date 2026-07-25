@@ -62,7 +62,8 @@ def _iter_project_python_files(project_root: Path) -> list[str]:
         dirs[:] = [
             d for d in dirs
             if d not in {".venv", "venv", "__pycache__", ".git",
-                         "node_modules", "migrations"}
+                         "node_modules", "migrations", "references",
+                         "reference", "vendor", "vendored", "third_party"}
         ]
         for f in files:
             if f.endswith(".py"):

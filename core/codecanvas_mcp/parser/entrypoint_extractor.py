@@ -93,6 +93,7 @@ class EntryPointExtractor:
         exclude = {
             ".venv", "venv", "node_modules", "__pycache__", ".git",
             "migrations", ".tox", ".eggs", "dist", "build",
+            "references", "reference", "vendor", "vendored", "third_party",
         }
         result: list[str] = []
         for root, dirs, files in os.walk(self.project_root):
@@ -250,21 +251,68 @@ class EntryPointExtractor:
 
     def _main_guard_targets(self, tree: ast.Module) -> list[tuple[str, int]]:
         targets: list[tuple[str, int]] = []
+        local_functions = {
+            node.name for node in self._top_level_functions(tree)
+        }
         for node in tree.body:
             if not isinstance(node, ast.If) or not self._is_main_guard(node.test):
                 continue
             for stmt in node.body:
-                for call in ast.walk(stmt):
-                    if not isinstance(call, ast.Call):
-                        continue
-                    call_name = self._call_name(call)
-                    if not call_name or call_name in {"print", "SystemExit", "exit"}:
-                        continue
-                    targets.append((call_name.split(".")[-1], call.lineno))
-                    break
-                if targets:
+                call = self._direct_execution_call(stmt)
+                if call is None:
+                    continue
+                call = self._unwrap_launcher_target(call, local_functions)
+                call_name = self._call_name(call)
+                tail = call_name.rsplit(".", 1)[-1]
+                if (
+                    tail in local_functions
+                    or call_name in {
+                        "uvicorn.run",
+                        "hypercorn.asyncio.serve",
+                        "typer.run",
+                    }
+                ):
+                    targets.append((tail, call.lineno))
                     break
         return targets
+
+    @classmethod
+    def _direct_execution_call(cls, stmt: ast.stmt) -> ast.Call | None:
+        value: ast.AST | None = None
+        if isinstance(stmt, ast.Expr):
+            value = stmt.value
+        elif isinstance(stmt, ast.Raise):
+            value = stmt.exc
+        if isinstance(value, ast.Await):
+            value = value.value
+        if not isinstance(value, ast.Call):
+            return None
+
+        name = cls._call_name(value)
+        if name in {"print"}:
+            return None
+        if name in {"SystemExit", "exit", "sys.exit"}:
+            for arg in value.args:
+                if isinstance(arg, ast.Call):
+                    return arg
+            return None
+        return value
+
+    @classmethod
+    def _unwrap_launcher_target(
+        cls,
+        call: ast.Call,
+        local_functions: set[str],
+    ) -> ast.Call:
+        if cls._call_name(call) not in {"asyncio.run", "anyio.run"}:
+            return call
+        for arg in call.args:
+            if (
+                isinstance(arg, ast.Call)
+                and cls._call_name(arg).rsplit(".", 1)[-1] in local_functions
+            ):
+                return arg
+        return call
 
     @staticmethod
     def _is_main_guard(test: ast.AST) -> bool:

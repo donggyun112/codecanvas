@@ -835,9 +835,9 @@ def test_find_symbols_paginates_with_query_bound_cursor(tmp_path):
             def load_user_profile(): pass
         """,
     })
-    first = queries.find_symbols(builder, "load user", limit=1)
+    first = queries.find_symbols(builder, "load user item", limit=1)
     second = queries.find_symbols(
-        builder, "load user", limit=1, cursor=first["next_cursor"],
+        builder, "load user item", limit=1, cursor=first["next_cursor"],
     )
 
     assert first["has_more"] is True
@@ -892,7 +892,7 @@ def test_find_symbols_marks_tool_wrappers_and_demotes_external_sources(tmp_path)
             def project_status():
                 return {"ok": True}
         """,
-        "references/tool.py": """
+        "env/lib/site-packages/tool.py": """
             def project_status():
                 return {"external": True}
         """,
@@ -902,7 +902,8 @@ def test_find_symbols_marks_tool_wrappers_and_demotes_external_sources(tmp_path)
     assert out["symbols"][0]["role"] == "entrypoint"
     assert out["symbols"][1]["role"] == "function"
     external = next(
-        row for row in out["symbols"] if row["location"].endswith("references/tool.py:1")
+        row for row in out["symbols"]
+        if row["location"].endswith("site-packages/tool.py:1")
     )
     assert external["role"] == "external"
     assert external["score"] < out["symbols"][0]["score"]
@@ -920,6 +921,43 @@ def test_find_symbols_drops_unrelated_short_partial_matches(tmp_path):
 
     assert out["symbols"][0]["name"] == "resolve_function"
     assert {row["name"] for row in out["symbols"]}.isdisjoint({"func", "stats"})
+
+
+def test_find_symbols_exact_match_suppresses_fuzzy_primary_results(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "symbols.py": """
+            def rank_and_select(): pass
+            def rank_key(): pass
+            def handle_raise(): pass
+            def handle_try(): pass
+        """,
+    })
+    out = queries.find_symbols(builder, "rank_and_select")
+
+    assert [row["name"] for row in out["symbols"]] == ["rank_and_select"]
+    assert out["count"] == 1
+    assert all(
+        row["name"] != "handle_raise"
+        for row in out["suggestions"]
+    )
+
+
+def test_find_symbols_separates_below_threshold_suggestions(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "symbols.py": """
+            def load_customer_profile(): pass
+            def load_customer_preferences(): pass
+            def customer_archive(): pass
+        """,
+    })
+    out = queries.find_symbols(
+        builder, "load customer profile", min_score=0.9,
+    )
+
+    assert out["symbols"][0]["name"] == "load_customer_profile"
+    assert all(row["score"] >= 0.9 for row in out["symbols"])
+    assert out["suggestions"]
+    assert all(row["score"] < 0.9 for row in out["suggestions"])
 
 
 def test_find_symbols_searches_docstring_meaning(tmp_path):
@@ -1023,3 +1061,51 @@ def test_ambiguous_call_preserves_all_inferred_candidates(tmp_path):
     for node in shared:
         callers = queries.who_calls(builder, node["function"])
         assert callers["callers"][0]["confidence"] == "inferred"
+
+
+CLAIM_GOLDEN_APP = {
+    "agent.py": """
+        class Runner:
+            async def run(self):
+                if self.agent.mode == "chat":
+                    has_task_subagent = any(
+                        sa.mode == "task" for sa in self.agent.subagents
+                    )
+                    if has_task_subagent:
+                        return self.ctx.run_node(self.agent)
+                    return await self._run_node_async()
+                raise ValueError("root must use chat mode")
+
+            async def _run_node_async(self):
+                return None
+    """,
+}
+
+
+def test_verify_claim_rejects_root_task_mode_reachability(tmp_path):
+    builder = _tmp_builder(tmp_path, CLAIM_GOLDEN_APP)
+    out = queries.verify_claim(
+        builder,
+        "root task-mode Runner reaches _run_node_async",
+    )
+
+    assert out["verdict"] == "false"
+    assert "mode=task" in out["counterexample"]
+    assert "mode == 'chat'" in out["counterexample"]
+    assert out["qualification"].startswith(
+        "task-mode sub-agent is nested under root guard"
+    )
+    assert out["evidence"]["function_flow"]
+    assert out["evidence"]["reaching_conditions"]
+
+
+def test_verify_claim_accepts_root_chat_mode_reachability(tmp_path):
+    builder = _tmp_builder(tmp_path, CLAIM_GOLDEN_APP)
+    out = queries.verify_claim(
+        builder,
+        "root chat-mode Runner.run reaches _run_node_async",
+    )
+
+    assert out["verdict"] == "true"
+    assert out["counterexample"] is None
+    assert out["paths"][0]["edges"][0]["confidence"] in {"definite", "high"}

@@ -172,7 +172,9 @@ class FastAPIExtractor:
     def _find_python_files(self) -> list[str]:
         """Find all .py files in the project, excluding common non-source dirs."""
         exclude = {".venv", "venv", "node_modules", "__pycache__", ".git",
-                   "migrations", ".tox", ".eggs", "dist", "build"}
+                   "migrations", ".tox", ".eggs", "dist", "build",
+                   "references", "reference", "vendor", "vendored",
+                   "third_party"}
         result = []
         for root, dirs, files in os.walk(self.project_root):
             dirs[:] = [d for d in dirs if d not in exclude]

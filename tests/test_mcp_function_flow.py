@@ -95,7 +95,40 @@ def test_queries_function_flow_shape(tmp_path):
     out = queries.function_flow(_B(), "run")
     assert out["function"].endswith("Svc.run")
     assert isinstance(out["flow"], list) and out["flow"]
-    assert any("try:" in ln for ln in out["flow"])
+    assert any(row["kind"] == "try" for row in out["flow"])
+    assert any("try:" in line for line in out["outline"])
+    assert out["truncated"] is False
+
+
+def test_queries_function_flow_separates_root_and_sub_agent_subjects(tmp_path):
+    cg = _build(tmp_path, '''
+class Runner:
+    async def run(self):
+        if self.agent.mode == "chat":
+            has_task_subagent = any(
+                sa.mode == "task" for sa in self.agent.subagents
+            )
+            if has_task_subagent:
+                return self.ctx.run_node(self.agent)
+            return await self._run_node_async()
+        raise ValueError("root must use chat mode")
+
+    async def _run_node_async(self):
+        return None
+''')
+
+    class _B:
+        call_graph = cg
+
+    out = queries.function_flow(_B(), "Runner.run")
+    root_branch = out["flow"][0]
+    assert root_branch["subject"] == "self.agent"
+    assert root_branch["scope"] == "root_agent"
+    assert root_branch["condition"] == "mode == 'chat'"
+    assert {
+        (subject["subject"], subject["scope"], subject["condition"])
+        for subject in root_branch["nested_subjects"]
+    } >= {("sa", "sub_agent", "mode == 'task'")}
 
 
 def test_queries_function_flow_on_class_returns_error(tmp_path):

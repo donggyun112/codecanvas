@@ -37,6 +37,164 @@ def function_flow_lines(node: ast.AST, max_lines: int = 400) -> tuple[list[str],
     return lines, truncated
 
 
+def function_flow_tree(node: ast.AST, max_nodes: int = 400) -> tuple[list[dict], bool]:
+    """Return a JSON-safe control-flow tree with explicit subject scopes."""
+    budget = {"remaining": max_nodes, "truncated": False}
+    flow = _structured_block(list(getattr(node, "body", [])), budget)
+    return flow, budget["truncated"]
+
+
+def _structured_block(stmts: list[ast.stmt], budget: dict) -> list[dict]:
+    rows: list[dict] = []
+    for stmt in stmts:
+        if budget["remaining"] <= 0:
+            budget["truncated"] = True
+            break
+        budget["remaining"] -= 1
+        row = _structured_stmt(stmt, budget)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def _subject_scope(subject: str, *, generator_target: bool = False) -> str:
+    simple = subject.rsplit(".", 1)[-1].lower()
+    if generator_target or simple in {
+        "sa", "subagent", "sub_agent", "child", "child_agent", "worker",
+    }:
+        return "sub_agent"
+    if subject.startswith("self.") or simple in {"self", "agent", "root", "root_agent"}:
+        return "root_agent"
+    return "local"
+
+
+def _condition_subjects(node: ast.AST) -> list[dict]:
+    generator_names = {
+        name.id
+        for gen in ast.walk(node)
+        if isinstance(gen, (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp))
+        for clause in gen.generators
+        for name in ast.walk(clause.target)
+        if isinstance(name, ast.Name)
+    }
+    subjects: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in ast.walk(node):
+        if not isinstance(candidate, ast.Compare) or not candidate.ops:
+            continue
+        operands = [candidate.left, *candidate.comparators]
+        attribute = next(
+            (
+                operand for operand in operands
+                if isinstance(operand, ast.Attribute) and operand.attr == "mode"
+            ),
+            None,
+        )
+        if attribute is None:
+            continue
+        subject = _expr(attribute.value)
+        condition = _expr(candidate)
+        key = (subject, condition)
+        if key in seen:
+            continue
+        seen.add(key)
+        subjects.append({
+            "subject": subject,
+            "scope": _subject_scope(
+                subject, generator_target=subject in generator_names,
+            ),
+            "condition": condition.replace(f"{subject}.", "", 1),
+        })
+    return subjects
+
+
+def _branch_identity(test: ast.AST) -> dict:
+    subjects = _condition_subjects(test)
+    if subjects:
+        return subjects[0]
+    names = [n.id for n in ast.walk(test) if isinstance(n, ast.Name)]
+    subject = names[0] if names else ""
+    return {
+        "subject": subject,
+        "scope": _subject_scope(subject) if subject else "local",
+        "condition": _expr(test),
+    }
+
+
+def _nested_subjects(stmt: ast.stmt, primary: dict) -> list[dict]:
+    nested = []
+    primary_key = (primary.get("subject"), primary.get("condition"))
+    for subject in _condition_subjects(stmt):
+        if (subject["subject"], subject["condition"]) != primary_key:
+            nested.append(subject)
+    return nested
+
+
+def _structured_stmt(stmt: ast.stmt, budget: dict) -> dict | None:
+    if isinstance(stmt, ast.If):
+        identity = _branch_identity(stmt.test)
+        row = {
+            "kind": "branch",
+            "at": stmt.lineno,
+            **identity,
+            "nested_subjects": _nested_subjects(stmt, identity),
+            "then": _structured_block(stmt.body, budget),
+        }
+        if stmt.orelse:
+            row["else"] = _structured_block(stmt.orelse, budget)
+        return row
+    if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+        condition = (
+            _expr(stmt.test) if isinstance(stmt, ast.While)
+            else f"{_expr(stmt.target)} in {_expr(stmt.iter)}"
+        )
+        return {
+            "kind": "loop",
+            "at": stmt.lineno,
+            "condition": condition,
+            "body": _structured_block(stmt.body, budget),
+        }
+    if isinstance(stmt, _try_types()):
+        return {
+            "kind": "try",
+            "at": stmt.lineno,
+            "body": _structured_block(stmt.body, budget),
+            "handlers": [
+                {
+                    "condition": f"except {_expr(handler.type)}".strip(),
+                    "body": _structured_block(handler.body, budget),
+                }
+                for handler in stmt.handlers
+            ],
+            "else": _structured_block(stmt.orelse, budget),
+            "finally": _structured_block(stmt.finalbody, budget),
+        }
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        return {
+            "kind": "context",
+            "at": stmt.lineno,
+            "condition": ", ".join(_expr(item.context_expr) for item in stmt.items),
+            "body": _structured_block(stmt.body, budget),
+        }
+    if isinstance(stmt, ast.Return):
+        return {"kind": "return", "at": stmt.lineno, "value": _return_val(stmt.value)}
+    if isinstance(stmt, ast.Raise):
+        return {"kind": "raise", "at": stmt.lineno, "value": _raise_txt(stmt.exc)}
+    if isinstance(stmt, (ast.Break, ast.Continue)):
+        return {"kind": stmt.__class__.__name__.lower(), "at": stmt.lineno}
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {
+            "kind": "nested_definition",
+            "at": stmt.lineno,
+            "name": stmt.name,
+        }
+    rendered = _significant(stmt)
+    if rendered is None:
+        return None
+    kind = "assignment" if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else "call"
+    return {"kind": kind, "at": stmt.lineno, "text": rendered}
+
+
 def _walk(stmts: list, indent: int, out: list) -> None:
     for s in stmts:
         _emit(s, indent, out)

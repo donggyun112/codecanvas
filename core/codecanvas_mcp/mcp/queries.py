@@ -407,9 +407,9 @@ def _match_evidence(query: str, alias: str, field: str, strategy: str) -> dict:
 
 
 def _cursor_fingerprint(query: str, kind, path, include_tests: bool,
-                        search_mode: str) -> str:
+                        search_mode: str, min_score: float) -> str:
     raw = json.dumps(
-        [query, kind, path, include_tests, search_mode],
+        [query, kind, path, include_tests, search_mode, min_score],
         ensure_ascii=True,
         separators=(",", ":"),
     )
@@ -438,9 +438,41 @@ def _decode_symbol_cursor(cursor: str | None, fingerprint: str) -> tuple[int, st
         return 0, "cursor is invalid or belongs to a different search."
 
 
+_SEARCH_STOPWORDS = {"a", "an", "and", "for", "in", "of", "or", "the", "to"}
+
+
+def _has_common_query_token(query: str, alias: str) -> bool:
+    query_tokens = [
+        token for token in _symbol_words(query) if token not in _SEARCH_STOPWORDS
+    ]
+    alias_tokens = [
+        token for token in _symbol_words(alias) if token not in _SEARCH_STOPWORDS
+    ]
+    if set(query_tokens).intersection(alias_tokens):
+        return True
+    return any(
+        fuzz.ratio(query_token, alias_token) >= 80
+        for query_token in query_tokens
+        for alias_token in alias_tokens
+    )
+
+
+def _render_symbol_row(row: dict, needle: str) -> dict:
+    rendered = dict(row)
+    func = rendered.pop("_func")
+    alias = rendered.pop("_match_alias")
+    field = rendered.pop("_match_field")
+    strategy = rendered.pop("_match_strategy")
+    role, role_evidence = _symbol_role(func)
+    rendered["match"] = _match_evidence(needle, alias, field, strategy)
+    rendered["role"] = role
+    rendered["role_evidence"] = role_evidence
+    return rendered
+
+
 def find_symbols(builder, query: str, kind=None, path=None,
                  include_tests=False, limit: int = 20, cursor: str | None = None,
-                 search_mode: str = "hybrid") -> dict:
+                 search_mode: str = "hybrid", min_score: float = 0.68) -> dict:
     """Find symbols by identifier and, optionally, docstring meaning."""
     needle = (query or "").strip()
     if not needle:
@@ -448,8 +480,9 @@ def find_symbols(builder, query: str, kind=None, path=None,
     if search_mode not in {"name", "semantic", "hybrid"}:
         return {"error": "search_mode must be name, semantic, or hybrid."}
     limit = max(1, min(int(limit), 100))
+    min_score = max(0.0, min(float(min_score), 1.0))
     fingerprint = _cursor_fingerprint(
-        needle, kind, path, include_tests, search_mode,
+        needle, kind, path, include_tests, search_mode, min_score,
     )
     offset, cursor_error = _decode_symbol_cursor(cursor, fingerprint)
     if cursor_error:
@@ -515,6 +548,10 @@ def find_symbols(builder, query: str, kind=None, path=None,
                     or (name_too_short and not query_tokens.intersection(name_tokens))
                 ):
                     continue
+                if not _has_common_query_token(needle, aliases[(index, reason)]):
+                    continue
+            elif not _has_common_query_token(needle, aliases[(index, reason)]):
+                continue
             if reason == "docstring":
                 score *= 0.92
             func = funcs[index][0]
@@ -548,21 +585,26 @@ def find_symbols(builder, query: str, kind=None, path=None,
             "matched_by": strategy if strategy == "exact" else f"{field}:{strategy}",
         })
     rows.sort(key=lambda row: (
+        row["matched_by"] != "exact",
         -row["score"],
         len(row["qualified_name"]),
         row["qualified_name"],
     ))
-    total = len(rows)
-    page = rows[offset:offset + limit]
-    for row in page:
-        func = row.pop("_func")
-        alias = row.pop("_match_alias")
-        field = row.pop("_match_field")
-        strategy = row.pop("_match_strategy")
-        role, role_evidence = _symbol_role(func)
-        row["match"] = _match_evidence(needle, alias, field, strategy)
-        row["role"] = role
-        row["role_evidence"] = role_evidence
+    exact_rows = [row for row in rows if row["matched_by"] == "exact"]
+    eligible = exact_rows or [row for row in rows if row["score"] >= min_score]
+    suggestion_rows = [
+        row for row in rows
+        if row not in eligible and row["score"] >= 0.5
+    ][:5]
+    total = len(eligible)
+    page = [
+        _render_symbol_row(row, needle)
+        for row in eligible[offset:offset + limit]
+    ]
+    suggestions = [
+        _render_symbol_row(row, needle)
+        for row in suggestion_rows
+    ]
     next_offset = offset + len(page)
     has_more = next_offset < total
     return {
@@ -574,6 +616,8 @@ def find_symbols(builder, query: str, kind=None, path=None,
             _encode_symbol_cursor(next_offset, fingerprint) if has_more else None
         ),
         "search_mode": search_mode,
+        "min_score": min_score,
+        "suggestions": suggestions,
     }
 
 
@@ -800,11 +844,15 @@ def function_flow(builder, function: str) -> dict:
             "error": f"No function body available for '{func.qualified_name}' "
                      f"(it may be a class or an unparsed definition).",
         }
-    lines, truncated = outline.function_flow_lines(ast_node)
+    flow, truncated = outline.function_flow_tree(ast_node)
+    lines, outline_truncated = outline.function_flow_lines(ast_node)
+    truncated = truncated or outline_truncated
     out = {
         "function": func.qualified_name,
         "location": f"{func.file_path}:{func.line_start}",
-        "flow": lines,
+        "flow": flow,
+        "outline": lines,
+        "truncated": truncated,
     }
     if truncated:
         out["note"] = f"outline truncated at {len(lines)} lines"
@@ -959,6 +1007,315 @@ def reaching_conditions(builder, function: str, target=None) -> dict:
     if dead:
         out["dead_code"] = sorted(set(dead))
     return out
+
+
+def _claim_refs(claim: str) -> tuple[str, str] | None:
+    match = re.search(
+        r"(?P<left>.+?)\s+reaches\s+(?P<target>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)",
+        claim,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    identifiers = re.findall(
+        r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*",
+        match.group("left"),
+    )
+    ignored = {"root", "sub", "agent", "task", "chat", "mode"}
+    sources = [
+        identifier for identifier in identifiers
+        if identifier.lower() not in ignored
+    ]
+    if not sources:
+        return None
+    return sources[-1], match.group("target")
+
+
+def _claim_mode(claim: str) -> str | None:
+    match = re.search(r"\b([A-Za-z_]\w*)[-_\s]+mode\b", claim, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    match = re.search(
+        r"\bmode\s*(?:==|=|is)\s*['\"]?([A-Za-z_]\w*)",
+        claim,
+        re.IGNORECASE,
+    )
+    return match.group(1).lower() if match else None
+
+
+def _claim_scope(claim: str) -> str | None:
+    lowered = claim.lower()
+    if re.search(r"\b(root|root_agent)\b", lowered):
+        return "root_agent"
+    if re.search(r"\b(sub[-_ ]?agent|child[-_ ]?agent)\b", lowered):
+        return "sub_agent"
+    return None
+
+
+def _line_guards(node, line: int) -> list[str]:
+    import ast
+    from codecanvas_mcp.mcp import outline
+
+    def contains(stmt) -> bool:
+        return stmt.lineno <= line <= getattr(stmt, "end_lineno", stmt.lineno)
+
+    def visit(stmts, guards):
+        for stmt in stmts:
+            if not contains(stmt):
+                continue
+            if isinstance(stmt, ast.If):
+                condition = outline._expr(stmt.test)
+                if any(contains(child) for child in stmt.body):
+                    return visit(stmt.body, guards + [condition])
+                if any(contains(child) for child in stmt.orelse):
+                    return visit(stmt.orelse, guards + [f"not ({condition})"])
+            if isinstance(stmt, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+                if any(contains(child) for child in stmt.body):
+                    return visit(stmt.body, guards)
+                for handler in stmt.handlers:
+                    if any(contains(child) for child in handler.body):
+                        typ = outline._expr(handler.type) if handler.type else ""
+                        return visit(
+                            handler.body,
+                            guards + [f"except {typ}".strip()],
+                        )
+                for block in (stmt.orelse, stmt.finalbody):
+                    if any(contains(child) for child in block):
+                        return visit(block, guards)
+            if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+                if any(contains(child) for child in stmt.body):
+                    return visit(stmt.body, guards + ["loop"])
+            if isinstance(stmt, (ast.With, ast.AsyncWith)):
+                return visit(stmt.body, guards)
+            return guards
+        return guards
+
+    return visit(getattr(node, "body", []), [])
+
+
+def _guard_mode_fact(guard: str) -> tuple[str, str, bool] | None:
+    match = re.search(
+        r"(?P<subject>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\.mode\s*"
+        r"==\s*['\"](?P<mode>[A-Za-z_]\w*)['\"]",
+        guard,
+    )
+    if not match:
+        return None
+    compact = guard.strip()
+    negated = compact.startswith("not (") or compact.startswith("not ")
+    return match.group("subject"), match.group("mode").lower(), negated
+
+
+def _claim_subject_scope(subject: str) -> str:
+    simple = subject.rsplit(".", 1)[-1].lower()
+    if simple in {"sa", "subagent", "sub_agent", "child", "child_agent"}:
+        return "sub_agent"
+    if subject.startswith("self.") or simple in {"self", "agent", "root_agent"}:
+        return "root_agent"
+    return "local"
+
+
+def _guard_contradiction(
+    guard: str,
+    mode: str | None,
+    scope: str | None,
+) -> str | None:
+    if mode is None:
+        return None
+    fact = _guard_mode_fact(guard)
+    if fact is None:
+        return None
+    subject, required, negated = fact
+    if scope and _claim_subject_scope(subject) != scope:
+        return None
+    conflicts = (not negated and mode != required) or (negated and mode == required)
+    return guard if conflicts else None
+
+
+def _claim_source_functions(builder, source_ref: str):
+    func, err = resolve_function(builder, source_ref)
+    if err is not None:
+        return [], err
+    if func.definition_type != "class":
+        return [func], None
+    prefix = func.qualified_name + "."
+    methods = [
+        candidate
+        for candidate in builder.call_graph.all_functions()
+        if candidate.qualified_name.startswith(prefix)
+        and candidate.definition_type != "class"
+    ]
+    return methods, None
+
+
+def _claim_paths(builder, sources, target, max_depth: int = 6) -> list[dict]:
+    cg = builder.call_graph
+    paths: list[dict] = []
+    for source in sources:
+        frontier = [(source, [], {source.qualified_name})]
+        while frontier:
+            caller, edges, visited = frontier.pop(0)
+            if len(edges) >= max_depth:
+                continue
+            caller_node = cg.get_ast_node(caller.qualified_name)
+            for call in caller.calls:
+                guards = (
+                    _line_guards(caller_node, call.line)
+                    if caller_node is not None else []
+                )
+                for callee, confidence in cg.resolve_call_candidates(call, caller):
+                    edge = {
+                        "caller": caller.qualified_name,
+                        "callee": callee.qualified_name,
+                        "at": call.line,
+                        "guards": guards,
+                        "confidence": confidence,
+                    }
+                    next_edges = edges + [edge]
+                    if callee.qualified_name == target.qualified_name:
+                        paths.append({
+                            "source": source.qualified_name,
+                            "target": target.qualified_name,
+                            "edges": next_edges,
+                        })
+                        continue
+                    if callee.qualified_name in visited:
+                        continue
+                    frontier.append(
+                        (callee, next_edges, visited | {callee.qualified_name}),
+                    )
+    return paths
+
+
+def _flow_qualification(flow: list[dict], mode: str | None) -> str | None:
+    if mode is None:
+        return None
+
+    def visit(rows, root_condition=None):
+        for row in rows:
+            if row.get("kind") == "branch":
+                condition = row.get("condition", "")
+                active_root = (
+                    condition
+                    if row.get("scope") == "root_agent"
+                    else root_condition
+                )
+                for nested in row.get("nested_subjects", []):
+                    if (
+                        nested.get("scope") == "sub_agent"
+                        and mode in nested.get("condition", "").lower()
+                        and active_root
+                    ):
+                        return (
+                            f"{mode}-mode sub-agent is nested under root guard "
+                            f"{active_root}"
+                        )
+                found = visit(row.get("then", []), active_root)
+                if found:
+                    return found
+                found = visit(row.get("else", []), active_root)
+                if found:
+                    return found
+            for key in ("body", "else", "finally"):
+                nested_rows = row.get(key)
+                if isinstance(nested_rows, list):
+                    found = visit(nested_rows, root_condition)
+                    if found:
+                        return found
+            for handler in row.get("handlers", []):
+                found = visit(handler.get("body", []), root_condition)
+                if found:
+                    return found
+        return None
+
+    return visit(flow)
+
+
+def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
+    """Conservatively verify ``source reaches target`` under mode qualifiers."""
+    parsed = _claim_refs((claim or "").strip())
+    if parsed is None:
+        return {
+            "error": (
+                "claim must use '<source> reaches <target>', optionally with "
+                "a root/sub-agent mode qualifier."
+            ),
+        }
+    source_ref, target_ref = parsed
+    sources, source_error = _claim_source_functions(builder, source_ref)
+    if source_error is not None:
+        return source_error
+    target, target_error = resolve_function(builder, target_ref)
+    if target_error is not None:
+        return target_error
+
+    mode = _claim_mode(claim)
+    scope = _claim_scope(claim)
+    paths = _claim_paths(builder, sources, target, max_depth=max_depth)
+    evaluated = []
+    for path in paths:
+        contradictions = [
+            conflict
+            for edge in path["edges"]
+            for guard in edge["guards"]
+            if (conflict := _guard_contradiction(guard, mode, scope))
+        ]
+        evaluated.append({**path, "contradictions": list(dict.fromkeys(contradictions))})
+    viable = [path for path in evaluated if not path["contradictions"]]
+    inferred_viable = [
+        path for path in viable
+        if any(edge["confidence"] == "inferred" for edge in path["edges"])
+    ]
+
+    if not paths or not viable:
+        verdict = "false"
+    elif len(inferred_viable) == len(viable):
+        verdict = "uncertain"
+    else:
+        verdict = "true"
+
+    evidence_sources = sources
+    if paths:
+        path_sources = {path["source"] for path in paths}
+        evidence_sources = [
+            source for source in sources if source.qualified_name in path_sources
+        ]
+    flows = [function_flow(builder, source.qualified_name) for source in evidence_sources]
+    conditions = [
+        reaching_conditions(builder, source.qualified_name)
+        for source in evidence_sources
+    ]
+    counterexamples = []
+    for path in evaluated:
+        for contradiction in path["contradictions"]:
+            counterexamples.append(
+                f"{scope or 'subject'} mode={mode} contradicts required {contradiction}"
+            )
+    if not paths:
+        counterexamples.append(
+            f"No static call path from {source_ref} to {target_ref}."
+        )
+    qualification = next(
+        (
+            found
+            for flow in flows
+            if (found := _flow_qualification(flow.get("flow", []), mode))
+        ),
+        None,
+    )
+    return {
+        "claim": claim,
+        "verdict": verdict,
+        "source": source_ref,
+        "target": target.qualified_name,
+        "counterexample": counterexamples[0] if counterexamples else None,
+        "qualification": qualification,
+        "paths": evaluated,
+        "evidence": {
+            "function_flow": flows,
+            "reaching_conditions": conditions,
+        },
+    }
 
 
 def _schema_fields(state_schema) -> tuple[list[str], list[str], str | None]:
