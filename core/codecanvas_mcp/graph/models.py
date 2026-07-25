@@ -186,6 +186,7 @@ class EntryPoint:
             self.group = {
                 "api": "API",
                 "script": "Scripts",
+                "export": "Exports",
                 "function": "Functions",
                 "job": "Jobs",
                 "worker": "Workers",
@@ -204,6 +205,8 @@ class EntryPoint:
                 self.trigger = f"HTTP {self.method} {self.path}".strip()
             elif self.kind == "script":
                 self.trigger = f"Script: {self.label}"
+            elif self.kind == "export":
+                self.trigger = f"Export: {self.label}"
             elif self.kind == "function":
                 self.trigger = f"Function: {self.label}"
             else:

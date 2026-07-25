@@ -288,9 +288,34 @@ def list_entrypoints(builder, filter=None, kind=None,
         )
     if cap_note:
         notes.append(cap_note)
+        inventory = _export_package_inventory(eps)
+        if inventory:
+            notes.append(inventory)
     if notes:
         out["note"] = " ".join(notes)
     return out
+
+
+def _export_package_inventory(eps) -> str | None:
+    """Name the distributions behind a truncated list.
+
+    A large monorepo has far more public surface than the output cap, and no
+    ordering makes every package's headline symbol visible at once. Saying which
+    packages exist turns truncation into something the caller can navigate.
+    """
+    counts: dict[str, int] = {}
+    for entry in eps:
+        if entry.kind != "export":
+            continue
+        package = (entry.metadata or {}).get("package")
+        if package:
+            counts[package] = counts.get(package, 0) + 1
+    if not counts:
+        return None
+
+    listed = ", ".join(f"{name} ({n})" for name, n in sorted(counts.items()))
+    return (f"Exports span {len(counts)} package(s): {listed}. "
+            f"Narrow with filter=<package or symbol>.")
 
 
 def _symbol_words(value: str) -> list[str]:

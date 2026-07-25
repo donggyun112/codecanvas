@@ -34,7 +34,7 @@ from codecanvas_mcp.parser.entrypoint_extractor import EntryPointExtractor
 # fingerprint catches ordinary logic changes; bump this only for a
 # deliberate change to the entrypoint cache payload layout that lies
 # outside the hashed analyzer source.
-ENTRYPOINT_CACHE_VERSION = 1
+ENTRYPOINT_CACHE_VERSION = 2
 
 # Map node types to semantic layer names for Level 1 grouping
 _LAYER_MAP = {

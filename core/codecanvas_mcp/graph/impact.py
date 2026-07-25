@@ -221,16 +221,18 @@ class ImpactAnalyzer:
         caller_index = self._build_caller_index()
 
         for ep in all_entrypoints:
-            # BFS from endpoint handler to see if any affected function is reachable
-            handler_func = self.cg._find_function(ep.handler_name, ep.handler_file, ep.handler_line)
-            if not handler_func:
+            # BFS from every anchor to see if any affected function is reachable
+            anchors = self._entrypoint_anchors(ep)
+            if not anchors:
                 continue
 
-            reachable = self._find_reachable(handler_func.qualified_name)
+            reachable: set[str] = set()
+            for anchor in anchors:
+                reachable |= self._find_reachable(anchor)
             overlap = affected_qnames & reachable
             if overlap:
                 max_depth = max(
-                    self._call_depth(handler_func.qualified_name, qn)
+                    min(self._call_depth(anchor, qn) for anchor in anchors)
                     for qn in overlap
                 )
 
@@ -285,6 +287,29 @@ class ImpactAnalyzer:
         result.summary = f"{nf} function(s) changed, {ne} {surface}(s) affected."
 
         return result
+
+    def _entrypoint_anchors(self, ep) -> list[str]:
+        """Qualified names whose reachability counts as this entrypoint's.
+
+        Usually just the handler. An exported class has no function of its own,
+        so its constructor and public methods stand in for it — otherwise a
+        change to ``Pregel.stream`` would report no affected entrypoint.
+        """
+        candidates = (getattr(ep, "metadata", None) or {}).get("handler_candidates")
+        specs = (
+            [(c.get("name"), c.get("file"), c.get("line")) for c in candidates]
+            if candidates
+            else [(ep.handler_name, ep.handler_file, ep.handler_line)]
+        )
+
+        anchors: list[str] = []
+        for name, file_path, line in specs:
+            if not name:
+                continue
+            func = self.cg._find_function(name, file_path, line)
+            if func is not None and func.qualified_name not in anchors:
+                anchors.append(func.qualified_name)
+        return anchors
 
     @staticmethod
     def _compute_function_risk(func) -> float:

@@ -36,7 +36,8 @@ inflates the count to 9111):
 
 - 20 pyproject packages, of which **12 are fixtures** under `libs/cli/examples/`,
   `libs/cli/uv-examples/`, `libs/cli/python-monorepo-example/`. 8 are real.
-- **129 `__all__` names** total — comfortably under the output cap.
+- **129 `__all__` names** total. (The first draft called this "comfortably under
+  the output cap". It is not — see §6.)
 - Of those: **79 classes**, 32 functions, 18 unresolved (constants like
   `START`/`END`, re-export chains, TypedDicts).
 - Expanding the 79 classes into public methods would yield 424 more rows (474
@@ -126,6 +127,38 @@ Ordering: `export` > `api` > `script` > `function`.
 
 `ENTRYPOINT_CACHE_VERSION` 1 → 2 (payload layout changes).
 
+### 6. Ordering under the output cap
+
+**A premise in the first draft of this spec was wrong.** It assumed 129 rows
+would fit; `DEFAULT_CAP` is 50. LangGraph yields 160 entrypoints, so two thirds
+are dropped and the order decides what an agent ever sees. Measured
+consequences of the naive orders:
+
+| Order | Result |
+|---|---|
+| Filesystem walk order | Non-deterministic across machines |
+| Packages concatenated | `create_react_agent` at #71 — `langgraph-prebuilt` entirely truncated |
+| Round-robin, CamelCase-first | `StateGraph` at #75 — lowercase factories outranked |
+
+Final ordering, none of which claims to know which symbol is *important*:
+
+- packages sorted by `(len(name), name)` — deterministic, umbrella package first
+- within a package: declaring `__init__` depth, then module, then name
+  **case-insensitively** (so `create_react_agent` is not penalised against
+  `InjectedState`)
+- **interleaved across packages**, so every distribution is represented before
+  the cap rather than the first few consuming every slot
+
+No ordering can surface every package's headline symbol within 50 rows, so
+truncation is made navigable instead: when the list is capped,
+`list_entrypoints` appends a package inventory —
+
+> Exports span 7 package(s): langgraph (34), langgraph-checkpoint (36), … .
+> Narrow with filter=&lt;package or symbol&gt;.
+
+`filter` matches tags, and every export is tagged with its distribution, so
+`filter="langgraph-prebuilt"` and `filter="StateGraph"` both work.
+
 ## Files changed
 
 | File | Change |
@@ -135,6 +168,11 @@ Ordering: `export` > `api` > `script` > `function`.
 | `core/codecanvas_mcp/graph/impact.py` | Multi-anchor entrypoint resolution |
 | `core/codecanvas_mcp/graph/models.py` | `export` kind in group/label defaults |
 | `core/codecanvas_mcp/graph/builder.py` | Cache version bump |
+| `core/codecanvas_mcp/mcp/queries.py` | Package inventory in the truncation note |
+
+`@overload` chains are collapsed to the final definition when building
+`handler_candidates` — `StateGraph.add_node` has four stubs and one
+implementation, and only the implementation has a body to traverse.
 
 ## Testing
 

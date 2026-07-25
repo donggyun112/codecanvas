@@ -55,15 +55,21 @@ def list_entrypoints(project_path: str | None = None, filter: str | None = None,
                      kind: str | None = None,
                      include_tests: bool = False) -> dict:
     """Map where a codebase starts — list its API/HTTP routes, CLI scripts,
-    and entry-point functions. Reach for this first to get the lay of an
-    unfamiliar project: what endpoints exist, which handler serves each
-    route, where execution begins.
+    public library exports, and entry-point functions. Reach for this first to
+    get the lay of an unfamiliar project: what endpoints exist, which handler
+    serves each route, where execution begins.
+
+    For a library, `kind="export"` is its public API surface, taken from each
+    distributed package's `__all__` and `[project.scripts]` and resolved to
+    where each name is defined. Every export is tagged with its distribution.
 
     On large projects the result is capped, so narrow it: `filter` is a
     case-insensitive substring matched over method/path/handler/id/tags
-    (e.g. "login"), and `kind` keeps one kind ("api", "script", "function").
-    Test-fixture entrypoints (handlers under `tests/`, `test_*.py`) are
-    hidden by default; set `include_tests=True` to keep them.
+    (e.g. "login", "StateGraph", or a package name), and `kind` keeps one kind
+    ("api", "script", "export", "function"). When the list is truncated the
+    note names every package that has exports, so a symbol you cannot see is
+    still one `filter` away. Test-fixture entrypoints (handlers under `tests/`,
+    `test_*.py`) are hidden by default; set `include_tests=True` to keep them.
     """
     return _with_builder(
         project_path,

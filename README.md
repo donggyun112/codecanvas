@@ -155,6 +155,14 @@ Tools:
 `list_entrypoints` also accepts `filter` / `kind` to narrow large projects.
 All tools take a `project_path`; outputs are compact and token-bounded.
 
+For libraries it reports the public API surface as `kind="export"`, read from
+each distributed package's `__all__` (or, absent one, its `__init__.py` public
+names) plus `[project.scripts]`. Names resolve to where they are defined, not to
+the `__init__.py` re-exporting them. Only directories with a `pyproject.toml`
+declaring `[project].name` are scanned, so application repos are unaffected. In
+a monorepo the output interleaves packages and, when truncated, names every
+package so you can narrow with `filter=<package or symbol>`.
+
 `simulate_state_transition` runs project code, so its worker process uses the
 project's virtualenv interpreter when one is found (`<project>/.venv` or `venv`,
 then the same in the parent directory) rather than the interpreter running the

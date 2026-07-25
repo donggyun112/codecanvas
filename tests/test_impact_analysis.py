@@ -215,3 +215,62 @@ class TestEndpointImpact:
         paths = [e.path for e in result.affected_endpoints]
         assert "/a" in paths
         assert "/b" not in paths
+
+
+class TestLibraryExportImpact:
+    """An exported class must be reachable through any of its public methods.
+
+    ``impact.py`` resolved an entrypoint with ``_find_function(handler_name)``,
+    which matches functions only — a class-named export would otherwise
+    contribute nothing at all to impact analysis.
+    """
+
+    def _project(self, tmp_path):
+        _write_files(tmp_path, {
+            "pyproject.toml": '[project]\nname = "demo"\nversion = "0.1.0"\n',
+            "demo/core.py": """
+                class Engine:
+                    def __init__(self):
+                        pass
+
+                    def compile(self):
+                        return _optimize()
+
+                def _optimize():
+                    return 1
+            """,
+            "demo/__init__.py": """
+                from demo.core import Engine
+
+                __all__ = ["Engine"]
+            """,
+        })
+        b = FlowGraphBuilder(str(tmp_path))
+        return b, b.get_entrypoints()
+
+    def test_export_is_discovered_as_an_entrypoint(self, tmp_path):
+        _b, eps = self._project(tmp_path)
+        exports = [e for e in eps if e.kind == "export"]
+
+        assert [e.handler_name for e in exports] == ["Engine"]
+
+    def test_change_inside_a_method_body_affects_the_class_export(self, tmp_path):
+        b, eps = self._project(tmp_path)
+        b.call_graph.analyze_project()
+        optimize = next(
+            f for f in b.call_graph._functions.values() if f.name == "_optimize"
+        )
+        line = optimize.line_start
+        diff = (
+            "diff --git a/demo/core.py b/demo/core.py\n"
+            "--- a/demo/core.py\n"
+            "+++ b/demo/core.py\n"
+            f"@@ -{line},1 +{line},2 @@\n"
+            "+    audit()\n"
+        )
+
+        analyzer = ImpactAnalyzer(b.call_graph, str(tmp_path), entrypoints=eps)
+        result = analyzer.analyze_diff(diff)
+
+        affected = [e for e in result.affected_endpoints if e.kind == "export"]
+        assert [e.handler_name for e in affected] == ["Engine"]

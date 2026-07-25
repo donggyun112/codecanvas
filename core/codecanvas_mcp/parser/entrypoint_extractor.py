@@ -12,6 +12,7 @@ from pathlib import Path
 
 from codecanvas_mcp.graph.models import EntryPoint
 from codecanvas_mcp.parser.fastapi_extractor import FastAPIExtractor
+from codecanvas_mcp.parser.library_extractor import LibraryExportExtractor
 
 
 class EntryPointExtractor:
@@ -23,19 +24,29 @@ class EntryPointExtractor:
         self._file_asts: dict[str, ast.Module] = {}
 
     def analyze(self) -> list[EntryPoint]:
-        """Return all discovered entry points."""
+        """Return all discovered entry points, strongest trigger model first."""
         api_entrypoints = list(self.fastapi.analyze())
         python_files = self._find_python_files()
         for file_path in python_files:
             self._parse_file(file_path)
 
-        script_entrypoints = self._extract_script_entrypoints(api_entrypoints)
+        library_entrypoints = LibraryExportExtractor(str(self.project_root)).analyze()
+        exports = [e for e in library_entrypoints if e.kind == "export"]
+        console_scripts = [e for e in library_entrypoints if e.kind == "script"]
+
+        # Console scripts are declared entrypoints, so a __main__ guard landing
+        # on the same callable is a duplicate, not a second entrypoint.
+        script_entrypoints = self._extract_script_entrypoints(
+            api_entrypoints + console_scripts
+        )
         function_entrypoints = self._extract_function_fallbacks(
             api_entrypoints,
-            script_entrypoints,
+            console_scripts + script_entrypoints,
+            exports,
         )
 
-        return api_entrypoints + script_entrypoints + function_entrypoints
+        return (exports + api_entrypoints + console_scripts
+                + script_entrypoints + function_entrypoints)
 
     def locate_function_entrypoint(self, file_path: str, line: int) -> EntryPoint | None:
         """Resolve the callable enclosing ``line`` into a synthetic function entrypoint.
@@ -121,10 +132,10 @@ class EntryPointExtractor:
         except (SyntaxError, UnicodeDecodeError):
             return
 
-    def _extract_script_entrypoints(self, api_entrypoints: list[EntryPoint]) -> list[EntryPoint]:
+    def _extract_script_entrypoints(self, existing: list[EntryPoint]) -> list[EntryPoint]:
         seen: set[tuple[str, str, int]] = {
             (entry.handler_file, entry.handler_name, entry.handler_line)
-            for entry in api_entrypoints
+            for entry in existing
         }
         results: list[EntryPoint] = []
 
@@ -161,9 +172,10 @@ class EntryPointExtractor:
         self,
         api_entrypoints: list[EntryPoint],
         script_entrypoints: list[EntryPoint],
+        exports: list[EntryPoint] | None = None,
     ) -> list[EntryPoint]:
         """Expose top-level functions when the project has no stronger trigger model."""
-        if api_entrypoints or script_entrypoints:
+        if api_entrypoints or script_entrypoints or exports:
             return []
 
         seen: set[tuple[str, str, int]] = set()
