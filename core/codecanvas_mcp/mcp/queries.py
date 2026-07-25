@@ -1059,36 +1059,65 @@ def _line_guards(node, line: int) -> list[str]:
     def contains(stmt) -> bool:
         return stmt.lineno <= line <= getattr(stmt, "end_lineno", stmt.lineno)
 
+    def statement_terminates(stmt) -> bool:
+        if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            return True
+        if isinstance(stmt, ast.If):
+            return (
+                bool(stmt.orelse)
+                and block_terminates(stmt.body)
+                and block_terminates(stmt.orelse)
+            )
+        return False
+
+    def block_terminates(stmts) -> bool:
+        return any(statement_terminates(stmt) for stmt in stmts)
+
     def visit(stmts, guards):
+        active_guards = list(guards)
         for stmt in stmts:
             if not contains(stmt):
+                if (
+                    isinstance(stmt, ast.If)
+                    and getattr(stmt, "end_lineno", stmt.lineno) < line
+                ):
+                    condition = outline._expr(stmt.test)
+                    body_terminates = block_terminates(stmt.body)
+                    else_terminates = block_terminates(stmt.orelse)
+                    if body_terminates and not else_terminates:
+                        active_guards.append(f"not ({condition})")
+                    elif else_terminates and not body_terminates:
+                        active_guards.append(condition)
                 continue
             if isinstance(stmt, ast.If):
                 condition = outline._expr(stmt.test)
                 if any(contains(child) for child in stmt.body):
-                    return visit(stmt.body, guards + [condition])
+                    return visit(stmt.body, active_guards + [condition])
                 if any(contains(child) for child in stmt.orelse):
-                    return visit(stmt.orelse, guards + [f"not ({condition})"])
+                    return visit(
+                        stmt.orelse,
+                        active_guards + [f"not ({condition})"],
+                    )
             if isinstance(stmt, (ast.Try, getattr(ast, "TryStar", ast.Try))):
                 if any(contains(child) for child in stmt.body):
-                    return visit(stmt.body, guards)
+                    return visit(stmt.body, active_guards)
                 for handler in stmt.handlers:
                     if any(contains(child) for child in handler.body):
                         typ = outline._expr(handler.type) if handler.type else ""
                         return visit(
                             handler.body,
-                            guards + [f"except {typ}".strip()],
+                            active_guards + [f"except {typ}".strip()],
                         )
                 for block in (stmt.orelse, stmt.finalbody):
                     if any(contains(child) for child in block):
-                        return visit(block, guards)
+                        return visit(block, active_guards)
             if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
                 if any(contains(child) for child in stmt.body):
-                    return visit(stmt.body, guards + ["loop"])
+                    return visit(stmt.body, active_guards + ["loop"])
             if isinstance(stmt, (ast.With, ast.AsyncWith)):
-                return visit(stmt.body, guards)
-            return guards
-        return guards
+                return visit(stmt.body, active_guards)
+            return active_guards
+        return active_guards
 
     return visit(getattr(node, "body", []), [])
 
@@ -1130,6 +1159,57 @@ def _guard_contradiction(
         return None
     conflicts = (not negated and mode != required) or (negated and mode == required)
     return guard if conflicts else None
+
+
+def _mode_type_guard_conditions(node) -> dict[str, list[str]]:
+    """Map mode-bearing subjects to their enclosing direct isinstance guards."""
+    import ast
+    from codecanvas_mcp.mcp import outline
+
+    contexts: dict[str, list[str]] = {}
+    if node is None:
+        return contexts
+    for stmt in ast.walk(node):
+        if not isinstance(stmt, ast.If) or not isinstance(stmt.test, ast.Call):
+            continue
+        call = stmt.test
+        if (
+            not isinstance(call.func, ast.Name)
+            or call.func.id != "isinstance"
+            or len(call.args) < 2
+        ):
+            continue
+        subject = outline._expr(call.args[0])
+        reads_subject_mode = any(
+            isinstance(child, ast.Attribute)
+            and child.attr == "mode"
+            and outline._expr(child.value) == subject
+            for body_stmt in stmt.body
+            for child in ast.walk(body_stmt)
+        )
+        if not reads_subject_mode:
+            continue
+        condition = outline._expr(stmt.test)
+        if condition not in contexts.setdefault(subject, []):
+            contexts[subject].append(condition)
+    return contexts
+
+
+def _mode_type_contradictions(builder, edge, mode, scope) -> list[str]:
+    if mode is None:
+        return []
+    caller_node = builder.call_graph.get_ast_node(edge["caller"])
+    contexts = _mode_type_guard_conditions(caller_node)
+    guards = set(edge["guards"])
+    contradictions = []
+    for subject, conditions in contexts.items():
+        if scope and _claim_subject_scope(subject) != scope:
+            continue
+        if conditions and all(
+            f"not ({condition})" in guards for condition in conditions
+        ):
+            contradictions.append(" or ".join(conditions))
+    return contradictions
 
 
 def _claim_source_functions(builder, source_ref: str):
@@ -1292,12 +1372,20 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
     paths = _claim_paths(builder, sources, target, max_depth=max_depth)
     evaluated = []
     for path in paths:
-        contradictions = [
+        guard_contradictions = [
             conflict
             for edge in path["edges"]
             for guard in edge["guards"]
             if (conflict := _guard_contradiction(guard, mode, scope))
         ]
+        type_contradictions = [
+            conflict
+            for edge in path["edges"]
+            for conflict in _mode_type_contradictions(
+                builder, edge, mode, scope,
+            )
+        ]
+        contradictions = guard_contradictions + type_contradictions
         evaluated.append({**path, "contradictions": list(dict.fromkeys(contradictions))})
     viable = [path for path in evaluated if not path["contradictions"]]
     inferred_viable = [
@@ -1356,7 +1444,11 @@ def verify_claim(builder, claim: str, max_depth: int = 6) -> dict:
         "verdict": verdict,
         "source": source_ref,
         "target": target.qualified_name,
-        "counterexample": counterexamples[0] if counterexamples else None,
+        "counterexample": (
+            counterexamples[0]
+            if verdict == "false" and counterexamples
+            else None
+        ),
         "qualification": qualification,
         "paths": evaluated,
         "witness_path": witness_path,

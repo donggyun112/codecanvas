@@ -1065,16 +1065,33 @@ def test_ambiguous_call_preserves_all_inferred_candidates(tmp_path):
 
 CLAIM_GOLDEN_APP = {
     "agent.py": """
+        class LlmAgent:
+            pass
+
+        class BaseNode:
+            pass
+
         class Runner:
             async def run(self):
-                if self.agent.mode == "chat":
-                    has_task_subagent = any(
-                        sa.mode == "task" for sa in self.agent.subagents
-                    )
-                    if has_task_subagent:
-                        return self.ctx.run_node(self.agent)
+                if isinstance(self.agent, LlmAgent):
+                    if self.agent.mode is None:
+                        self.agent.mode = "chat"
+
+                    if self.agent.mode == "chat":
+                        has_task_subagent = any(
+                            sa.mode == "task" for sa in self.agent.subagents
+                        )
+                        if has_task_subagent:
+                            agent_to_run = self.agent
+                        else:
+                            agent_to_run = self._find_agent_to_run()
+                    else:
+                        raise ValueError("root must use chat mode")
+
                     return await self._run_node_async()
-                raise ValueError("root must use chat mode")
+
+                if isinstance(self.agent, BaseNode):
+                    return await self._run_node_async()
 
             async def _run_node_async(self):
                 return None
@@ -1097,6 +1114,11 @@ def test_verify_claim_rejects_root_task_mode_reachability(tmp_path):
     )
     assert out["evidence"]["function_flow"]
     assert out["evidence"]["reaching_conditions"]
+    assert "self.agent.mode == 'chat'" in out["paths"][0]["edges"][0]["guards"]
+    assert any(
+        "isinstance(self.agent, LlmAgent)" in path["contradictions"]
+        for path in out["paths"]
+    )
 
 
 def test_verify_claim_accepts_root_chat_mode_reachability(tmp_path):
