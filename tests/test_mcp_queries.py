@@ -797,3 +797,46 @@ def test_reaching_conditions_detects_dead_code(tmp_path):
         """,
     }), "f")
     assert out.get("dead_code"), out
+
+
+def test_find_symbols_ranks_exact_and_supports_filters(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "service.py": """
+            class UserService:
+                def fetch_user(self, user_id):
+                    return user_id
+        """,
+        "tests/test_service.py": """
+            def fetch_user():
+                pass
+        """,
+    })
+    out = queries.find_symbols(
+        builder, "fetch_user", kind="method", path="service.py",
+    )
+    assert out["count"] == 1
+    assert out["symbols"][0]["qualified_name"].endswith("UserService.fetch_user")
+    assert out["symbols"][0]["matched_by"] == "exact"
+
+
+def test_find_symbols_rejects_empty_query(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "service.py": "def fetch_user():\n    pass",
+    })
+    assert "error" in queries.find_symbols(builder, " ")
+
+
+def test_ambiguous_call_preserves_all_inferred_candidates(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "caller.py": "def start():\n    shared()",
+        "one.py": "def shared():\n    pass",
+        "two.py": "def shared():\n    pass",
+    })
+    out = queries.call_tree(builder, "start", depth=1)
+    shared = [node for node in out["nodes"] if node["function"].endswith(".shared")]
+    assert len(shared) == 2
+    assert {node["confidence"] for node in shared} == {"inferred"}
+
+    for node in shared:
+        callers = queries.who_calls(builder, node["function"])
+        assert callers["callers"][0]["confidence"] == "inferred"

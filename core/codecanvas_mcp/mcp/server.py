@@ -11,7 +11,8 @@ from mcp.server.fastmcp import FastMCP
 
 from codecanvas_mcp.mcp import queries
 from codecanvas_mcp.mcp.session import (
-    get_builder, resolve_project, ProjectNotFoundError, NoDefaultProjectError,
+    get_builder, project_status as inspect_project_status, resolve_project,
+    ProjectNotFoundError, NoDefaultProjectError,
 )
 from codecanvas_mcp.parser.call_graph import ProjectTooLargeError
 
@@ -69,6 +70,34 @@ def list_entrypoints(project_path: str | None = None, filter: str | None = None,
         lambda b: queries.list_entrypoints(
             b, filter=filter, kind=kind, include_tests=include_tests),
     )
+
+
+@mcp.tool()
+def find_symbols(query: str, project_path: str | None = None,
+                 kind: str | None = None, path: str | None = None,
+                 include_tests: bool = False, limit: int = 20) -> dict:
+    """Find project functions, methods, and classes by name, qualified name,
+    signature, or docstring. Results include a score and matching reason.
+    Narrow with `kind`, `path`, and `include_tests`; `limit` is capped at 100."""
+    return _with_builder(
+        project_path,
+        lambda b: queries.find_symbols(
+            b, query, kind=kind, path=path, include_tests=include_tests,
+            limit=limit,
+        ),
+    )
+
+
+@mcp.tool()
+def project_status(project_path: str | None = None) -> dict:
+    """Inspect the active analysis root, Python file count, disk-cache state,
+    and nested Python project roots. Use this when results look polluted or
+    incomplete and you may need a narrower `project_path`."""
+    try:
+        root = resolve_project(project_path)
+        return inspect_project_status(root)
+    except (ProjectNotFoundError, NoDefaultProjectError) as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()

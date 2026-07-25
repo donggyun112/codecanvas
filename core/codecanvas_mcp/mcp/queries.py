@@ -287,6 +287,58 @@ def list_entrypoints(builder, filter=None, kind=None,
     return out
 
 
+def find_symbols(builder, query: str, kind=None, path=None,
+                 include_tests=False, limit: int = 20) -> dict:
+    """Find functions, methods, and classes by ranked textual similarity."""
+    needle = (query or "").strip().lower()
+    if not needle:
+        return {"error": "query must not be empty."}
+    limit = max(1, min(int(limit), 100))
+    rows = []
+    for func in builder.call_graph.all_functions():
+        symbol_kind = (
+            "class" if func.definition_type == "class"
+            else "method" if func.class_name else "function"
+        )
+        if kind and symbol_kind != kind:
+            continue
+        if path and path.lower() not in (func.file_path or "").lower():
+            continue
+        if not include_tests and _is_test_path(func.file_path or ""):
+            continue
+
+        name = func.name.lower()
+        qualified = func.qualified_name.lower()
+        signature = f"{func.name}({', '.join(func.params)})".lower()
+        docstring = (func.docstring or "").lower()
+        if name == needle or qualified == needle:
+            score, reason = 1.0, "exact"
+        elif name.startswith(needle) or qualified.startswith(needle):
+            score, reason = 0.92, "prefix"
+        elif needle in name or needle in qualified:
+            score, reason = 0.84, "substring"
+        elif needle in signature or needle in docstring:
+            score, reason = 0.72, "signature_or_docstring"
+        else:
+            score = difflib.SequenceMatcher(None, needle, name).ratio()
+            reason = "fuzzy"
+            if score < 0.55:
+                continue
+        rows.append({
+            "qualified_name": func.qualified_name,
+            "name": func.name,
+            "kind": symbol_kind,
+            "signature": f"{func.name}({', '.join(func.params)})",
+            "location": _location(func),
+            "score": round(score, 3),
+            "matched_by": reason,
+        })
+    rows.sort(key=lambda row: (-row["score"], row["qualified_name"]))
+    total = len(rows)
+    return {"query": query, "count": total, "symbols": rows[:limit],
+            "has_more": total > limit}
+
+
 def who_calls(builder, function: str, depth: int = 1, filter=None) -> dict:
     """Callers of a function (ground-truth reverse edges).
 
@@ -322,6 +374,7 @@ def who_calls(builder, function: str, depth: int = 1, filter=None) -> dict:
                     "location": _location(caller),
                     "relation": ref.relation,
                     "condition": ref.condition,
+                    "confidence": ref.confidence,
                     "depth": hop,
                     "callee": callee.qualified_name,
                 })
@@ -1189,7 +1242,7 @@ def call_tree(builder, function: str, depth: int = 2, filter=None,
         next_frontier = []
         for caller in frontier:
             for call in caller.calls:
-                for callee in cg._resolve_call_targets(call, caller):
+                for callee, confidence in cg.resolve_call_candidates(call, caller):
                     if callee.qualified_name in visited:
                         continue
                     if not include_tests and _is_test_path(callee.file_path or ""):
@@ -1200,6 +1253,7 @@ def call_tree(builder, function: str, depth: int = 2, filter=None,
                         "location": _location(callee),
                         "depth": hop,
                         "via": caller.qualified_name,
+                        "confidence": confidence,
                         "effects": _effect_tags(callee),
                         "risk": ImpactAnalyzer._compute_function_risk(callee),
                     })

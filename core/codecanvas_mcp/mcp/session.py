@@ -9,6 +9,9 @@ from collections import OrderedDict
 from pathlib import Path
 
 from codecanvas_mcp.graph.builder import FlowGraphBuilder
+from codecanvas_mcp.parser.call_graph import (
+    CACHE_DIR_NAME, CACHE_FILE_NAME, _iter_project_python_files,
+)
 
 _MAX_BUILDERS = 8
 _builders: "OrderedDict[str, FlowGraphBuilder]" = OrderedDict()
@@ -66,3 +69,38 @@ def get_builder(project_path: str) -> FlowGraphBuilder:
     while len(_builders) > _MAX_BUILDERS:
         _builders.popitem(last=False)
     return builder
+
+
+def project_status(project_path: str) -> dict:
+    """Inspect analysis scope and suggest narrower Python project roots."""
+    root = Path(project_path).resolve()
+    py_files = _iter_project_python_files(root)
+    markers = ("pyproject.toml", "setup.py", "setup.cfg")
+    candidates = set()
+    for marker in markers:
+        for found in root.glob(marker):
+            candidates.add(str(found.parent))
+        for found in root.glob(f"*/{marker}"):
+            candidates.add(str(found.parent))
+        for found in root.glob(f"*/*/{marker}"):
+            candidates.add(str(found.parent))
+    cache_path = root / CACHE_DIR_NAME / CACHE_FILE_NAME
+    recommendations = sorted(candidates, key=lambda p: (p.count("/"), p))
+    return {
+        "project_root": str(root),
+        "python_files": len(py_files),
+        "cache": {
+            "path": str(cache_path),
+            "exists": cache_path.is_file(),
+        },
+        "candidate_roots": recommendations,
+        "recommended_root": (
+            str(root) if str(root) in candidates
+            else recommendations[0] if recommendations
+            else str(root)
+        ),
+        "note": (
+            "Multiple Python project roots detected; consider a narrower project_path."
+            if len(recommendations) > 1 else None
+        ),
+    }

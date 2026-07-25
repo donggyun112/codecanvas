@@ -196,6 +196,7 @@ class CallerReference:
     label: str = ""
     condition: str | None = None
     is_error_path: bool = False
+    confidence: str = "definite"
 
 
 @dataclass
@@ -635,6 +636,7 @@ class CallGraphBuilder:
         self._module_imports: dict[str, dict[str, str]] = {}
         self._dependency_overrides: dict[str, set[str]] = {}
         self._caller_index: dict[str, list[CallerReference]] | None = None
+        self._last_resolve_candidates: list[FunctionDef] = []
         self._ast_nodes: dict[str, ast.AST] = {}  # qualified_name -> AST node
         self._analyzed = False
         # Cache + lazy AST: tracks which files have been parsed for AST so
@@ -796,6 +798,27 @@ class CallGraphBuilder:
         if target is None:
             return []
         return self._get_callers(target)
+
+    def resolve_call_candidates(
+        self, call: CallSite, caller: FunctionDef,
+    ) -> list[tuple[FunctionDef, str]]:
+        """Resolve static, ambiguous, and DI-runtime call candidates."""
+        resolved = self._resolve_call(call, caller)
+        candidates: list[tuple[FunctionDef, str]]
+        if resolved is not None:
+            candidates = [(resolved, self._last_resolve_confidence or "high")]
+        else:
+            candidates = [
+                (candidate, "inferred")
+                for candidate in self._last_resolve_candidates
+            ]
+        runtime = self._resolve_runtime_attribute_call(call, caller)
+        if runtime is not None and all(
+            candidate.qualified_name != runtime.qualified_name
+            for candidate, _confidence in candidates
+        ):
+            candidates.append((runtime, "high"))
+        return candidates
 
     def get_ast_node(self, qualified_name: str) -> ast.AST | None:
         """Public accessor for a function's AST node.
@@ -1922,13 +1945,17 @@ class CallGraphBuilder:
             if caller.definition_type == "class":
                 continue
             for call in caller.calls:
+                resolved = self.resolve_call_candidates(call, caller)
+                runtime_target = self._resolve_runtime_attribute_call(call, caller)
                 targets = {
-                    candidate.qualified_name: candidate
-                    for candidate in self._resolve_call_targets(call, caller)
+                    candidate.qualified_name: (candidate, confidence)
+                    for candidate, confidence in resolved
                 }
+                if runtime_target is not None:
+                    targets[runtime_target.qualified_name] = (runtime_target, "high")
                 if not targets:
                     continue
-                for resolved_target in targets.values():
+                for resolved_target, confidence in targets.values():
                     per_target = index.setdefault(resolved_target.qualified_name, {})
                     existing = per_target.get(caller.qualified_name)
                     if existing is None or call.line < existing.line:
@@ -1938,6 +1965,7 @@ class CallGraphBuilder:
                             relation="call",
                             condition=call.branch_condition,
                             is_error_path=call.in_branch in ("except",),
+                            confidence=confidence,
                         )
             for ref in caller.references:
                 target = self._resolve_reference(ref, caller)
@@ -2001,10 +2029,12 @@ class CallGraphBuilder:
         """Resolve every static and DI-runtime target for a call site."""
         targets: list[FunctionDef] = []
         seen: set[str] = set()
-        for target in (
-            self._resolve_call(call, caller),
-            self._resolve_runtime_attribute_call(call, caller),
-        ):
+        static_targets = [
+            target for target, _confidence
+            in self.resolve_call_candidates(call, caller)
+        ]
+        runtime_target = self._resolve_runtime_attribute_call(call, caller)
+        for target in (*static_targets, runtime_target):
             if target is None or target.qualified_name in seen:
                 continue
             seen.add(target.qualified_name)
@@ -2063,6 +2093,7 @@ class CallGraphBuilder:
           - "high"     : same-module preference among few candidates
           - "inferred" : ambiguous fallback (multiple candidates, no type info)
         """
+        self._last_resolve_candidates = []
         if call.is_attribute_call:
             resolved = self._resolve_attribute_call(call, caller)
             if resolved is not None:
@@ -2118,9 +2149,11 @@ class CallGraphBuilder:
             self._last_resolve_confidence = "high"
             return preferred
 
-        # Fallback: first candidate — AMBIGUOUS
+        # Ambiguous fallback: preserve every candidate for graph consumers.
+        # Single-target consumers receive None rather than a false edge.
         self._last_resolve_confidence = "inferred"
-        return resolved_candidates[0]
+        self._last_resolve_candidates = resolved_candidates
+        return None
 
     def _resolve_method_prefer_unique_impl(
         self,
