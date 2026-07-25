@@ -328,11 +328,18 @@ def _symbol_role(func) -> tuple[str, list[str]]:
     """Describe intent without pretending static heuristics are certainty."""
     evidence = []
     decorators = " ".join(func.decorators).lower()
+    normalized_path = (func.file_path or "").replace("\\", "/").lower()
+    if any(segment in normalized_path for segment in (
+        "/references/", "/vendor/", "/site-packages/",
+    )):
+        evidence.append("external_source_path")
+        return "external", evidence
     if func.is_protocol or func.is_abstract:
         evidence.append("abstract_or_protocol")
         return "contract", evidence
     if any(marker in decorators for marker in ("route", ".get", ".post", ".put",
-                                                ".patch", ".delete", "command")):
+                                                ".patch", ".delete", "tool",
+                                                "command")):
         evidence.append("entrypoint_decorator")
         return "entrypoint", evidence
     if any(marker in decorators for marker in ("wraps", "decorator")):
@@ -465,10 +472,32 @@ def find_symbols(builder, query: str, kind=None, path=None,
             limit=None,
         )
         for _alias, score, (index, reason) in matches:
+            normalized_alias = utils.default_process(aliases[(index, reason)]) or ""
+            normalized_query = utils.default_process(needle) or ""
             if scorer_name == "token_set" and reason != "docstring":
                 continue
+            if reason == "docstring" and scorer_name != "token_set":
+                continue
+            if reason != "docstring":
+                query_tokens = set(_symbol_words(needle))
+                alias_tokens = set(_symbol_words(aliases[(index, reason)]))
+                too_short = len(normalized_alias) < len(normalized_query) * 0.4
+                func_name = utils.default_process(funcs[index][0].name) or ""
+                name_tokens = set(_symbol_words(funcs[index][0].name))
+                name_too_short = len(func_name) < len(normalized_query) * 0.4
+                if (
+                    (too_short and not query_tokens.intersection(alias_tokens))
+                    or (name_too_short and not query_tokens.intersection(name_tokens))
+                ):
+                    continue
             if reason == "docstring":
                 score *= 0.92
+            func = funcs[index][0]
+            normalized_path = (func.file_path or "").replace("\\", "/").lower()
+            if any(segment in normalized_path for segment in (
+                "/references/", "/vendor/", "/site-packages/",
+            )):
+                score *= 0.75
             if index not in best or score > best[index][0]:
                 best[index] = (
                     score, reason, scorer_name, aliases[(index, reason)],

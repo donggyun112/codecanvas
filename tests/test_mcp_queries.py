@@ -875,6 +875,53 @@ def test_find_symbols_explains_match_and_distinguishes_roles(tmp_path):
     assert wrapper["match"]["character_spans"]
 
 
+def test_find_symbols_marks_tool_wrappers_and_demotes_external_sources(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "core/server.py": """
+            class MCP:
+                def tool(self):
+                    return lambda function: function
+
+            mcp = MCP()
+
+            @mcp.tool()
+            def project_status():
+                return inspect_project_status()
+        """,
+        "core/session.py": """
+            def project_status():
+                return {"ok": True}
+        """,
+        "references/tool.py": """
+            def project_status():
+                return {"external": True}
+        """,
+    })
+    out = queries.find_symbols(builder, "project status")
+
+    assert out["symbols"][0]["role"] == "entrypoint"
+    assert out["symbols"][1]["role"] == "function"
+    external = next(
+        row for row in out["symbols"] if row["location"].endswith("references/tool.py:1")
+    )
+    assert external["role"] == "external"
+    assert external["score"] < out["symbols"][0]["score"]
+
+
+def test_find_symbols_drops_unrelated_short_partial_matches(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "symbols.py": """
+            def resolve_function(): pass
+            def func(): pass
+            def stats(): pass
+        """,
+    })
+    out = queries.find_symbols(builder, "resolve functon")
+
+    assert out["symbols"][0]["name"] == "resolve_function"
+    assert {row["name"] for row in out["symbols"]}.isdisjoint({"func", "stats"})
+
+
 def test_find_symbols_searches_docstring_meaning(tmp_path):
     builder = _tmp_builder(tmp_path, {
         "billing.py": """
