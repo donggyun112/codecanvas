@@ -77,7 +77,7 @@ def find_symbols(query: str, project_path: str | None = None,
                  kind: str | None = None, path: str | None = None,
                  include_tests: bool = False, limit: int = 20) -> dict:
     """Find project functions, methods, and classes by name, qualified name,
-    signature, or docstring. Results include a score and matching reason.
+    scope, or acronym. Results include a score and matching reason.
     Narrow with `kind`, `path`, and `include_tests`; `limit` is capped at 100."""
     return _with_builder(
         project_path,

@@ -826,6 +826,54 @@ def test_find_symbols_rejects_empty_query(tmp_path):
     assert "error" in queries.find_symbols(builder, " ")
 
 
+def test_find_symbols_usability_corpus(tmp_path):
+    builder = _tmp_builder(tmp_path, {
+        "queries.py": """
+            def resolve_function(builder, ref):
+                return builder, ref
+        """,
+        "parser/call_graph.py": """
+            class CallGraphBuilder:
+                def resolve_function_id(self, name):
+                    return name
+
+                def resolve_call_candidates(self, call):
+                    return [call]
+
+                def _resolve_call(self, call):
+                    return call
+        """,
+        "mcp/server.py": """
+            def project_status(project_path=None):
+                return project_path
+        """,
+        "mcp/session.py": """
+            def project_status(project_path):
+                return project_path
+        """,
+    })
+    cases = [
+        ("resolve_function", "queries.resolve_function"),
+        ("resolve funct", "queries.resolve_function"),
+        ("resolv functon", "queries.resolve_function"),
+        ("rfi", "parser.call_graph.CallGraphBuilder.resolve_function_id"),
+        ("project status", "mcp.server.project_status"),
+        ("proj stat", "mcp.server.project_status"),
+        (
+            "call candidates",
+            "parser.call_graph.CallGraphBuilder.resolve_call_candidates",
+        ),
+        (
+            "CallGraphBuilder resolve call",
+            "parser.call_graph.CallGraphBuilder._resolve_call",
+        ),
+    ]
+
+    for query, expected in cases:
+        out = queries.find_symbols(builder, query, limit=5)
+        assert out["symbols"][0]["qualified_name"] == expected, (query, out)
+
+
 def test_ambiguous_call_preserves_all_inferred_candidates(tmp_path):
     builder = _tmp_builder(tmp_path, {
         "caller.py": "def start():\n    shared()",

@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import difflib
 import os
+import re
+
+from rapidfuzz import fuzz, process, utils
 
 from codecanvas_mcp.mcp.answers import capped
 from codecanvas_mcp.parser.call_graph import REVIEW_SIGNAL_POINTS
@@ -287,14 +290,43 @@ def list_entrypoints(builder, filter=None, kind=None,
     return out
 
 
+def _symbol_words(value: str) -> list[str]:
+    """Split Python/qualified identifiers into search aliases."""
+    return [
+        token.lower()
+        for token in re.findall(
+            r"[A-Z]+(?=[A-Z][a-z]|\d|\b)|[A-Z]?[a-z]+|[A-Z]+|\d+",
+            value.replace("_", " ").replace(".", " "),
+        )
+    ]
+
+
+def _symbol_aliases(func) -> dict[str, str]:
+    name_words = _symbol_words(func.name)
+    qualified_words = _symbol_words(func.qualified_name)
+    aliases = {
+        "name": func.name,
+        "qualified_name": func.qualified_name,
+        "name_words": " ".join(name_words),
+        "qualified_words": " ".join(qualified_words),
+        "acronym": "".join(word[0] for word in name_words if word),
+        "word_prefixes": " ".join(word[:4] for word in name_words),
+    }
+    if func.class_name:
+        aliases["scope_and_name"] = " ".join(
+            _symbol_words(func.class_name) + name_words
+        )
+    return {reason: alias for reason, alias in aliases.items() if alias}
+
+
 def find_symbols(builder, query: str, kind=None, path=None,
                  include_tests=False, limit: int = 20) -> dict:
-    """Find functions, methods, and classes by ranked textual similarity."""
-    needle = (query or "").strip().lower()
+    """Find symbols using RapidFuzz's optimized, tested ranking engine."""
+    needle = (query or "").strip()
     if not needle:
         return {"error": "query must not be empty."}
     limit = max(1, min(int(limit), 100))
-    rows = []
+    funcs = []
     for func in builder.call_graph.all_functions():
         symbol_kind = (
             "class" if func.definition_type == "class"
@@ -306,34 +338,52 @@ def find_symbols(builder, query: str, kind=None, path=None,
             continue
         if not include_tests and _is_test_path(func.file_path or ""):
             continue
+        funcs.append((func, symbol_kind))
 
-        name = func.name.lower()
-        qualified = func.qualified_name.lower()
-        signature = f"{func.name}({', '.join(func.params)})".lower()
-        docstring = (func.docstring or "").lower()
-        if name == needle or qualified == needle:
-            score, reason = 1.0, "exact"
-        elif name.startswith(needle) or qualified.startswith(needle):
-            score, reason = 0.92, "prefix"
-        elif needle in name or needle in qualified:
-            score, reason = 0.84, "substring"
-        elif needle in signature or needle in docstring:
-            score, reason = 0.72, "signature_or_docstring"
-        else:
-            score = difflib.SequenceMatcher(None, needle, name).ratio()
-            reason = "fuzzy"
-            if score < 0.55:
+    choices = {}
+    acronym_query = not any(char.isspace() for char in needle) and len(needle) <= 8
+    for index, (func, _symbol_kind) in enumerate(funcs):
+        for reason, alias in _symbol_aliases(func).items():
+            if reason == "acronym" and not acronym_query:
                 continue
+            choices[(index, reason)] = alias
+    best: dict[int, tuple[float, str]] = {}
+    for scorer_name, scorer in (
+        ("weighted", fuzz.WRatio),
+        ("token_sort", fuzz.token_sort_ratio),
+    ):
+        matches = process.extract(
+            needle,
+            choices,
+            scorer=scorer,
+            processor=utils.default_process,
+            score_cutoff=50,
+            limit=None,
+        )
+        for _alias, score, (index, reason) in matches:
+            if index not in best or score > best[index][0]:
+                best[index] = (score, f"{reason}:{scorer_name}")
+
+    rows = []
+    normalized_needle = utils.default_process(needle)
+    for index, (score, reason) in best.items():
+        func, symbol_kind = funcs[index]
+        if utils.default_process(func.name) == normalized_needle:
+            reason = "exact"
         rows.append({
             "qualified_name": func.qualified_name,
             "name": func.name,
             "kind": symbol_kind,
             "signature": f"{func.name}({', '.join(func.params)})",
             "location": _location(func),
-            "score": round(score, 3),
+            "score": round(score / 100.0, 3),
             "matched_by": reason,
         })
-    rows.sort(key=lambda row: (-row["score"], row["qualified_name"]))
+    rows.sort(key=lambda row: (
+        -row["score"],
+        len(row["qualified_name"]),
+        row["qualified_name"],
+    ))
     total = len(rows)
     return {"query": query, "count": total, "symbols": rows[:limit],
             "has_more": total > limit}
