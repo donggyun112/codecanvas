@@ -155,6 +155,13 @@ Tools:
 `list_entrypoints` also accepts `filter` / `kind` to narrow large projects.
 All tools take a `project_path`; outputs are compact and token-bounded.
 
+`simulate_state_transition` runs project code, so its worker process uses the
+project's virtualenv interpreter when one is found (`<project>/.venv` or `venv`,
+then the same in the parent directory) rather than the interpreter running the
+server — which under `uvx` cannot import the project's dependencies. Pass
+`python_executable` to choose explicitly. Every result reports the interpreter
+under `worker`, and `project_status` shows it before you run anything.
+
 ## Environment Variables
 
 | Variable | Default | Description |

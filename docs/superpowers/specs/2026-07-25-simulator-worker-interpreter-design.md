@@ -50,14 +50,24 @@ class WorkerInterpreter:
     executable: str
     source: str          # "explicit" | "project_venv" | "fallback"
     version: tuple[int, int, int] | None
-    error: str | None    # set when the interpreter is unusable
+    error: str | None    # unusable — the caller must abort
+    note: str | None     # degraded but usable
 
+def iter_venv_candidates(project_root: str) -> Iterator[Path]
 def find_project_venv(project_root: str) -> Path | None
 def resolve_worker_interpreter(project_root, explicit=None) -> WorkerInterpreter
 ```
 
-`find_project_venv` is the shared primitive; `resolve_worker_interpreter` adds
-validation, the version probe, and source labelling.
+`iter_venv_candidates` is the shared primitive: it yields candidate venv
+directories in search order and lets each caller decide what makes one usable.
+The simulator requires an interpreter inside; the tracer requires a
+site-packages directory. Sharing `find_project_venv` directly would have
+imposed the simulator's stricter predicate on the tracer.
+
+`error` and `note` are distinct on purpose. A failed version probe on an
+*auto-detected* venv is not the caller's fault, so it degrades to the server
+interpreter and records a `note`; only an explicitly requested interpreter that
+cannot be used produces an `error` that aborts the call.
 
 ### 2. Resolution chain
 
@@ -91,8 +101,8 @@ on a `SyntaxError`:
 > Project interpreter is Python 3.9.6; the simulator worker requires >= 3.10.
 > Pass `python_executable=` or upgrade the project venv.
 
-A probe that times out or fails to parse falls back to `sys.executable` with the
-reason recorded in `error`.
+A probe that times out or fails to parse falls back to `sys.executable`, with
+the reason recorded in `note` (see the `error`/`note` split above).
 
 ### 4. Security guard
 
@@ -129,9 +139,15 @@ visible before a simulation is ever run.
 
 ### 7. `tracer/app_discovery.py` cleanup
 
-`_activate_project_venv` is rewritten to call `find_project_venv`. Its search
-order, first-match-wins behavior, and `sys.path` mutation are preserved exactly;
-existing tracer tests act as the regression check.
+`_activate_project_venv` is rewritten to iterate `iter_venv_candidates`. Its
+search order, first-match-wins behavior, and `sys.path` mutation are preserved
+exactly.
+
+It had **no test coverage**, so characterization tests are written against the
+current implementation *before* the refactor, and must stay green through it.
+(It cannot call `find_project_venv`: that requires an interpreter inside the
+venv, while the tracer only needs site-packages — a venv directory with
+site-packages but no usable `bin/python` would silently stop being activated.)
 
 ## Files changed
 
@@ -142,21 +158,33 @@ existing tracer tests act as the regression check.
 | `core/codecanvas_mcp/mcp/queries.py` | Thread `python_executable` through |
 | `core/codecanvas_mcp/mcp/server.py` | Tool argument + docstring |
 | `core/codecanvas_mcp/mcp/session.py` | `project_status` worker block |
-| `core/codecanvas_mcp/tracer/app_discovery.py` | Reuse `find_project_venv` |
+| `core/codecanvas_mcp/tracer/app_discovery.py` | Reuse `iter_venv_candidates` |
 
 ## Testing
 
-New `tests/test_worker_interpreter.py`:
+`tests/test_worker_interpreter.py` (16) — resolution and guards, using
+executable shell stubs that answer the version probe, so no mocking is needed:
 
 - explicit `python_executable` wins over an existing project venv
-- a `tmp_path` venv layout (`.venv/bin/python`) is auto-detected
+- a `.venv/bin/python` layout is auto-detected; `.venv` beats `venv`; parent dir searched
 - no venv present → falls back to `sys.executable`, `source == "fallback"`
 - rejects a nonexistent path, a non-executable file, and a non-`python*` basename
-- version probe parsing: `3.9` rejected with the actionable message, `3.10`+ accepted
-- probe result is cached per path
-- `simulate()` output includes the `worker` block
+- `3.9` rejected with the actionable message; the minimum version accepted
+- the probe runs once per interpreter; the server interpreter is never probed
+- `simulate()` output carries `worker`; an unusable explicit path surfaces as `error`
+- `project_status` reports the worker interpreter
 
-Existing `tests/test_mcp_simulator.py` and the tracer tests must pass unchanged.
+`tests/test_tracer_venv_activation.py` (6) — characterization of
+`_activate_project_venv`, written before the refactor.
+
+`tests/test_simulator_project_venv.py` (3) — end-to-end. Builds a real venv
+holding a module that exists nowhere else and simulates a function importing it:
+
+- the premise holds (the test runner genuinely cannot import the module)
+- the worker resolves to the project venv and the case passes
+- forcing `python_executable=sys.executable` reproduces the old failure
+
+Existing `tests/test_mcp_simulator.py` and the tracer tests pass unchanged.
 
 ## Out of scope
 

@@ -216,7 +216,8 @@ def simulate_state_transition(function: str, state_schema: dict,
                               state_var: str = "state",
                               timeout_seconds: float = 3.0,
                               import_timeout_seconds: float = 10.0,
-                              max_cases: int = 12) -> dict:
+                              max_cases: int = 12,
+                              python_executable: str | None = None) -> dict:
     """Execute focused state-transition repro cases in isolated processes.
 
     Pass explicit `cases` for exact domain states, or omit them to generate a
@@ -238,6 +239,13 @@ def simulate_state_transition(function: str, state_schema: dict,
     and cannot be contained or overridden by this tool.
     `state_var` must match the parameter receiving the whole state mapping.
     Module-level sync and async node-style functions are supported in this MVP.
+
+    The worker runs on the project's virtualenv interpreter when one is found
+    (`<project>/.venv` or `venv`, then the same in the parent directory),
+    otherwise on this server's interpreter — which under `uvx` cannot import the
+    project's dependencies. Set `python_executable` to choose explicitly. Every
+    result reports the interpreter used under `worker`; check it first when a
+    case fails with an unexpected ImportError.
     """
     return _with_builder(
         project_path,
@@ -247,6 +255,7 @@ def simulate_state_transition(function: str, state_schema: dict,
             state_var=state_var, timeout_seconds=timeout_seconds,
             import_timeout_seconds=import_timeout_seconds,
             max_cases=max_cases,
+            python_executable=python_executable,
         ),
     )
 

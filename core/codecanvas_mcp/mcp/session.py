@@ -86,9 +86,24 @@ def project_status(project_path: str) -> dict:
             candidates.add(str(found.parent))
     cache_path = root / CACHE_DIR_NAME / CACHE_FILE_NAME
     recommendations = sorted(candidates, key=lambda p: (p.count("/"), p))
+
+    from codecanvas_mcp.mcp.interpreter import resolve_worker_interpreter
+
+    interpreter = resolve_worker_interpreter(str(root))
+    worker = interpreter.as_dict()
+    if interpreter.error:
+        worker["error"] = interpreter.error
+    elif interpreter.source == "fallback":
+        worker["warning"] = (
+            "The simulator worker will run on this server's interpreter, which "
+            "may not be able to import the project's dependencies. Create a "
+            "project venv or pass python_executable to simulate_state_transition."
+        )
+
     return {
         "project_root": str(root),
         "python_files": len(py_files),
+        "worker": worker,
         "cache": {
             "path": str(cache_path),
             "exists": cache_path.is_file(),

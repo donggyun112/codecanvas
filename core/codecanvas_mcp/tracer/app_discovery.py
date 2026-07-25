@@ -125,23 +125,21 @@ def _activate_project_venv(project_root: str) -> None:
     """Add the target project's venv site-packages to sys.path."""
     import glob
 
-    # Search project root and parent for .venv or venv
-    search_dirs = [project_root, os.path.dirname(project_root)]
-    for base in search_dirs:
-        for venv_name in (".venv", "venv"):
-            venv_dir = os.path.join(base, venv_name)
-            if not os.path.isdir(venv_dir):
-                continue
-            # Find site-packages
-            patterns = [
-                os.path.join(venv_dir, "lib", "python*", "site-packages"),
-                os.path.join(venv_dir, "Lib", "site-packages"),  # Windows
-            ]
-            for pattern in patterns:
-                for sp in glob.glob(pattern):
-                    if sp not in sys.path:
-                        sys.path.insert(0, sp)
-                    return
+    from codecanvas_mcp.mcp.interpreter import iter_venv_candidates
+
+    for venv_dir in iter_venv_candidates(project_root):
+        if not venv_dir.is_dir():
+            continue
+        # Find site-packages
+        patterns = [
+            os.path.join(venv_dir, "lib", "python*", "site-packages"),
+            os.path.join(venv_dir, "Lib", "site-packages"),  # Windows
+        ]
+        for pattern in patterns:
+            for sp in glob.glob(pattern):
+                if sp not in sys.path:
+                    sys.path.insert(0, sp)
+                return
 
 
 def _is_fastapi_app(obj: Any) -> bool:

@@ -861,8 +861,14 @@ def simulate(
     timeout_seconds: float,
     import_timeout_seconds: float,
     max_cases: int,
+    python_executable: str | None = None,
 ) -> dict:
     """Execute state cases in isolated child processes and collect evidence."""
+    # Imported here, not at module scope: this file is also run directly as
+    # ``python simulator.py --worker``, where the codecanvas_mcp package is not
+    # importable. Only the parent process ever reaches simulate().
+    from codecanvas_mcp.mcp.interpreter import resolve_worker_interpreter
+
     if not isinstance(state_schema, dict):
         return {"error": "state_schema must be a dict."}
     if cases is not None and (
@@ -901,6 +907,10 @@ def simulate(
     selected_cases = selected_cases[:max_cases]
     props, required = _schema_parts(state_schema)
 
+    interpreter = resolve_worker_interpreter(project_root, explicit=python_executable)
+    if interpreter.error:
+        return {"error": interpreter.error, "worker": interpreter.as_dict()}
+
     results = []
     worker_path = str(Path(__file__).resolve())
     for index, case in enumerate(selected_cases):
@@ -919,7 +929,7 @@ def simulate(
         }
         try:
             completed = subprocess.run(
-                [sys.executable, worker_path, "--worker"],
+                [interpreter.executable, worker_path, "--worker"],
                 input=json.dumps(request),
                 capture_output=True,
                 text=True,
@@ -960,6 +970,7 @@ def simulate(
     failed = sum(not result.get("passed", False) for result in results)
     output = {
         "generated_cases": cases is None,
+        "worker": interpreter.as_dict(),
         "invariants": selected_invariants,
         "case_count": len(results),
         "passed": len(results) - failed,
