@@ -9,8 +9,6 @@ __pycache__/
 references/
 *.db
 .DS_Store
-webview/src/styles/*.css.map
-extension/media/assets/
 test_flow_output.json
 .codecanvas/
 a.txt
