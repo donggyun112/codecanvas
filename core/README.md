@@ -33,5 +33,4 @@ of the session.
 ## Extras
 
 The base install is analysis-only. `pip install "codecanvas-mcp[server]"`
-adds the FastAPI web server and runtime tracer used by the
-[CodeCanvas VS Code extension](https://github.com/donggyun112/codecanvas).
+adds the FastAPI web server and runtime tracer.

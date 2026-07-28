@@ -86,6 +86,7 @@ Notes:
 | `CODECANVAS_THROTTLE_MS` | 10 | Sleep between batches (ms) |
 
 ## Development
+Requires Python 3.10+ (the `mcp` dependency ships no wheels for older Pythons).
 
 ```bash
 git clone https://github.com/donggyun112/codecanvas.git

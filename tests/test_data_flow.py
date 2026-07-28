@@ -167,7 +167,7 @@ class TestReturnTypeAnnotation:
 class TestEdgeCoexistence:
     def test_l3_and_step_call_both_exist(self, login_flow):
         """Both L3→L3 and step_call edges should coexist in the model.
-        Deduplication happens in the webview transform, not in the backend."""
+        The backend intentionally leaves deduplication to consumers."""
         step_call_count = sum(
             1 for e in login_flow["edges"]
             if e.get("metadata", {}).get("step_call")
