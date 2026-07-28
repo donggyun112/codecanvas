@@ -1,177 +1,81 @@
 # CodeCanvas
 
-A VS Code extension that statically analyzes Python codebases and visualizes execution flows, call graphs, control flow, and data flow — so you can understand code without reading every line.
+Precision static-analysis MCP server for Python codebases. Gives coding
+agents ground-truth answers about call graphs, control flow, and change
+impact — instead of grepping and guessing.
 
-Automatically traces function calls, data transformations, branch structures, and dependency injection chains. Detects which entrypoints and public surfaces are affected when you change code.
+## Why
 
-## Features
+When a coding agent needs to know "who calls this function?" or "what
+breaks if I change this?", it greps and reads whole files — token-hungry
+and easy to get wrong. CodeCanvas parses the project once into a real
+call graph and control-flow graph, caches it on disk, and answers those
+questions precisely. Outputs are compact and token-bounded, and every
+successful response identifies its `analysis_root` and carries
+evidence/truncation metadata that says whether it is safe to summarize
+as an unconditional claim.
 
-### 5 Visualization Views
+## Quick Start
 
-| View | Description |
+```bash
+claude mcp add codecanvas -- uvx codecanvas-mcp
+```
+
+Or in any MCP client config:
+
+```json
+{ "mcpServers": { "codecanvas": { "command": "uvx", "args": ["codecanvas-mcp"] } } }
+```
+
+Pass `project_path` (the repo root) on the first tool call; it is
+remembered for the rest of the session. Python 3.10+.
+
+## Tools
+
+| Tool | Answers |
 |---|---|
-| **Review Brief** | Risk scores, concerns, decision points at a glance |
-| **Code Flow** | Execution-order flow with inline source code from CFG blocks |
-| **Data Flow** | How data moves through the system (query, transform, validate, branch, respond) |
-| **Call Stack** | Function call graph with drill-down from L0 trigger to L4 statements |
-| **CFG** | Control flow graph — branches, loops, exception paths with source code |
+| `list_entrypoints` | What entrypoints exist? API routes, scripts, and a library's public API |
+| `find_symbols` | Where is this symbol? Exact-first search with score floor and separated suggestions |
+| `who_calls` | Who calls this function? Ground-truth reverse call edges, N hops |
+| `call_tree` | What does this function reach downstream, and what side effects does it trigger? |
+| `what_does` | What does this function do? Signature, docstring, db/http/raise effects, risk |
+| `function_flow` | How does this function branch? Structured branch subjects and scopes |
+| `reaching_conditions` | Under exactly which guard conditions does each return/raise happen? |
+| `verify_claim` | Is a "source reaches target" claim true, false, or uncertain? Conservative verdict from call paths and guards |
+| `analyze_impact` | Which entrypoints/public surfaces are affected by this diff or git ref? |
+| `project_status` | What has been analyzed? Cache state, analysis root, worker interpreter |
+| `validate_state_schema` | Do these state fields actually exist? Static field validation |
+| `simulate_state_transition` | Run focused synthetic or custom state-transition cases against project code |
 
-### Change Impact Analysis
+Notes:
 
-Automatically detects which entrypoints/public surfaces are affected by code changes.
+- `list_entrypoints` accepts `filter` / `kind` to narrow large projects.
+  For libraries it reports the public API surface as `kind="export"`,
+  read from each distributed package's `__all__` (or its `__init__.py`
+  public names) plus `[project.scripts]`.
+- `simulate_state_transition` runs project code, so its worker uses the
+  project's virtualenv interpreter when one is found (`<project>/.venv`
+  or `venv`, then the same in the parent directory). Pass
+  `python_executable` to choose explicitly; every result reports the
+  interpreter under `worker`.
 
-- Click **"Analyze Uncommitted Changes"** in the sidebar
-- Maps changed functions → call graph → affected entrypoints
-- Follows `Depends()` dependency injection chains
-- Shows risk score + call depth per affected surface
+## How It Works
 
-### Runtime Tracing
-
-Send actual HTTP requests and visualize which code paths were executed.
-
-- HIT / MISS badges on every node
-- 3-way path classification: verified / unverified / runtime-only
-
-## Architecture
-
-```
-extension/          VS Code host (TypeScript, tsup)
-  ├─ src/extension.ts    Activation + command registration
-  ├─ src/server.ts       Python analysis server lifecycle
-  ├─ src/flowPanel.ts    Webview panel (flow rendering)
-  └─ src/sidebar.ts      Sidebar (endpoint list + Impact Analysis)
-
-webview/            React Flow canvas (React 18, Vite)
-  ├─ src/App.tsx         Main canvas + view switching
-  ├─ src/transform/      Per-view data transforms
-  │   ├─ projection.ts       Kind-based projection utility
-  │   ├─ cfgTransform.ts     CFG view
-  │   ├─ codeFlowTransform.ts Code Flow view
-  │   ├─ executionTransform.ts Data Flow view
-  │   └─ visibility.ts       Callstack view filtering
-  ├─ src/nodes/          Node components (7 types)
-  ├─ src/edges/          Smart edges (A* pathfinding)
-  └─ src/layout/         ELK layout + branch centering
-
-core/               Python static analysis engine
-  ├─ codecanvas_mcp/graph/
-  │   ├─ models.py       Canonical IR (FlowNode, FlowEdge, FlowGraph)
-  │   ├─ builder.py      FlowGraph build pipeline
-  │   ├─ ast_execution.py AST → ExecutionGraph (semantic execution steps)
-  │   ├─ cfg.py          AST → ControlFlowGraph (branches/loops)
-  │   ├─ impact.py       git diff → impact analysis
-  │   └─ execution.py    ExecutionGraph model + L3 merge
-  ├─ codecanvas_mcp/parser/
-  │   ├─ call_graph.py   Project-wide call graph + disk cache
-  │   ├─ fastapi_extractor.py  FastAPI routes/middleware/exception handlers
-  │   └─ entrypoint_extractor.py  API/script/function entrypoint discovery
-  └─ codecanvas_mcp/server/
-      └─ app.py          FastAPI analysis server (5 endpoints)
-```
-
-## Canonical IR
-
-All visualization views are projections from a single unified graph.
-
-```
-FlowGraph.nodes (classified by kind)
-  ├─ trigger / pipeline / file / function / statement   ← Callstack view
-  ├─ cfg_block                                          ← CFG view + Code Flow source
-  ├─ exec_l4                                            ← Data Flow (detail) + Code Flow
-  └─ exec_l3                                            ← Data Flow (summary)
-```
-
-Use `projectByKind(flowData, kinds, edgeTypes)` to extract nodes/edges for any view.
+- **libcst-based parsing** builds a project-wide call graph and per-function
+  control-flow graphs, resolving dependency-injection chains (e.g. FastAPI
+  `Depends()`).
+- **Canonical IR** — every answer is a projection from one unified graph,
+  so tools agree with each other.
+- **Disk cache** at `.codecanvas/` (call graph + entrypoints) makes warm
+  queries fast.
 
 ## Performance
 
 | Metric | Value |
 |---|---|
 | Entrypoint discovery (warm) | 12ms |
-| Flow build (warm) | 0.1ms |
-| Largest flow | 216 nodes / 357KB JSON |
-| Disk cache | `.codecanvas/callgraph.json` + `entrypoints.json` |
-| File count limit | 5,000 (CODECANVAS_MAX_FILES) |
+| File count limit | 5,000 (`CODECANVAS_MAX_FILES`) |
 | CPU throttle | 10ms yield every 50 files |
-
-## Getting Started
-
-```bash
-# Install JS dependencies
-pnpm install
-
-# Install Python dependencies
-# [dev] pulls in everything (pytest + the [server] extra below)
-cd core && pip install -e ".[dev]" && cd ..
-
-# MCP server only (no FastAPI web server / runtime tracer):
-#   pip install codecanvas-mcp
-# Web server + tracer:
-#   pip install "codecanvas-mcp[server]"
-
-# Build (webview + extension)
-pnpm -r run build
-
-# Run in VS Code
-# Press F5 to launch Extension Development Host
-
-# Run tests
-python3 -m pytest tests/
-```
-
-### Requirements
-
-- Node.js 18+
-- Python 3.10+
-- pnpm
-
-## VS Code Commands
-
-| Command | Description |
-|---|---|
-| `CodeCanvas: Analyze Project` | Analyze project + discover entrypoints |
-| `CodeCanvas: Show Flow` | Visualize flow for selected endpoint |
-| `CodeCanvas: Analyze Function Flow` | Flow from cursor position |
-| `CodeCanvas: Trace Flow (Runtime)` | Execute HTTP request + trace |
-
-## MCP Server (for coding agents)
-
-CodeCanvas exposes its analysis engine to coding agents (Claude Code, Cursor)
-over MCP (stdio):
-
-    claude mcp add codecanvas -- codecanvas-mcp
-
-Tools:
-
-| Tool | Answers |
-|---|---|
-| `list_entrypoints` | What entrypoints exist in this project? |
-| `find_symbols` | Exact-first symbol search with a score floor, separated suggestions, role/match evidence, and cursor pagination. |
-| `who_calls` | Who calls this function? (ground-truth reverse edges) |
-| `what_does` | What does this function do? (signature, effects, risk) |
-| `function_flow` | How does this function work? (structured branch subjects/scopes plus a compatibility outline) |
-| `verify_claim` | Is a qualified `source reaches target` claim true, false, or uncertain? |
-| `analyze_impact` | What entrypoints/public surfaces break if I apply this diff? |
-
-`list_entrypoints` also accepts `filter` / `kind` to narrow large projects.
-All tools take a `project_path`; outputs are compact and token-bounded. Every
-successful response identifies `analysis_root` and carries evidence/truncation
-metadata that says whether it is safe to summarize as an unconditional claim.
-
-For libraries it reports the public API surface as `kind="export"`, read from
-each distributed package's `__all__` (or, absent one, its `__init__.py` public
-names) plus `[project.scripts]`. Names resolve to where they are defined, not to
-the `__init__.py` re-exporting them. Only directories with a `pyproject.toml`
-declaring `[project].name` are scanned, so application repos are unaffected. In
-a monorepo the output interleaves packages and, when truncated, names every
-package so you can narrow with `filter=<package or symbol>`.
-
-`simulate_state_transition` runs project code, so its worker process uses the
-project's virtualenv interpreter when one is found (`<project>/.venv` or `venv`,
-then the same in the parent directory) rather than the interpreter running the
-server — which under `uvx` cannot import the project's dependencies. Pass
-`python_executable` to choose explicitly. Every result reports the interpreter
-under `worker`, and `project_status` shows it before you run anything.
 
 ## Environment Variables
 
@@ -180,6 +84,16 @@ under `worker`, and `project_status` shows it before you run anything.
 | `CODECANVAS_MAX_FILES` | 5000 | Max files to analyze |
 | `CODECANVAS_BATCH_SIZE` | 50 | CPU throttle batch size |
 | `CODECANVAS_THROTTLE_MS` | 10 | Sleep between batches (ms) |
+
+## Development
+
+```bash
+git clone https://github.com/donggyun112/codecanvas.git
+cd codecanvas/core
+pip install -e ".[dev]"
+cd ..
+python3 -m pytest
+```
 
 ## License
 
