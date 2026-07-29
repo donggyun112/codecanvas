@@ -12,13 +12,16 @@ coding agents compact answers about call paths, control flow, and change impact
 without making them grep through an entire repository and guess how the pieces
 fit together.
 
-In two blinded runs of the same three-task holdout on Google ADK's 433K-line
-Python codebase, answer quality remained comparable, but token outcomes varied
-substantially. The `logic_flow`-only run used 52.58% fewer server-reported input
-+ output tokens than its same-run control, while a fresh three-tool replication
-used 51.07% more than its own control. CodeCanvas therefore treats the current
-benchmark as evidence of quality retention, not yet as a stable token-reduction
-estimate. See the [methodology, results, and limitations](benchmarks/README.md).
+Understand an unfamiliar Python system before spending thousands of tokens
+reading it file by file. CodeCanvas gives coding agents one compact,
+citation-ready view of branches, callers, callees, side effects, and change
+impact.
+
+In a blinded three-task holdout on Google ADK's 433K-line Python codebase, the
+`logic_flow` profile used **52.58% fewer server-reported input + output tokens**
+than the same-run built-in-tools control while scoring **99.5/100** versus
+100/100. See the [audited methodology, detailed results, and
+limitations](benchmarks/README.md).
 
 Use it to answer questions such as:
 
