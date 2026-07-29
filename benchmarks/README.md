@@ -5,8 +5,8 @@
 This benchmark runs two fresh Codex agents on identical, source-grounded
 questions about a Python repository:
 
-1. **Baseline** — built-in shell, search, and read tools; every MCP server is
-   disabled.
+1. **Existing tools only** — built-in shell, search, and read tools; every MCP
+   server is disabled.
 2. **CodeCanvas** — the same built-in tools plus an explicitly enabled compact
    CodeCanvas profile.
 
@@ -44,22 +44,35 @@ and implementation were frozen.
 Two fresh runs of the same three-task holdout produced opposite aggregate token
 outcomes:
 
-| Run | Treatment tools | Baseline input + output | CodeCanvas input + output | Total-token change | Uncached input + output change | Mean blind score, baseline → CodeCanvas |
+| Run | Treatment tools | Existing tools only | Existing tools + CodeCanvas | Total-token change | Uncached input + output change | Mean blind score, existing → CodeCanvas |
 |---|---|---:|---:|---:|---:|---:|
 | Audited holdout, 2026-07-29 | `logic_flow` | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 |
 | Three-tool replication, 2026-07-30 | `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 |
 
-The three-tool replication broke down as follows:
+The per-task results include both sides of the comparison.
 
-| Task | Baseline input + output | CodeCanvas input + output | Change | Blind score, baseline → CodeCanvas |
-|---|---:|---:|---:|---:|
-| Agent callback lifecycle | 269,022 | 439,894 | 63.51% more | 100 → 100 |
-| Compaction arbitration | 221,120 | 241,296 | 9.12% more | 94.5 → 97 |
-| File artifact load | 105,414 | 218,497 | 107.28% more | 100 → 100 |
+#### Audited `logic_flow`-only run
+
+| Task | Existing tools tokens | Existing + CodeCanvas tokens | Change | Blind score, existing → CodeCanvas | Built-in commands, existing → CodeCanvas |
+|---|---:|---:|---:|---:|---:|
+| Agent callback lifecycle | 1,073,654 | 324,285 | 69.80% fewer | 100 → 100 | 31 → 26 |
+| Compaction arbitration | 228,279 | 123,417 | 45.94% fewer | 100 → 98.5 | 9 → 4 |
+| File artifact load | 61,154 | 198,734 | 224.97% more | 100 → 100 | 3 → 9 |
+
+The CodeCanvas side also made one, one, and two `logic_flow` calls respectively.
+
+#### Three-tool replication
+
+| Task | Existing tools tokens | Existing + CodeCanvas tokens | Change | Blind score, existing → CodeCanvas | Built-in commands, existing → CodeCanvas |
+|---|---:|---:|---:|---:|---:|
+| Agent callback lifecycle | 269,022 | 439,894 | 63.51% more | 100 → 100 | 15 → 23 |
+| Compaction arbitration | 221,120 | 241,296 | 9.12% more | 94.5 → 97 | 9 → 10 |
+| File artifact load | 105,414 | 218,497 | 107.28% more | 100 → 100 | 6 → 8 |
 
 The treatment agents called `logic_flow` four times in total: once for callback,
 once for compaction, and twice for artifact. They did not call `who_calls` or
-`call_tree`. Baseline made 30 built-in command calls and CodeCanvas made 41.
+`call_tree`. Existing-tools-only agents made 30 built-in command calls and the
+CodeCanvas agents made 41.
 A one-turn smoke prompt reported 13,785 input tokens for both the one-tool and
 three-tool profiles.
 

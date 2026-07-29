@@ -192,8 +192,8 @@ The evaluation compares paired, zero-context agents on three frozen
 source-grounded questions about Google ADK commit
 `c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a`:
 
-- **Baseline:** built-in shell, search, and read tools with every MCP server
-  disabled.
+- **Existing tools only:** built-in shell, search, and read tools with every MCP
+  server disabled.
 - **CodeCanvas:** the same built-in tools plus an explicitly enabled compact
   CodeCanvas profile.
 
@@ -204,17 +204,18 @@ against a rubric frozen before the holdout was opened.
 
 ### Results
 
-| Treatment profile | Baseline input + output | CodeCanvas input + output | Total-token change | Uncached input + output change | Mean blind score, baseline → CodeCanvas |
+| Treatment profile | Existing tools only | Existing tools + CodeCanvas | Total-token change | Uncached input + output change | Mean blind score, existing → CodeCanvas |
 |---|---:|---:|---:|---:|---:|
 | `logic_flow` only | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 |
 | `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 |
 
-In the three-tool replication, agents called `logic_flow` four times and did
-not call `who_calls` or `call_tree`. The CodeCanvas condition made 41 built-in
-command calls versus 30 for baseline. A one-turn smoke prompt reported the same
-13,785 input tokens for the one-tool and three-tool profiles, so the observed
-regression was dominated by a longer exploration trajectory rather than direct
-use of the two additional tools.
+Across the original run, existing-tools-only agents made 43 commands and
+CodeCanvas agents made 39 built-in commands plus four `logic_flow` calls. In the
+three-tool replication, the counts were 30 versus 41 built-in commands plus four
+`logic_flow` calls. The agents did not select `who_calls` or `call_tree`. A
+one-turn smoke prompt reported the same 13,785 input tokens for the one-tool and
+three-tool profiles, so the observed regression was dominated by a longer
+exploration trajectory rather than direct use of the two additional tools.
 
 The opposite aggregate outcomes show that one run per task is not a stable
 estimate. Do not quote either percentage as a universal saving; repeated paired
