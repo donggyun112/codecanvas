@@ -1,12 +1,12 @@
 [project]
 name = "codecanvas-mcp"
-version = "0.1.13"
+version = "0.1.14"
 description = "Precision static-analysis MCP server for Python: call graphs, control flow, and change impact"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "libcst>=1.0.0",
-    "mcp>=1.0.0",
+    "mcp>=2.0.0,<3",
     "rapidfuzz>=3.0.0",
     # Reading pyproject.toml to find a library's distributed packages.
     # tomllib is stdlib from 3.11; this covers the 3.10 floor.

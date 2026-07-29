@@ -7,7 +7,7 @@ and is remembered for later calls in the session (see session.resolve_project).
 """
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from codecanvas_mcp.mcp import queries
 from codecanvas_mcp.mcp.session import (
@@ -16,7 +16,7 @@ from codecanvas_mcp.mcp.session import (
 )
 from codecanvas_mcp.parser.call_graph import ProjectTooLargeError
 
-mcp = FastMCP(
+mcp = MCPServer(
     "codecanvas",
     instructions=(
         "CodeCanvas answers precise questions about a Python codebase from a "
