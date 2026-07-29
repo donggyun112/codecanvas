@@ -1,21 +1,23 @@
 # CodeCanvas benchmarks
 
-## Independent zero-context logic-flow benchmark
+## Independent zero-context agent benchmark
 
 This benchmark runs two fresh Codex agents on identical, source-grounded
 questions about a Python repository:
 
 1. **Baseline** — built-in shell, search, and read tools; every MCP server is
    disabled.
-2. **CodeCanvas** — the same built-in tools plus only `codecanvas.logic_flow`.
+2. **CodeCanvas** — the same built-in tools plus an explicitly enabled compact
+   CodeCanvas profile.
 
 Each task and condition gets an independent `codex exec --ephemeral` process,
-the same model and reasoning effort, the same read-only target checkout, and
-byte-identical task prompts. The CodeCanvas condition explicitly pre-approves
-the read-only MCP tool because non-interactive Codex otherwise reports the
-misleading error `user cancelled MCP tool call`.
+the `gpt-5.6-sol` model with high reasoning effort, the same read-only target
+checkout, and byte-identical task prompts. The conditions run concurrently.
+The CodeCanvas condition explicitly pre-approves its read-only MCP tools because
+non-interactive Codex otherwise reports the misleading error
+`user cancelled MCP tool call`.
 
-The compact profile is intentional:
+The current product-oriented compact profile is:
 
 ```toml
 [mcp_servers.codecanvas]
@@ -23,12 +25,12 @@ command = "/path/to/codecanvas/core/.venv/bin/python"
 args = ["-m", "codecanvas_mcp.mcp.server"]
 cwd = "/path/to/codecanvas/core"
 default_tools_approval_mode = "approve"
-enabled_tools = ["logic_flow"]
+enabled_tools = ["logic_flow", "who_calls", "call_tree"]
 ```
 
-Exposing every MCP schema materially increases the context repeated at each
-agent inference. This benchmark tests the product's token-efficient logic-flow
-profile, not the full multi-tool profile.
+This preserves the three navigation tools intended for unfamiliar-code
+investigation without exposing the full tool catalog. The original audited run
+enabled only `logic_flow`; the replication enabled all three tools above.
 
 ### Frozen ADK holdout
 
@@ -37,21 +39,40 @@ An independent source-only agent created four tasks at ADK commit
 the compact profile. The other three remained untouched until the configuration
 and implementation were frozen.
 
-The three-task holdout result:
+### Results
 
-| Metric | Baseline | CodeCanvas | Change |
-|---|---:|---:|---:|
-| Server-reported input + output tokens | 1,363,087 | 646,436 | **52.58% fewer** |
-| Uncached input + output tokens | 183,951 | 157,476 | **14.39% fewer** |
-| Mean blind rubric score | 100.0/100 | 99.5/100 | -0.5 point |
+Two fresh runs of the same three-task holdout produced opposite aggregate token
+outcomes:
 
-Per-task savings were `69.80%`, `45.94%`, and `-224.97%`. The simple artifact
-lookup regressed because its baseline needed only three commands. CodeCanvas is
-not a universal per-task win; its advantage appeared on the broader callback
-and compaction flows.
+| Run | Treatment tools | Baseline input + output | CodeCanvas input + output | Total-token change | Uncached input + output change | Mean blind score, baseline → CodeCanvas |
+|---|---|---:|---:|---:|---:|---:|
+| Audited holdout, 2026-07-29 | `logic_flow` | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 |
+| Three-tool replication, 2026-07-30 | `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 |
+
+The three-tool replication broke down as follows:
+
+| Task | Baseline input + output | CodeCanvas input + output | Change | Blind score, baseline → CodeCanvas |
+|---|---:|---:|---:|---:|
+| Agent callback lifecycle | 269,022 | 439,894 | 63.51% more | 100 → 100 |
+| Compaction arbitration | 221,120 | 241,296 | 9.12% more | 94.5 → 97 |
+| File artifact load | 105,414 | 218,497 | 107.28% more | 100 → 100 |
+
+The treatment agents called `logic_flow` four times in total: once for callback,
+once for compaction, and twice for artifact. They did not call `who_calls` or
+`call_tree`. Baseline made 30 built-in command calls and CodeCanvas made 41.
+A one-turn smoke prompt reported 13,785 input tokens for both the one-tool and
+three-tool profiles.
+
+The added tool schemas therefore showed no measurable initial-token difference
+in this setup, and the two added tools incurred no invocation cost. The
+replication's higher total was associated with a longer agent exploration path.
+Because the baseline trajectory also changed sharply between runs, these two
+single-run outcomes cannot isolate a causal effect or support a stable
+token-savings percentage.
 
 The frozen tasks, hidden rubric, anonymized grades, exact usage values, tool
-counts, answer hashes, trace hashes, and limitations are committed under:
+counts, answer hashes, trace hashes, and limitations for the original audited
+run are committed under:
 
 - `agent_logic_flow/adk_holdout_v3_tasks.json`
 - `agent_logic_flow/adk_holdout_v3_rubric.json`
@@ -59,7 +80,9 @@ counts, answer hashes, trace hashes, and limitations are committed under:
 - `results/adk_holdout_v3.json`
 
 Raw traces are not committed because they contain large source excerpts. Their
-SHA-256 hashes are recorded in the result file.
+SHA-256 hashes are recorded in the original result file. The three-tool
+replication used the same frozen tasks and rubric; its temporary raw traces are
+not committed.
 
 ### Reproduce
 
@@ -79,14 +102,16 @@ receive anonymized answers and a frozen rubric without seeing condition labels.
 
 ### What the numbers do not mean
 
-- They are one model, one repository commit, one run per task and condition,
-  and three holdout tasks.
+- They are one model, one repository commit, two single-run evaluations, and
+  three holdout tasks.
 - Server-reported tokens are not provider billing or dollar cost.
 - Cached input is included in the headline total and also reported separately.
 - The rubric did not define a pass threshold, so exact scores are reported
   rather than retroactively inventing pass/fail.
-- Do not generalize the aggregate to small lookup tasks or other repositories
-  without rerunning the benchmark.
+- The opposite aggregate results demonstrate high trajectory variance.
+- Do not advertise either run as a universal token reduction.
+- A stronger estimate requires repeated paired runs, reported with a median and
+  dispersion or confidence interval, on additional repositories and task types.
 
 ## Latency
 

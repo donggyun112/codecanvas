@@ -12,12 +12,13 @@ coding agents compact answers about call paths, control flow, and change impact
 without making them grep through an entire repository and guess how the pieces
 fit together.
 
-In a blinded three-task holdout on Google ADK's 433K-line Python codebase, the
-`logic_flow`-only profile used **52.58% fewer server-reported input + output
-tokens** than a built-in-tools baseline, with mean rubric scores of 99.5/100
-versus 100/100. Uncached input + output fell 14.39%. One simple lookup task
-regressed, so read the [methodology and limitations](benchmarks/README.md)
-before quoting the aggregate.
+In two blinded three-task holdout runs on Google ADK's 433K-line Python
+codebase, answer quality stayed between 98.17 and 100/100, but token outcomes
+varied substantially: one `logic_flow`-only run used 52.58% fewer
+server-reported input + output tokens, while a fresh three-tool replication used
+51.07% more. CodeCanvas therefore treats the current benchmark as evidence of
+quality retention, not yet as a stable token-reduction estimate. See the
+[methodology, both results, and limitations](benchmarks/README.md).
 
 Use it to answer questions such as:
 
@@ -183,9 +184,46 @@ with:
   in the parent project. Use `python_executable` to choose explicitly and check
   the returned `worker` metadata when imports fail.
 
-## Benchmark it on your project
+## Independent agent benchmark
 
-Run paired, zero-context agents on the frozen ADK holdout:
+### Method
+
+The evaluation compares paired, zero-context agents on three frozen
+source-grounded questions about Google ADK commit
+`c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a`:
+
+- **Baseline:** built-in shell, search, and read tools with every MCP server
+  disabled.
+- **CodeCanvas:** the same built-in tools plus an explicitly enabled compact
+  CodeCanvas profile.
+
+Every task and condition runs in a fresh `codex exec --ephemeral` process with
+the same `gpt-5.6-sol` model, high reasoning effort, read-only checkout, and
+byte-identical prompt. A separate source-blind grader scores anonymized answers
+against a rubric frozen before the holdout was opened.
+
+### Results
+
+| Treatment profile | Baseline input + output | CodeCanvas input + output | Total-token change | Uncached input + output change | Mean blind score, baseline → CodeCanvas |
+|---|---:|---:|---:|---:|---:|
+| `logic_flow` only | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 |
+| `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 |
+
+In the three-tool replication, agents called `logic_flow` four times and did
+not call `who_calls` or `call_tree`. The CodeCanvas condition made 41 built-in
+command calls versus 30 for baseline. A one-turn smoke prompt reported the same
+13,785 input tokens for the one-tool and three-tool profiles, so the observed
+regression was dominated by a longer exploration trajectory rather than direct
+use of the two additional tools.
+
+The opposite aggregate outcomes show that one run per task is not a stable
+estimate. Do not quote either percentage as a universal saving; repeated paired
+runs should report a median and dispersion before making a token-reduction
+claim. Server-reported tokens include cached input and are not provider billing.
+
+### Reproduce the frozen holdout
+
+The included runner reproduces the audited `logic_flow`-only condition:
 
 ```bash
 python benchmarks/benchmark_agent_logic_flow.py \
@@ -194,9 +232,8 @@ python benchmarks/benchmark_agent_logic_flow.py \
   --output-dir /tmp/codecanvas-agent-benchmark
 ```
 
-The baseline agent receives built-in shell/search/read tools and no MCP. The
-paired agent receives the same tools plus only `logic_flow`, using this
-token-efficient Codex configuration:
+The three-tool replication used the same protocol with this compact
+configuration:
 
 ```toml
 [mcp_servers.codecanvas]
@@ -204,12 +241,12 @@ command = "/path/to/codecanvas/core/.venv/bin/python"
 args = ["-m", "codecanvas_mcp.mcp.server"]
 cwd = "/path/to/codecanvas/core"
 default_tools_approval_mode = "approve"
-enabled_tools = ["logic_flow"]
+enabled_tools = ["logic_flow", "who_calls", "call_tree"]
 ```
 
-This launches model-backed Codex runs and can consume substantial tokens.
-Server-reported tokens are not provider billing. See the
-[audited result, raw hashes, methodology, and limitations](benchmarks/README.md).
+This launches model-backed Codex runs and can consume substantial tokens. See
+the [full methodology, per-task results, audit artifacts, and
+limitations](benchmarks/README.md).
 
 For cold analysis, warm symbol lookup, and concurrent lookup throughput:
 
