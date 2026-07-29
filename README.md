@@ -1,101 +1,205 @@
-# CodeCanvas
+# CodeCanvas MCP
 
-Precision static-analysis MCP server for Python codebases. Gives coding
-agents ground-truth answers about call graphs, control flow, and change
-impact — instead of grepping and guessing.
+[![PyPI](https://img.shields.io/pypi/v/codecanvas-mcp)](https://pypi.org/project/codecanvas-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/codecanvas-mcp)](https://pypi.org/project/codecanvas-mcp/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Why
+Evidence-backed code intelligence for Python coding agents.
 
-When a coding agent needs to know "who calls this function?" or "what
-breaks if I change this?", it greps and reads whole files — token-hungry
-and easy to get wrong. CodeCanvas parses the project once into a real
-call graph and control-flow graph, caches it on disk, and answers those
-questions precisely. Outputs are compact and token-bounded, and every
-successful response identifies its `analysis_root` and carries
-evidence/truncation metadata that says whether it is safe to summarize
-as an unconditional claim.
+CodeCanvas is a local static-analysis
+[Model Context Protocol](https://modelcontextprotocol.io/) server. It gives
+coding agents compact answers about call paths, control flow, and change impact
+without making them grep through an entire repository and guess how the pieces
+fit together.
 
-## Quick Start
+Use it to answer questions such as:
+
+- Who calls this function, directly or transitively?
+- What can this function reach, and where do side effects happen?
+- Under which guards can this return or exception occur?
+- Does this source really reach that target in the requested mode?
+- Which API routes, scripts, or public exports are affected by a diff?
+
+CodeCanvas is Python-only and requires Python 3.10 or newer.
+
+## Quick start
+
+Install [uv](https://docs.astral.sh/uv/) if `uvx` is not already available,
+then register the server with Claude Code:
 
 ```bash
 claude mcp add codecanvas -- uvx codecanvas-mcp
 ```
 
-Or in any MCP client config:
+For another MCP client, use the equivalent stdio configuration:
 
 ```json
-{ "mcpServers": { "codecanvas": { "command": "uvx", "args": ["codecanvas-mcp"] } } }
+{
+  "mcpServers": {
+    "codecanvas": {
+      "command": "uvx",
+      "args": ["codecanvas-mcp"]
+    }
+  }
+}
 ```
 
-Pass `project_path` (the repo root) on the first tool call; it is
-remembered for the rest of the session. Python 3.10+.
+Pass an absolute `project_path` on the first tool call. CodeCanvas remembers the
+last explicitly selected project for the rest of the server session.
+
+For a repository with one nested Python project, `project_status` reports the
+candidate analysis root. Select that root explicitly before relying on other
+results.
+
+## Teach your agent when to use it
+
+Adding tools does not guarantee that an agent will choose them at the right
+time. Put a short instruction like this in `AGENTS.md`, `CLAUDE.md`, or the
+equivalent file used by your coding agent:
+
+```markdown
+## Code analysis
+
+Use CodeCanvas before text search when you need to know:
+
+- who calls a Python function or what it reaches downstream;
+- which entrypoints a change can affect;
+- how a function branches or what guards a return/raise;
+- whether a source-to-target reachability claim is actually supported.
+
+Pass `project_path` once, then reuse the active project. Treat
+`safe_to_summarize: false`, inferred edges, ambiguity, and truncation as
+qualifications rather than unconditional facts.
+```
+
+Then ask your agent naturally:
+
+```text
+Use CodeCanvas to list the entrypoints in this project.
+What calls UserService.delete, up to three hops?
+What does checkout reach downstream, including HTTP or database effects?
+Under exactly what conditions can authenticate raise?
+Verify that dry-run publish reaches _call_api.
+Analyze the impact of the current diff.
+```
+
+## What makes the answers trustworthy
+
+Static analysis is not runtime truth, so CodeCanvas makes uncertainty visible
+instead of hiding it.
+
+Every successful MCP response identifies the selected `analysis_root` and
+includes metadata that helps an agent decide how strongly it may state the
+result:
+
+- `evidence_grade` describes the strength of the resolved evidence.
+- `inferred_edge_count` and `ambiguous_calls` expose uncertain call edges.
+- `truncated` says whether the bounded response omitted results.
+- `safe_to_summarize` says whether the result supports an unconditional claim.
+- `response_guidance` explains how to qualify a result when it does not.
+
+`verify_claim` goes further by combining candidate call paths with branch and
+return/raise guards. It returns `true`, `false`, or `uncertain`; unsupported
+qualifiers and inferred-only paths cannot silently become a definite `true`.
 
 ## Tools
 
-| Tool | Answers |
+### Discover and understand
+
+| Tool | Use it for |
 |---|---|
-| `list_entrypoints` | What entrypoints exist? API routes, scripts, and a library's public API |
-| `find_symbols` | Where is this symbol? Exact-first search with score floor and separated suggestions |
-| `who_calls` | Who calls this function? Ground-truth reverse call edges, N hops |
-| `call_tree` | What does this function reach downstream, and what side effects does it trigger? |
-| `what_does` | What does this function do? Signature, docstring, db/http/raise effects, risk |
-| `function_flow` | How does this function branch? Structured branch subjects and scopes |
-| `reaching_conditions` | Under exactly which guard conditions does each return/raise happen? |
-| `verify_claim` | Is a "source reaches target" claim true, false, or uncertain? Conservative verdict from call paths and guards |
-| `analyze_impact` | Which entrypoints/public surfaces are affected by this diff or git ref? |
-| `project_status` | What has been analyzed? Cache state, analysis root, worker interpreter |
-| `validate_state_schema` | Do these state fields actually exist? Static field validation |
-| `simulate_state_transition` | Run focused synthetic or custom state-transition cases against project code |
+| `project_status` | Inspect the active root, Python file count, cache, worker interpreter, and nested project candidates |
+| `list_entrypoints` | Find FastAPI routes, scripts, function entrypoints, and distributed library exports |
+| `find_symbols` | Locate functions, methods, and classes with exact-first name, semantic, or hybrid search |
+| `what_does` | Triage a function from its signature, docstring, calls, effects, exceptions, and direct risk |
+| `function_flow` | Inspect a structured branch tree with subjects, conditions, scopes, and nesting |
+| `reaching_conditions` | Get the enclosing guards for each return or raise, plus complexity and unreachable code |
 
-Notes:
+### Follow behavior and assess change
 
-- `list_entrypoints` accepts `filter` / `kind` to narrow large projects.
-  For libraries it reports the public API surface as `kind="export"`,
-  read from each distributed package's `__all__` (or its `__init__.py`
-  public names) plus `[project.scripts]`.
-- `simulate_state_transition` runs project code, so its worker uses the
-  project's virtualenv interpreter when one is found (`<project>/.venv`
-  or `venv`, then the same in the parent directory). Pass
-  `python_executable` to choose explicitly; every result reports the
-  interpreter under `worker`.
-
-## How It Works
-
-- **libcst-based parsing** builds a project-wide call graph and per-function
-  control-flow graphs, resolving dependency-injection chains (e.g. FastAPI
-  `Depends()`).
-- **Canonical IR** — every answer is a projection from one unified graph,
-  so tools agree with each other.
-- **Disk cache** at `.codecanvas/` (call graph + entrypoints) makes warm
-  queries fast.
-
-## Performance
-
-| Metric | Value |
+| Tool | Use it for |
 |---|---|
-| Entrypoint discovery (warm) | 12ms |
-| File count limit | 5,000 (`CODECANVAS_MAX_FILES`) |
-| CPU throttle | 10ms yield every 50 files |
+| `who_calls` | Walk direct or transitive callers upstream |
+| `call_tree` | Walk project-internal callees downstream and attribute direct/transitive effects |
+| `verify_claim` | Conservatively check a qualified `source reaches target` claim against paths and guards |
+| `analyze_impact` | Map an inline diff or git ref to changed functions and affected entrypoints/public surfaces |
 
-## Environment Variables
+### Reproduce state-shaped bugs
+
+| Tool | Use it for |
+|---|---|
+| `validate_state_schema` | Compare a function's state reads, writes, and mapping returns with a caller-provided schema |
+| `simulate_state_transition` | Execute focused generated or explicit state cases with invariants and dependency overrides |
+
+Large result sets are capped. Use each tool's `filter`, `kind`, `path`, `depth`,
+or pagination arguments to narrow the answer before treating it as complete.
+
+## How it works
+
+1. **Select a project.** CodeCanvas resolves and remembers an explicit Python
+   project root. Ambiguous nested roots must be selected rather than guessed.
+2. **Build structural indexes.** Python AST analysis builds a project-wide call
+   graph and per-function control-flow data. Extractors add FastAPI routes and
+   `Depends()` chains, scripts, generic function entrypoints, and package
+   exports.
+3. **Reuse compatible analysis.** The call graph and entrypoints are cached in
+   `<project>/.codecanvas/`; an in-process builder is reused during the MCP
+   session.
+4. **Project compact answers.** Each MCP tool queries the shared analysis and
+   returns bounded results with origin, evidence, ambiguity, and truncation
+   metadata.
+
+The default analysis limit is 5,000 Python files. Tune large-project behavior
+with:
 
 | Variable | Default | Description |
-|---|---|---|
-| `CODECANVAS_MAX_FILES` | 5000 | Max files to analyze |
-| `CODECANVAS_BATCH_SIZE` | 50 | CPU throttle batch size |
-| `CODECANVAS_THROTTLE_MS` | 10 | Sleep between batches (ms) |
+|---|---:|---|
+| `CODECANVAS_MAX_FILES` | `5000` | Maximum Python files to analyze |
+| `CODECANVAS_BATCH_SIZE` | `50` | Files processed before yielding |
+| `CODECANVAS_THROTTLE_MS` | `10` | Delay between batches in milliseconds |
+
+## Safety and limitations
+
+- CodeCanvas analyzes Python source; it does not model every possible dynamic
+  import, monkey patch, reflection path, or runtime value.
+- Inferred and ambiguous edges are reported as qualifications, not promoted to
+  definite evidence.
+- Static-analysis tools read project files and write the local `.codecanvas/`
+  cache. No remote CodeCanvas service is required.
+- `simulate_state_transition` is different: it imports and executes trusted
+  project code in a separate process. It is isolation for focused repros, not a
+  security sandbox. Project code may still access the filesystem, network, or
+  subprocesses and may have import-time side effects.
+- The simulator prefers `<project>/.venv` or `venv`, then the same directories
+  in the parent project. Use `python_executable` to choose explicitly and check
+  the returned `worker` metadata when imports fail.
+
+## Benchmark it on your project
+
+The repository includes a benchmark for cold analysis, warm symbol lookup, and
+concurrent symbol lookup. Run it against a representative Python project
+instead of relying on a machine-independent latency claim:
+
+```bash
+core/.venv/bin/python benchmarks/benchmark_find_symbols.py /path/to/project
+```
 
 ## Development
-Requires Python 3.10+ (the `mcp` dependency ships no wheels for older Pythons).
 
 ```bash
 git clone https://github.com/donggyun112/codecanvas.git
 cd codecanvas/core
-pip install -e ".[dev]"
+uv sync --extra dev
 cd ..
-python3 -m pytest
+core/.venv/bin/python -m pytest
 ```
+
+The package source lives under `core/`. The root test configuration runs both
+the product tests in `tests/` and the package-level tests in `core/tests/`.
+
+Issues and focused reproduction cases are welcome:
+<https://github.com/donggyun112/codecanvas/issues>.
 
 ## License
 
-Private
+CodeCanvas MCP is open-source software licensed under the [MIT License](LICENSE).
