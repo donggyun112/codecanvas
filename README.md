@@ -85,8 +85,20 @@ then register the server with Claude Code:
 claude mcp add codecanvas -- uvx codecanvas-mcp
 ```
 
-That command exposes the complete tool catalog. For Codex, the recommended
-token-efficient profile keeps the three tools used to navigate unfamiliar code:
+That command exposes the complete tool catalog. Keep the full catalog enabled
+when your MCP client supports on-demand tool discovery or tool search: the
+client can load the relevant schemas only when they are needed, so the other
+CodeCanvas tools remain available without paying their schema cost on every
+model request.
+
+```toml
+[mcp_servers.codecanvas]
+command = "uvx"
+args = ["codecanvas-mcp"]
+```
+
+If your client eagerly injects every enabled tool schema into every model
+request, use this compatibility profile instead:
 
 ```toml
 [mcp_servers.codecanvas]
@@ -95,8 +107,9 @@ args = ["codecanvas-mcp"]
 enabled_tools = ["logic_flow", "who_calls", "call_tree"]
 ```
 
-For another MCP client, use the equivalent stdio configuration and its
-tool-allowlist feature when available:
+The three-tool allow-list is a fallback for eager-schema clients, not a
+recommendation to discard the rest of CodeCanvas. For another MCP client, use
+the equivalent stdio configuration:
 
 ```json
 {
