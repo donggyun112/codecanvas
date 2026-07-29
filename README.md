@@ -206,11 +206,11 @@ against a rubric frozen before the holdout was opened.
 
 ### Results
 
-| Evaluation | Treatment profile | Existing tools only | Existing tools + CodeCanvas | Total-token change | Uncached input + output change | Mean blind score, existing → CodeCanvas |
+| Evaluation | Treatment profile | Existing tools only | Existing tools + CodeCanvas | Total-token change | Uncached input + output change | Mean blind score (/100), existing → CodeCanvas |
 |---|---|---:|---:|---:|---:|---:|
-| Initial four-task suite | Broad pre-compact tool profile | 2,018,662 | 2,949,473 | **46.11% more** | **23.73% more** | 22.0 → 22.25 / 25 |
-| Frozen three-task holdout | `logic_flow` only | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 / 100 |
-| Frozen holdout replication | `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 / 100 |
+| Initial four-task suite | Broad pre-compact tool profile | 2,018,662 | 2,949,473 | **46.11% more** | **23.73% more** | 88.0 → 89.0 |
+| Frozen three-task holdout | `logic_flow` only | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 |
+| Frozen holdout replication | `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 |
 
 In the initial suite, existing-tools-only agents made 58 commands. CodeCanvas
 agents made 61 built-in commands and 32 MCP calls. In the `logic_flow`-only

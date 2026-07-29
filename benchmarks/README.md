@@ -49,17 +49,17 @@ were frozen.
 The initial four-task suite and two fresh runs of the three-task holdout produced
 the following results:
 
-| Evaluation | Treatment tools | Existing tools only | Existing tools + CodeCanvas | Total-token change | Uncached input + output change | Mean blind score, existing → CodeCanvas |
+| Evaluation | Treatment tools | Existing tools only | Existing tools + CodeCanvas | Total-token change | Uncached input + output change | Mean blind score (/100), existing → CodeCanvas |
 |---|---|---:|---:|---:|---:|---:|
-| Initial four-task suite, 2026-07-29 | Broad pre-compact profile | 2,018,662 | 2,949,473 | **46.11% more** | **23.73% more** | 22.0 → 22.25 / 25 |
-| Audited holdout, 2026-07-29 | `logic_flow` | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 / 100 |
-| Three-tool replication, 2026-07-30 | `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 / 100 |
+| Initial four-task suite, 2026-07-29 | Broad pre-compact profile | 2,018,662 | 2,949,473 | **46.11% more** | **23.73% more** | 88.0 → 89.0 |
+| Audited holdout, 2026-07-29 | `logic_flow` | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 |
+| Three-tool replication, 2026-07-30 | `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 |
 
 The per-task results include both sides of every comparison.
 
 #### Initial broad-tool run
 
-| Task | Existing tools tokens | Existing + CodeCanvas tokens | Change | Blind score, existing → CodeCanvas | Built-in commands, existing → CodeCanvas |
+| Task | Existing tools tokens | Existing + CodeCanvas tokens | Change | Blind score (/25), existing → CodeCanvas | Built-in commands, existing → CodeCanvas |
 |---|---:|---:|---:|---:|---:|
 | State-scope persistence | 229,840 | 472,687 | 105.66% more | 25 → 25 | 11 → 18 |
 | Parallel-tool recovery | 540,189 | 597,579 | 10.62% more | 25 → 22 | 15 → 12 |
@@ -73,7 +73,7 @@ the grader awarded every substantive logic criterion.
 
 #### Audited `logic_flow`-only run
 
-| Task | Existing tools tokens | Existing + CodeCanvas tokens | Change | Blind score, existing → CodeCanvas | Built-in commands, existing → CodeCanvas |
+| Task | Existing tools tokens | Existing + CodeCanvas tokens | Change | Blind score (/100), existing → CodeCanvas | Built-in commands, existing → CodeCanvas |
 |---|---:|---:|---:|---:|---:|
 | Agent callback lifecycle | 1,073,654 | 324,285 | 69.80% fewer | 100 → 100 | 31 → 26 |
 | Compaction arbitration | 228,279 | 123,417 | 45.94% fewer | 100 → 98.5 | 9 → 4 |
@@ -83,7 +83,7 @@ The CodeCanvas side also made one, one, and two `logic_flow` calls respectively.
 
 #### Three-tool replication
 
-| Task | Existing tools tokens | Existing + CodeCanvas tokens | Change | Blind score, existing → CodeCanvas | Built-in commands, existing → CodeCanvas |
+| Task | Existing tools tokens | Existing + CodeCanvas tokens | Change | Blind score (/100), existing → CodeCanvas | Built-in commands, existing → CodeCanvas |
 |---|---:|---:|---:|---:|---:|
 | Agent callback lifecycle | 269,022 | 439,894 | 63.51% more | 100 → 100 | 15 → 23 |
 | Compaction arbitration | 221,120 | 241,296 | 9.12% more | 94.5 → 97 | 9 → 10 |
