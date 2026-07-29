@@ -1,0 +1,54 @@
+{
+  "benchmark_id": "adk-python-holdout-v3",
+  "benchmark_type": "zero-context-logic-flow",
+  "target_repository": "/Users/dongkseo/project/contribution/adk-python",
+  "target_revision": "c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a",
+  "participant_instructions": [
+    "Answer from the repository at the exact target revision.",
+    "Trace the named production entry point and any helpers needed to explain observable control flow, mutations, yielded/returned values, and exceptions.",
+    "Support each material claim with an inline citation in the form `relative/path.py:start-end`.",
+    "Do not rely on tests, runtime experiments, or prior benchmark answers as a substitute for source reasoning."
+  ],
+  "tasks": [
+    {
+      "id": "adk-hv3-credential-pipeline",
+      "title": "Credential preparation pipeline",
+      "entrypoint": {
+        "symbol": "CredentialManager.get_auth_credential",
+        "file": "src/google/adk/auth/credential_manager.py",
+        "line": 180
+      },
+      "prompt": "Trace `CredentialManager.get_auth_credential(context)` end to end. Explain how the custom-auth path differs from the ordinary path; every early return and validation failure; the ordered sources from which an ordinary credential is obtained; when the raw credential is deep-copied; how exchange and refresh interact; and the exact conditions under which a credential is persisted. Include the OAuth metadata-discovery behavior only insofar as it is reached by this entrypoint."
+    },
+    {
+      "id": "adk-hv3-agent-callback-lifecycle",
+      "title": "Text agent callback and error lifecycle",
+      "entrypoint": {
+        "symbol": "BaseAgent.run_async",
+        "file": "src/google/adk/agents/base_agent.py",
+        "line": 283
+      },
+      "prompt": "Trace `BaseAgent.run_async(parent_context)` for a text invocation. Explain context creation and instrumentation; plugin-versus-agent callback precedence before and after the core generator; which callback outcomes emit events or terminate the invocation; the ordering and lifecycle of yielded events; and what happens when any stage raises, including whether error-notification failures can replace the original exception."
+    },
+    {
+      "id": "adk-hv3-compaction-arbitration",
+      "title": "Sliding-window compaction arbitration",
+      "entrypoint": {
+        "symbol": "_run_compaction_for_sliding_window",
+        "file": "src/google/adk/apps/compaction.py",
+        "line": 448
+      },
+      "prompt": "Trace `_run_compaction_for_sliding_window(app, session, session_service, skip_token_compaction=...)`. Explain every no-output gate; how rewind filtering affects the input; when token-threshold compaction preempts sliding-window work; how invocation IDs and timestamps determine the sliding range and overlap; how the candidate event slice is made safe around outstanding tool/auth/confirmation obligations; and how summarizer selection and the final yielded event differ from the token-threshold path."
+    },
+    {
+      "id": "adk-hv3-file-artifact-load",
+      "title": "File-backed artifact loading",
+      "entrypoint": {
+        "symbol": "FileArtifactService.load_artifact",
+        "file": "src/google/adk/artifacts/file_artifact_service.py",
+        "line": 422
+      },
+      "prompt": "Trace `FileArtifactService.load_artifact(...)` from its async entrypoint through path resolution and payload reconstruction. Explain user-versus-session scoping and filename safety; version discovery and selection; all `None` outcomes; metadata parsing and canonical-URI fallback; and the exact conditions that produce a binary `Part` versus a text `Part`, including MIME type and display-name handling."
+    }
+  ]
+}

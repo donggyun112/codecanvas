@@ -12,6 +12,13 @@ coding agents compact answers about call paths, control flow, and change impact
 without making them grep through an entire repository and guess how the pieces
 fit together.
 
+In a blinded three-task holdout on Google ADK's 433K-line Python codebase, the
+`logic_flow`-only profile used **52.58% fewer server-reported input + output
+tokens** than a built-in-tools baseline, with mean rubric scores of 99.5/100
+versus 100/100. Uncached input + output fell 14.39%. One simple lookup task
+regressed, so read the [methodology and limitations](benchmarks/README.md)
+before quoting the aggregate.
+
 Use it to answer questions such as:
 
 - Who calls this function, directly or transitively?
@@ -76,6 +83,7 @@ Then ask your agent naturally:
 
 ```text
 Use CodeCanvas to list the entrypoints in this project.
+Use logic_flow first to understand checkout without repeated source searches.
 What calls UserService.delete, up to three hops?
 What does checkout reach downstream, including HTTP or database effects?
 Under exactly what conditions can authenticate raise?
@@ -111,6 +119,7 @@ qualifiers and inferred-only paths cannot silently become a definite `true`.
 | `project_status` | Inspect the active root, Python file count, cache, worker interpreter, and nested project candidates |
 | `list_entrypoints` | Find FastAPI routes, scripts, function entrypoints, and distributed library exports |
 | `find_symbols` | Locate functions, methods, and classes with exact-first name, semantic, or hybrid search |
+| `logic_flow` | Get one compact, citation-ready view of a function's branches, outcomes, downstream calls, and effects |
 | `what_does` | Triage a function from its signature, docstring, calls, effects, exceptions, and direct risk |
 | `function_flow` | Inspect a structured branch tree with subjects, conditions, scopes, and nesting |
 | `reaching_conditions` | Get the enclosing guards for each return or raise, plus complexity and unreachable code |
@@ -176,9 +185,33 @@ with:
 
 ## Benchmark it on your project
 
-The repository includes a benchmark for cold analysis, warm symbol lookup, and
-concurrent symbol lookup. Run it against a representative Python project
-instead of relying on a machine-independent latency claim:
+Run paired, zero-context agents on the frozen ADK holdout:
+
+```bash
+python benchmarks/benchmark_agent_logic_flow.py \
+  /path/to/adk-python \
+  --tasks benchmarks/agent_logic_flow/adk_holdout_v3_tasks.json \
+  --output-dir /tmp/codecanvas-agent-benchmark
+```
+
+The baseline agent receives built-in shell/search/read tools and no MCP. The
+paired agent receives the same tools plus only `logic_flow`, using this
+token-efficient Codex configuration:
+
+```toml
+[mcp_servers.codecanvas]
+command = "/path/to/codecanvas/core/.venv/bin/python"
+args = ["-m", "codecanvas_mcp.mcp.server"]
+cwd = "/path/to/codecanvas/core"
+default_tools_approval_mode = "approve"
+enabled_tools = ["logic_flow"]
+```
+
+This launches model-backed Codex runs and can consume substantial tokens.
+Server-reported tokens are not provider billing. See the
+[audited result, raw hashes, methodology, and limitations](benchmarks/README.md).
+
+For cold analysis, warm symbol lookup, and concurrent lookup throughput:
 
 ```bash
 core/.venv/bin/python benchmarks/benchmark_find_symbols.py /path/to/project

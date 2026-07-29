@@ -1,0 +1,292 @@
+{
+  "benchmark_id": "adk-python-holdout-v3",
+  "visibility": "hidden",
+  "target_repository": "/Users/dongkseo/project/contribution/adk-python",
+  "target_revision": "c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a",
+  "scoring": {
+    "per_task_total": 100,
+    "substantive_logic_total": 90,
+    "citation_format_total": 10,
+    "partial_credit": "Award proportionally within each point. Citation credit is independent of substantive correctness."
+  },
+  "tasks": [
+    {
+      "id": "adk-hv3-credential-pipeline",
+      "substantive_logic_points": [
+        {
+          "id": "custom-auth",
+          "points": 18,
+          "criterion": "Explains that any CustomAuthScheme bypasses the ordinary pipeline; an exactly-generic scheme is rehydrated against immediate subclasses, a missing provider or falsey provider result raises, and an OAuth credential with auth_uri but no access_token is stored as exchanged_auth_credential and returns None; otherwise the provider credential returns directly.",
+          "answer_locations": [
+            "src/google/adk/auth/credential_manager.py:44-62",
+            "src/google/adk/auth/credential_manager.py:185-228"
+          ]
+        },
+        {
+          "id": "validation-ready-copy",
+          "points": 18,
+          "criterion": "Covers ordinary validation failures (missing raw OAuth/OIDC credential, missing oauth2 payload, and failed discovery for missing endpoints), discovery prerequisites/fill behavior, and the fast path that deep-copies only ready API_KEY/HTTP raw credentials.",
+          "answer_locations": [
+            "src/google/adk/auth/credential_manager.py:230-238",
+            "src/google/adk/auth/credential_manager.py:344-388",
+            "src/google/adk/auth/credential_manager.py:402-454",
+            "src/google/adk/auth/oauth2_discovery.py:55-104"
+          ]
+        },
+        {
+          "id": "credential-source-order",
+          "points": 18,
+          "criterion": "States the source order: credential service when present, then context auth response; marks was_from_auth_response whenever that fallback is attempted; if still absent, deep-copies raw credentials for OAuth2 or configured OIDC client-credentials flow, otherwise returns None for user authorization.",
+          "answer_locations": [
+            "src/google/adk/auth/credential_manager.py:240-260",
+            "src/google/adk/auth/credential_manager.py:276-303",
+            "src/google/adk/auth/credential_manager.py:456-477"
+          ]
+        },
+        {
+          "id": "exchange-refresh",
+          "points": 18,
+          "criterion": "Explains exchanger lookup; no-exchanger passthrough; synchronous service-account exchange; generic async exchange and its was_exchanged flag; refresh is skipped after any exchange and otherwise occurs only when a registered refresher says it is needed.",
+          "answer_locations": [
+            "src/google/adk/auth/credential_manager.py:262-269",
+            "src/google/adk/auth/credential_manager.py:305-342"
+          ]
+        },
+        {
+          "id": "persistence",
+          "points": 18,
+          "criterion": "Explains that saving is attempted after auth-response fallback, exchange, or refresh; it is a no-op without a credential service; otherwise a deep-copied AuthConfig receives the final credential as exchanged_auth_credential and is saved, after which the final credential is returned.",
+          "answer_locations": [
+            "src/google/adk/auth/credential_manager.py:270-274",
+            "src/google/adk/auth/credential_manager.py:392-400"
+          ]
+        }
+      ],
+      "citation_format_points": [
+        {
+          "id": "inline-source-citations",
+          "points": 6,
+          "criterion": "Material claims have inline `relative/path.py:start-end` citations that resolve at the frozen revision."
+        },
+        {
+          "id": "helper-coverage",
+          "points": 4,
+          "criterion": "Citations cover the entrypoint plus the helper implementations actually used, rather than citing only the entrypoint declaration."
+        }
+      ]
+    },
+    {
+      "id": "adk-hv3-agent-callback-lifecycle",
+      "substantive_logic_points": [
+        {
+          "id": "context-and-order",
+          "points": 18,
+          "criterion": "Describes the copied invocation context with agent replaced, instrumentation scope, and order: before handling, optional early stop, core async generator under Aclosing, second early stop, then after handling.",
+          "answer_locations": [
+            "src/google/adk/agents/base_agent.py:283-316",
+            "src/google/adk/agents/base_agent.py:437-442"
+          ]
+        },
+        {
+          "id": "before-callbacks",
+          "points": 18,
+          "criterion": "Explains plugin callbacks run first and early-exit on first non-None; agent callbacks run only when plugin content is falsey, normalize singleton/list, accept sync or awaitable callbacks, and stop on first truthy content.",
+          "answer_locations": [
+            "src/google/adk/agents/base_agent.py:444-454",
+            "src/google/adk/agents/base_agent.py:468-501",
+            "src/google/adk/plugins/plugin_manager.py:301-324"
+          ]
+        },
+        {
+          "id": "before-outcomes",
+          "points": 18,
+          "criterion": "Distinguishes truthy before content (event includes content/actions and sets end_invocation), state-only delta (actions-only event without termination), and no result; notes run_async yields the before event before honoring termination.",
+          "answer_locations": [
+            "src/google/adk/agents/base_agent.py:300-307",
+            "src/google/adk/agents/base_agent.py:503-524"
+          ]
+        },
+        {
+          "id": "core-and-after",
+          "points": 18,
+          "criterion": "Explains core events stream in order under Aclosing; an end_invocation set during core suppresses after callbacks; after callbacks have the same plugin-first/canonical fallback and sync/async handling, but truthy content does not set end_invocation, while state-only deltas still yield an event.",
+          "answer_locations": [
+            "src/google/adk/agents/base_agent.py:305-313",
+            "src/google/adk/agents/base_agent.py:456-466",
+            "src/google/adk/agents/base_agent.py:526-583"
+          ]
+        },
+        {
+          "id": "error-semantics",
+          "points": 18,
+          "criterion": "States that exceptions from before/core/after trigger on-agent-error notification and the original exception is re-raised; notification callbacks are best-effort across all plugins, and both per-plugin failures and even a manager/test-double failure are suppressed so they cannot mask the original.",
+          "answer_locations": [
+            "src/google/adk/agents/base_agent.py:314-316",
+            "src/google/adk/agents/base_agent.py:585-612",
+            "src/google/adk/plugins/plugin_manager.py:326-339",
+            "src/google/adk/plugins/plugin_manager.py:354-379"
+          ]
+        }
+      ],
+      "citation_format_points": [
+        {
+          "id": "inline-source-citations",
+          "points": 6,
+          "criterion": "Material claims have inline `relative/path.py:start-end` citations that resolve at the frozen revision."
+        },
+        {
+          "id": "cross-file-coverage",
+          "points": 4,
+          "criterion": "Citations cover both BaseAgent lifecycle helpers and PluginManager callback semantics."
+        }
+      ]
+    },
+    {
+      "id": "adk-hv3-compaction-arbitration",
+      "substantive_logic_points": [
+        {
+          "id": "rewinds-and-gates",
+          "points": 15,
+          "criterion": "Explains that rewinds remove the rewind event and the range back through the earliest matching invocation, preserving chronological survivors; empty survivors, absent config, incomplete sliding config, insufficient new invocations, empty safe candidates, absent root agent, absent summarizer result, and related defensive checks yield nothing.",
+          "answer_locations": [
+            "src/google/adk/events/_rewind_events.py:22-55",
+            "src/google/adk/apps/compaction.py:540-564",
+            "src/google/adk/apps/compaction.py:592-593",
+            "src/google/adk/apps/compaction.py:632-649"
+          ]
+        },
+        {
+          "id": "token-preemption",
+          "points": 15,
+          "criterion": "States token-threshold work is attempted first only when not skipped and fully configured; a successful token compaction returns immediately, while false/no-result falls through to sliding-window logic.",
+          "answer_locations": [
+            "src/google/adk/apps/compaction.py:207-222",
+            "src/google/adk/apps/compaction.py:428-445",
+            "src/google/adk/apps/compaction.py:552-561"
+          ]
+        },
+        {
+          "id": "token-path-difference",
+          "points": 15,
+          "criterion": "Explains that the token path uses latest observed prompt tokens or a character-based estimate, selects post-compaction candidates while retaining a tail and balancing calls, seeds from a prior summary when valid, and appends a produced event through session_service itself.",
+          "answer_locations": [
+            "src/google/adk/apps/compaction.py:127-175",
+            "src/google/adk/apps/compaction.py:241-291",
+            "src/google/adk/apps/compaction.py:372-425"
+          ]
+        },
+        {
+          "id": "invocation-selection",
+          "points": 15,
+          "criterion": "Explains the last compaction end timestamp, insertion-ordered unique invocation IDs with each ID's maximum timestamp, selection of IDs whose latest timestamp is newer, the interval threshold, and end ID as the last new invocation.",
+          "answer_locations": [
+            "src/google/adk/apps/compaction.py:566-597"
+          ]
+        },
+        {
+          "id": "overlap-and-safe-slice",
+          "points": 15,
+          "criterion": "Explains start ID selection by backing up overlap_size from the first new ID with floor zero; slicing from the first start-ID event through the last end-ID event; removal of existing compaction events; and truncation to the longest balanced prefix.",
+          "answer_locations": [
+            "src/google/adk/apps/compaction.py:599-633"
+          ]
+        },
+        {
+          "id": "obligations-and-yield",
+          "points": 15,
+          "criterion": "Explains balanced-prefix bookkeeping: responses close before calls open within an event, calls plus requested confirmations/auth configs open obligations, and only the longest point with none open is safe; an existing summarizer is reused, otherwise only an LlmAgent can supply one, tracing invokes it with sliding_window, and a non-None result is yielded rather than appended here.",
+          "answer_locations": [
+            "src/google/adk/apps/compaction.py:294-333",
+            "src/google/adk/apps/compaction.py:225-238",
+            "src/google/adk/apps/compaction.py:37-65",
+            "src/google/adk/apps/compaction.py:635-649"
+          ]
+        }
+      ],
+      "citation_format_points": [
+        {
+          "id": "inline-source-citations",
+          "points": 6,
+          "criterion": "Material claims have inline `relative/path.py:start-end` citations that resolve at the frozen revision."
+        },
+        {
+          "id": "downstream-coverage",
+          "points": 4,
+          "criterion": "Citations cover rewind filtering, arbitration, candidate safety, and summarization/persistence behavior."
+        }
+      ]
+    },
+    {
+      "id": "adk-hv3-file-artifact-load",
+      "substantive_logic_points": [
+        {
+          "id": "async-entry",
+          "points": 15,
+          "criterion": "States the public async method delegates the blocking operation via asyncio.to_thread with user_id, filename, session_id, and version; app_name does not affect storage lookup.",
+          "answer_locations": [
+            "src/google/adk/artifacts/file_artifact_service.py:421-445"
+          ]
+        },
+        {
+          "id": "scope-and-safety",
+          "points": 15,
+          "criterion": "Explains validated user/session path segments, user scope when session_id is absent or filename starts user:, otherwise session scope; user prefix stripping, Windows-separator normalization, rejection of absolute/escaping paths after resolution, and the empty/root-relative name fallback to artifact.",
+          "answer_locations": [
+            "src/google/adk/artifacts/file_artifact_service.py:73-90",
+            "src/google/adk/artifacts/file_artifact_service.py:93-154",
+            "src/google/adk/artifacts/file_artifact_service.py:233-267"
+          ]
+        },
+        {
+          "id": "version-selection",
+          "points": 15,
+          "criterion": "Explains numeric child-directory discovery with nonnumeric names ignored and sorted; missing artifact/no numeric versions return None; omitted version selects the greatest numeric version, while an unavailable explicit version returns None.",
+          "answer_locations": [
+            "src/google/adk/artifacts/file_artifact_service.py:167-179",
+            "src/google/adk/artifacts/file_artifact_service.py:447-465"
+          ]
+        },
+        {
+          "id": "metadata-and-uri-fallback",
+          "points": 15,
+          "criterion": "Explains missing or invalid metadata becomes None; the primary payload path is versions/<version>/<artifact-dir-name>; only when metadata has canonical_uri and the primary path is absent is a file:// URI converted and used, and only if its target exists.",
+          "answer_locations": [
+            "src/google/adk/artifacts/file_artifact_service.py:59-67",
+            "src/google/adk/artifacts/file_artifact_service.py:162-164",
+            "src/google/adk/artifacts/file_artifact_service.py:466-474",
+            "src/google/adk/artifacts/file_artifact_service.py:736-749"
+          ]
+        },
+        {
+          "id": "binary-reconstruction",
+          "points": 15,
+          "criterion": "States truthy metadata MIME type selects binary mode; missing payload returns None; otherwise bytes become inline_data with that MIME type and metadata display_name.",
+          "answer_locations": [
+            "src/google/adk/artifacts/file_artifact_service.py:467-489"
+          ]
+        },
+        {
+          "id": "text-reconstruction",
+          "points": 15,
+          "criterion": "States absent/falsey MIME type selects text mode, including missing/corrupt metadata; missing payload returns None, otherwise UTF-8 text becomes Part(text=...). Notes that metadata alone does not make a missing payload loadable unless its usable file URI fallback exists.",
+          "answer_locations": [
+            "src/google/adk/artifacts/file_artifact_service.py:468-496",
+            "src/google/adk/artifacts/file_artifact_service.py:736-749"
+          ]
+        }
+      ],
+      "citation_format_points": [
+        {
+          "id": "inline-source-citations",
+          "points": 6,
+          "criterion": "Material claims have inline `relative/path.py:start-end` citations that resolve at the frozen revision."
+        },
+        {
+          "id": "helper-coverage",
+          "points": 4,
+          "criterion": "Citations cover the async entry, scope/path helpers, version helper, metadata helper, and payload reconstruction branches."
+        }
+      ]
+    }
+  ]
+}

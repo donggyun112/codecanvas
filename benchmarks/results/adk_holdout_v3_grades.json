@@ -1,0 +1,350 @@
+{
+  "benchmark_id": "adk-python-holdout-v3",
+  "pass_threshold": null,
+  "pass_threshold_status": "No pass threshold is stated in the frozen rubric.",
+  "tasks": [
+    {
+      "task": "adk-hv3-agent-callback-lifecycle",
+      "candidates": [
+        {
+          "candidate": "amber",
+          "file": "/private/tmp/hv3c_candidate_amber_callback.md",
+          "substantive_logic_items": [
+            {
+              "id": "context-and-order",
+              "awarded": 18,
+              "possible": 18
+            },
+            {
+              "id": "before-callbacks",
+              "awarded": 18,
+              "possible": 18
+            },
+            {
+              "id": "before-outcomes",
+              "awarded": 18,
+              "possible": 18
+            },
+            {
+              "id": "core-and-after",
+              "awarded": 18,
+              "possible": 18
+            },
+            {
+              "id": "error-semantics",
+              "awarded": 18,
+              "possible": 18
+            }
+          ],
+          "logic_score": 90,
+          "citation_format_items": [
+            {
+              "id": "inline-source-citations",
+              "awarded": 6,
+              "possible": 6
+            },
+            {
+              "id": "cross-file-coverage",
+              "awarded": 4,
+              "possible": 4
+            }
+          ],
+          "citation_score": 10,
+          "penalties": {
+            "items": [],
+            "total": 0
+          },
+          "total": 100,
+          "pass": null
+        },
+        {
+          "candidate": "birch",
+          "file": "/private/tmp/hv3c_candidate_birch_callback.md",
+          "substantive_logic_items": [
+            {
+              "id": "context-and-order",
+              "awarded": 18,
+              "possible": 18
+            },
+            {
+              "id": "before-callbacks",
+              "awarded": 18,
+              "possible": 18
+            },
+            {
+              "id": "before-outcomes",
+              "awarded": 18,
+              "possible": 18
+            },
+            {
+              "id": "core-and-after",
+              "awarded": 18,
+              "possible": 18
+            },
+            {
+              "id": "error-semantics",
+              "awarded": 18,
+              "possible": 18
+            }
+          ],
+          "logic_score": 90,
+          "citation_format_items": [
+            {
+              "id": "inline-source-citations",
+              "awarded": 6,
+              "possible": 6
+            },
+            {
+              "id": "cross-file-coverage",
+              "awarded": 4,
+              "possible": 4
+            }
+          ],
+          "citation_score": 10,
+          "penalties": {
+            "items": [],
+            "total": 0
+          },
+          "total": 100,
+          "pass": null
+        }
+      ]
+    },
+    {
+      "task": "adk-hv3-compaction-arbitration",
+      "candidates": [
+        {
+          "candidate": "cedar",
+          "file": "/private/tmp/hv3c_candidate_cedar_compaction.md",
+          "substantive_logic_items": [
+            {
+              "id": "rewinds-and-gates",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "token-preemption",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "token-path-difference",
+              "awarded": 14,
+              "possible": 15,
+              "reason": "Mentions an estimated prompt-token count but does not identify the required character-based estimation."
+            },
+            {
+              "id": "invocation-selection",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "overlap-and-safe-slice",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "obligations-and-yield",
+              "awarded": 14.5,
+              "possible": 15,
+              "reason": "Describes the sliding yield condition using truthiness rather than the rubric's exact non-None condition."
+            }
+          ],
+          "logic_score": 88.5,
+          "citation_format_items": [
+            {
+              "id": "inline-source-citations",
+              "awarded": 6,
+              "possible": 6
+            },
+            {
+              "id": "downstream-coverage",
+              "awarded": 4,
+              "possible": 4
+            }
+          ],
+          "citation_score": 10,
+          "penalties": {
+            "items": [],
+            "total": 0
+          },
+          "total": 98.5,
+          "pass": null
+        },
+        {
+          "candidate": "dune",
+          "file": "/private/tmp/hv3c_candidate_dune_compaction.md",
+          "substantive_logic_items": [
+            {
+              "id": "rewinds-and-gates",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "token-preemption",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "token-path-difference",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "invocation-selection",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "overlap-and-safe-slice",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "obligations-and-yield",
+              "awarded": 15,
+              "possible": 15
+            }
+          ],
+          "logic_score": 90,
+          "citation_format_items": [
+            {
+              "id": "inline-source-citations",
+              "awarded": 6,
+              "possible": 6
+            },
+            {
+              "id": "downstream-coverage",
+              "awarded": 4,
+              "possible": 4
+            }
+          ],
+          "citation_score": 10,
+          "penalties": {
+            "items": [],
+            "total": 0
+          },
+          "total": 100,
+          "pass": null
+        }
+      ]
+    },
+    {
+      "task": "adk-hv3-file-artifact-load",
+      "candidates": [
+        {
+          "candidate": "elm",
+          "file": "/private/tmp/hv3c_candidate_elm_artifact.md",
+          "substantive_logic_items": [
+            {
+              "id": "async-entry",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "scope-and-safety",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "version-selection",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "metadata-and-uri-fallback",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "binary-reconstruction",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "text-reconstruction",
+              "awarded": 15,
+              "possible": 15
+            }
+          ],
+          "logic_score": 90,
+          "citation_format_items": [
+            {
+              "id": "inline-source-citations",
+              "awarded": 6,
+              "possible": 6
+            },
+            {
+              "id": "helper-coverage",
+              "awarded": 4,
+              "possible": 4
+            }
+          ],
+          "citation_score": 10,
+          "penalties": {
+            "items": [],
+            "total": 0
+          },
+          "total": 100,
+          "pass": null
+        },
+        {
+          "candidate": "frost",
+          "file": "/private/tmp/hv3c_candidate_frost_artifact.md",
+          "substantive_logic_items": [
+            {
+              "id": "async-entry",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "scope-and-safety",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "version-selection",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "metadata-and-uri-fallback",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "binary-reconstruction",
+              "awarded": 15,
+              "possible": 15
+            },
+            {
+              "id": "text-reconstruction",
+              "awarded": 15,
+              "possible": 15
+            }
+          ],
+          "logic_score": 90,
+          "citation_format_items": [
+            {
+              "id": "inline-source-citations",
+              "awarded": 6,
+              "possible": 6
+            },
+            {
+              "id": "helper-coverage",
+              "awarded": 4,
+              "possible": 4
+            }
+          ],
+          "citation_score": 10,
+          "penalties": {
+            "items": [],
+            "total": 0
+          },
+          "total": 100,
+          "pass": null
+        }
+      ]
+    }
+  ]
+}

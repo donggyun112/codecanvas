@@ -1,0 +1,134 @@
+{
+  "benchmark": "independent_zero_context_logic_flow_holdout_v3",
+  "measured_at": "2026-07-29",
+  "target": {
+    "repository": "google/adk-python",
+    "commit": "c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a",
+    "python_files": 1650,
+    "tracked_python_lines": 433314
+  },
+  "agent": {
+    "runner": "codex-cli 0.145.0",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "session": "fresh --ephemeral process per task and condition",
+    "sandbox": "read-only",
+    "prompt_bytes_identical_within_each_pair": true
+  },
+  "conditions": {
+    "baseline": "Codex built-in shell/search/read tools; no MCP servers",
+    "codecanvas": "same built-in tools plus only codecanvas.logic_flow",
+    "codecanvas_config": {
+      "default_tools_approval_mode": "approve",
+      "enabled_tools": ["logic_flow"]
+    }
+  },
+  "frozen_inputs": {
+    "tasks_sha256": "c5ab26a1c5cca5a1be278add545a5e2f25b5f4d549aeead80205c5ea9eed1d88",
+    "rubric_sha256": "f1b8c36cf2c9d43c5252bde803ea968472149a277b1c86a1bc0d6b04fe465f27",
+    "grades_sha256": "9934b9cf5e57d50bcf114fc3ed997bde373fde4c3baea40ceee8af2b4d2dafa7"
+  },
+  "tasks": [
+    {
+      "id": "adk-hv3-agent-callback-lifecycle",
+      "baseline": {
+        "input_tokens": 1063199,
+        "cached_input_tokens": 977152,
+        "output_tokens": 10455,
+        "reasoning_output_tokens": 6643,
+        "total_tokens": 1073654,
+        "score": 100,
+        "command_calls": 31,
+        "trace_sha256": "b94486764a102577c1cbd9c6a551679e6d8223e1aca1df1d5c0690343e2175c8",
+        "answer_sha256": "adc103b221893a4cc3fc7573f1de598594475ed9900bd6078c47ae46d4aeb1e5"
+      },
+      "codecanvas": {
+        "input_tokens": 315672,
+        "cached_input_tokens": 264704,
+        "output_tokens": 8613,
+        "reasoning_output_tokens": 5328,
+        "total_tokens": 324285,
+        "score": 100,
+        "command_calls": 26,
+        "logic_flow_calls": 1,
+        "trace_sha256": "2b767b99b95356d528a018637d787406dbd3b3da64a3814e9a06b451980efac3",
+        "answer_sha256": "1e5f695a944ce64a778ecae1afdd4306f145d003f16d91a7aed0dbd6dba31d76"
+      },
+      "savings_percent": 69.80
+    },
+    {
+      "id": "adk-hv3-compaction-arbitration",
+      "baseline": {
+        "input_tokens": 222651,
+        "cached_input_tokens": 184064,
+        "output_tokens": 5628,
+        "reasoning_output_tokens": 3089,
+        "total_tokens": 228279,
+        "score": 100,
+        "command_calls": 9,
+        "trace_sha256": "69a854d9984dfdd8ad677e931339ab963f052e692688962d845e15aceb52a227",
+        "answer_sha256": "30359115a8c1cc1f5916bf8433ab80696f6e0b4e0fe3b2461591be09ae6369c7"
+      },
+      "codecanvas": {
+        "input_tokens": 118747,
+        "cached_input_tokens": 59392,
+        "output_tokens": 4670,
+        "reasoning_output_tokens": 2877,
+        "total_tokens": 123417,
+        "score": 98.5,
+        "command_calls": 4,
+        "logic_flow_calls": 1,
+        "trace_sha256": "d79c7fbfb0ff55e63b9994e09ddbf745049d94381fabf229fa36caf18dd38ba3",
+        "answer_sha256": "df3ca5793b408fc9c400ba94a8fd8301e107ad3172e9193de761c19c25b5ff82"
+      },
+      "savings_percent": 45.94
+    },
+    {
+      "id": "adk-hv3-file-artifact-load",
+      "baseline": {
+        "input_tokens": 57978,
+        "cached_input_tokens": 17920,
+        "output_tokens": 3176,
+        "reasoning_output_tokens": 1779,
+        "total_tokens": 61154,
+        "score": 100,
+        "command_calls": 3,
+        "trace_sha256": "c9e772116925511998b65a43c64da572b3cc0223e637a42dd81ad19d1479ff23",
+        "answer_sha256": "459a89bfb34dc6cc10e0635a94421a1729e62f02017447217b24e60b7cb69005"
+      },
+      "codecanvas": {
+        "input_tokens": 194133,
+        "cached_input_tokens": 164864,
+        "output_tokens": 4601,
+        "reasoning_output_tokens": 2236,
+        "total_tokens": 198734,
+        "score": 100,
+        "command_calls": 9,
+        "logic_flow_calls": 2,
+        "trace_sha256": "96886145a75dde938e3d1275bf42df76d730664b79b3cb1e09228c4d71eced38",
+        "answer_sha256": "7c01e6b6a2f1488e43c64c548ac5a798f8ea140ee7573921ce6450aaee7afc2a"
+      },
+      "savings_percent": -224.97
+    }
+  ],
+  "aggregate": {
+    "tasks": 3,
+    "baseline_total_tokens": 1363087,
+    "codecanvas_total_tokens": 646436,
+    "ratio": 0.474244,
+    "savings_percent": 52.58,
+    "baseline_uncached_input_plus_output": 183951,
+    "codecanvas_uncached_input_plus_output": 157476,
+    "uncached_ratio": 0.856076,
+    "uncached_savings_percent": 14.39,
+    "baseline_mean_score": 100.0,
+    "codecanvas_mean_score": 99.5
+  },
+  "limitations": [
+    "This is one model, one target commit, one run per task and condition, and three untouched holdout tasks.",
+    "The frozen rubric defines points but no pass threshold, so scores are reported directly rather than relabeled pass/fail.",
+    "Server-reported total tokens include cached input tokens; they are not provider billing or dollar cost.",
+    "The compact profile exposes only logic_flow. Exposing every CodeCanvas schema materially increases repeated cached input.",
+    "The simple artifact task regressed, so the aggregate must not be presented as a universal per-task saving."
+  ]
+}

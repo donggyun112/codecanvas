@@ -2498,3 +2498,99 @@ def call_tree(builder, function: str, depth: int = 2, filter=None,
     if note:
         out["note"] = note
     return out
+
+
+def _repo_location(builder, location: str) -> str:
+    """Render an existing ``path:line`` location relative to the project."""
+    path, separator, line = location.rpartition(":")
+    if not separator:
+        return location
+    try:
+        path = os.path.relpath(path, builder.project_root)
+    except (TypeError, ValueError):
+        pass
+    return f"{path}:{line}"
+
+
+def logic_flow(builder, function: str, depth: int = 2,
+               include_tests: bool = False) -> dict:
+    """Return one compact, citation-ready view of a function's logic.
+
+    This intentionally combines the high-value parts of ``what_does``,
+    ``function_flow``, ``reaching_conditions``, and ``call_tree`` so an agent
+    does not need four MCP round trips or four copies of overlapping metadata.
+    """
+    summary = what_does(builder, function)
+    if "error" in summary:
+        return summary
+    flow = function_flow(builder, summary["function"])
+    conditions = reaching_conditions(builder, summary["function"])
+    tree = call_tree(
+        builder,
+        summary["function"],
+        depth=depth,
+        include_tests=include_tests,
+    )
+    for result in (flow, conditions, tree):
+        if "error" in result:
+            return result
+
+    docstring = " ".join(summary.get("docstring", "").split())
+    if len(docstring) > 240:
+        docstring = f"{docstring[:237]}..."
+
+    outline = flow.get("outline", [])
+    nodes = tree.get("nodes", [])
+    downstream = []
+    for node in nodes[:24]:
+        row = {
+            "function": node["function"],
+            "location": _repo_location(builder, node["location"]),
+            "depth": node["depth"],
+            "confidence": node["confidence"],
+        }
+        if node["depth"] > 1:
+            row["via"] = node["via"]
+        if node.get("effects"):
+            row["effects"] = node["effects"]
+        downstream.append(row)
+
+    raw_effects = tree.get("effects", {})
+    effects = {
+        key: value
+        for key, value in raw_effects.items()
+        if key in {"direct", "transitive"} and value
+    }
+    if raw_effects.get("via"):
+        effects["via"] = raw_effects["via"][:12]
+
+    truncated = bool(
+        flow.get("truncated")
+        or len(outline) > 40
+        or len(nodes) > 24
+        or len(raw_effects.get("via", [])) > 12
+    )
+    result = {
+        "function": summary["function"],
+        "source": _repo_location(builder, flow["location"]),
+        "signature": summary["signature"],
+        "summary": docstring,
+        "flow": outline[:40],
+        "outcomes": conditions.get("outcomes", [])[:20],
+        "cyclomatic": conditions.get("cyclomatic"),
+        "downstream": downstream,
+        "effects": effects,
+        "citation_guidance": (
+            "Cite `source` and downstream `location` values exactly; they are "
+            "repository-relative path:line references."
+        ),
+        "truncated": truncated,
+    }
+    if conditions.get("dead_code"):
+        result["dead_code"] = conditions["dead_code"]
+    if truncated:
+        result["note"] = (
+            "Compact result truncated; narrow the function or use a focused "
+            "detail tool before claiming completeness."
+        )
+    return result

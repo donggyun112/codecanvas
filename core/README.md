@@ -8,6 +8,12 @@ questions about call paths, control flow, and change impact without forcing an
 agent to grep through an entire repository and infer the architecture from
 partial text matches.
 
+On a blinded three-task Google ADK holdout, the `logic_flow`-only profile used
+52.58% fewer server-reported input + output tokens than a built-in-tools
+baseline, with mean rubric scores of 99.5/100 versus 100/100. Uncached input +
+output fell 14.39%; the repository documents the full methodology and the
+simple task that regressed.
+
 ## Quick start
 
 Python 3.10 or newer is required.
@@ -39,6 +45,7 @@ last explicitly selected project for the rest of the server session.
 | `project_status` | Which Python project is active, and is its analysis cached or ambiguous? |
 | `list_entrypoints` | What FastAPI routes, scripts, function entrypoints, and public library exports exist? |
 | `find_symbols` | Where is a function, method, or class by name or meaning? |
+| `logic_flow` | What is this function's compact branch, outcome, downstream-call, and effect story? |
 | `who_calls` | Who calls this function, directly or transitively? |
 | `call_tree` | What project code does this function reach, and where are the effects? |
 | `what_does` | What are this function's signature, calls, effects, exceptions, and direct risk? |

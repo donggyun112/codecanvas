@@ -11,7 +11,8 @@ def test_all_tools_registered():
     tools = anyio.run(server.mcp.list_tools)
     names = {t.name for t in tools}
     assert names == {"list_entrypoints", "who_calls", "what_does",
-                     "analyze_impact", "function_flow", "reaching_conditions",
+                     "logic_flow", "analyze_impact", "function_flow",
+                     "reaching_conditions",
                      "validate_state_schema", "simulate_state_transition",
                      "call_tree", "find_symbols", "project_status",
                      "verify_claim"}
@@ -29,6 +30,33 @@ def test_tool_function_returns_dict():
 def test_tool_missing_project_returns_error_dict():
     out = server.list_entrypoints("/no/such/dir")
     assert "error" in out
+
+
+def test_logic_flow_is_compact_and_citation_ready(tmp_path):
+    (tmp_path / "app.py").write_text(
+        """
+def run(value):
+    if value:
+        return save(value)
+    raise ValueError("missing")
+
+def save(value):
+    return value
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    out = server.logic_flow("run", str(tmp_path), depth=1)
+
+    assert out["function"].endswith(".run")
+    assert out["source"] == "app.py:1"
+    assert out["signature"].startswith("def run")
+    assert any("if value" in line for line in out["flow"])
+    assert {item["kind"] for item in out["outcomes"]} == {"return", "raise"}
+    assert out["downstream"][0]["location"] == "app.py:6"
+    assert "calls" not in out
+    assert "effect_legend" not in out
+    assert out["citation_guidance"].startswith("Cite `source`")
 
 
 def test_project_status_recommends_nested_python_root(tmp_path):

@@ -34,6 +34,10 @@ mcp = MCPServer(
         "bug depends on state shape, validate fields statically with "
         "validate_state_schema, then run focused synthetic or custom cases "
         "with simulate_state_transition.\n\n"
+        "For zero-context logic-flow questions, start with logic_flow: it "
+        "combines resolution, branch flow, outcomes, downstream calls, effects, "
+        "and citation-ready locations in one compact response. Do not repeat "
+        "the component tools unless the result is truncated or ambiguous.\n\n"
         "Pass `project_path` (the repo root) once — it is remembered for later "
         "calls in the session, so subsequent calls may omit it. Answers are "
         "compact and capped on large projects; use each tool's "
@@ -244,6 +248,24 @@ def what_does(function: str, project_path: str | None = None) -> dict:
     `effects.via` — so a thin wrapper scoring risk 0 still shows the database
     write underneath it. Use `call_tree` for the full downstream picture."""
     return _with_builder(project_path, lambda b: queries.what_does(b, function))
+
+
+@mcp.tool()
+def logic_flow(function: str, project_path: str | None = None, depth: int = 2,
+               include_tests: bool = False) -> dict:
+    """Start here to understand an unfamiliar function's logic in one compact
+    call. Combines symbol resolution, signature and summary, branch outline,
+    guarded outcomes, downstream project calls, effects, and repository-relative
+    citation locations. Prefer this over separately calling `find_symbols`,
+    `what_does`, `function_flow`, `reaching_conditions`, and `call_tree`; use
+    those only when this response is truncated, ambiguous, or needs one focused
+    detail. `depth` bounds downstream calls and defaults to two hops."""
+    return _with_builder(
+        project_path,
+        lambda b: queries.logic_flow(
+            b, function, depth=depth, include_tests=include_tests,
+        ),
+    )
 
 
 @mcp.tool()
