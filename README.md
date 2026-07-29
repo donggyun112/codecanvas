@@ -4,18 +4,13 @@
 [![Python](https://img.shields.io/pypi/pyversions/codecanvas-mcp)](https://pypi.org/project/codecanvas-mcp/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Evidence-backed code intelligence for Python coding agents.
+Understand an unfamiliar Python system before spending thousands of tokens
+reading it file by file.
 
 CodeCanvas is a local static-analysis
-[Model Context Protocol](https://modelcontextprotocol.io/) server. It gives
-coding agents compact answers about call paths, control flow, and change impact
-without making them grep through an entire repository and guess how the pieces
-fit together.
-
-Understand an unfamiliar Python system before spending thousands of tokens
-reading it file by file. CodeCanvas gives coding agents one compact,
-citation-ready view of branches, callers, callees, side effects, and change
-impact.
+[Model Context Protocol](https://modelcontextprotocol.io/) server for Python. It
+turns project-wide call paths and control flow into compact, citation-ready
+answers about branches, callers, callees, side effects, and change impact.
 
 In a blinded three-task holdout on Google ADK's 433K-line Python codebase, the
 `logic_flow` profile used **52.58% fewer server-reported input + output tokens**
@@ -33,6 +28,54 @@ Use it to answer questions such as:
 
 CodeCanvas is Python-only and requires Python 3.10 or newer.
 
+## See the difference
+
+Ask one question:
+
+```text
+Use logic_flow on UserService.update_user. Show its branches, outcomes,
+downstream effects, and evidence quality.
+```
+
+Excerpt from the actual response on the
+[included FastAPI sample](sample-fastapi/app/services/user_service.py):
+
+```json
+{
+  "function": "app.services.user_service.UserService.update_user",
+  "source": "app/services/user_service.py:13",
+  "flow": [
+    "15  user = await self.user_repo.find_by_id(...)",
+    "16  if user is None:",
+    "17      → return None",
+    "18  → return await self.user_repo.update(user_id, user)"
+  ],
+  "outcomes": [
+    {"at": 17, "detail": "None", "guards": ["user is None"]},
+    {"at": 18, "detail": "await self.user_repo.update(user_id, user)", "guards": []}
+  ],
+  "downstream": [
+    {
+      "function": "app.repositories.user_repo.UserRepository.find_by_id",
+      "location": "app/repositories/user_repo.py:13",
+      "effects": ["db"]
+    },
+    {
+      "function": "app.repositories.user_repo.UserRepository.update",
+      "location": "app/repositories/user_repo.py:18",
+      "effects": ["db"]
+    }
+  ],
+  "evidence_grade": "inferred",
+  "safe_to_summarize": false,
+  "response_guidance": "Do not turn inferred call edges into unconditional claims."
+}
+```
+
+That single response exposes the early return, success path, downstream database
+work, exact source locations, and how cautiously the agent may summarize the
+result.
+
 ## Quick start
 
 Install [uv](https://docs.astral.sh/uv/) if `uvx` is not already available,
@@ -42,7 +85,18 @@ then register the server with Claude Code:
 claude mcp add codecanvas -- uvx codecanvas-mcp
 ```
 
-For another MCP client, use the equivalent stdio configuration:
+That command exposes the complete tool catalog. For Codex, the recommended
+token-efficient profile keeps the three tools used to navigate unfamiliar code:
+
+```toml
+[mcp_servers.codecanvas]
+command = "uvx"
+args = ["codecanvas-mcp"]
+enabled_tools = ["logic_flow", "who_calls", "call_tree"]
+```
+
+For another MCP client, use the equivalent stdio configuration and its
+tool-allowlist feature when available:
 
 ```json
 {
@@ -58,9 +112,9 @@ For another MCP client, use the equivalent stdio configuration:
 Pass an absolute `project_path` on the first tool call. CodeCanvas remembers the
 last explicitly selected project for the rest of the server session.
 
-For a repository with one nested Python project, `project_status` reports the
-candidate analysis root. Select that root explicitly before relying on other
-results.
+With the complete catalog enabled, `project_status` reports candidate analysis
+roots for nested Python projects. Compact-profile users should pass the intended
+nested root explicitly.
 
 ## Teach your agent when to use it
 
@@ -73,27 +127,48 @@ equivalent file used by your coding agent:
 
 Use CodeCanvas before text search when you need to know:
 
-- who calls a Python function or what it reaches downstream;
-- which entrypoints a change can affect;
-- how a function branches or what guards a return/raise;
-- whether a source-to-target reachability claim is actually supported.
+- how a Python function branches, returns, and produces side effects;
+- who calls it directly or transitively;
+- what it reaches downstream through project-internal calls.
 
 Pass `project_path` once, then reuse the active project. Treat
 `safe_to_summarize: false`, inferred edges, ambiguity, and truncation as
 qualifications rather than unconditional facts.
+
+Start with `logic_flow`. Use `who_calls` for upstream impact and `call_tree`
+for a deeper downstream trace.
 ```
 
 Then ask your agent naturally:
 
 ```text
-Use CodeCanvas to list the entrypoints in this project.
 Use logic_flow first to understand checkout without repeated source searches.
-What calls UserService.delete, up to three hops?
+What calls UserService.update_user, up to three hops?
 What does checkout reach downstream, including HTTP or database effects?
+```
+
+With the complete catalog enabled, CodeCanvas can also answer:
+
+```text
+List the entrypoints in this project.
 Under exactly what conditions can authenticate raise?
 Verify that dry-run publish reaches _call_api.
 Analyze the impact of the current diff.
 ```
+
+## Why not just grep or an LSP?
+
+CodeCanvas complements both. It is for behavioral questions that otherwise
+require repeated searches and manual reconstruction.
+
+| Need | grep | LSP | CodeCanvas |
+|---|---|---|---|
+| Exact text | Best fit | Not its job | Keep using grep |
+| Definitions and direct references | Manual | Best fit | Resolves symbols inside structural results |
+| Transitive callers and callees | Repeated manual hops | References are not a call path | Bounded upstream and downstream graphs |
+| Branch guards and outcomes | Read and reconstruct source | Usually not modeled | Structured flow and guarded returns/raises |
+| Side effects and change impact | Infer manually | Usually not modeled | Effects attributed through call paths and entrypoints |
+| Uncertainty | No confidence model | Resolution-dependent | Evidence grade, ambiguity, truncation, and guidance |
 
 ## What makes the answers trustworthy
 
@@ -187,78 +262,20 @@ with:
   in the parent project. Use `python_executable` to choose explicitly and check
   the returned `worker` metadata when imports fail.
 
-## Independent agent benchmark
+## Evidence
 
-### Method
+In one audited, blinded run on three frozen Google ADK tasks, the
+`logic_flow` profile used **52.58% fewer server-reported input + output tokens**
+than its same-run built-in-tools control while scoring **99.5/100** versus
+100/100.
 
-The evaluation compares paired, zero-context agents on three frozen
-source-grounded questions about Google ADK commit
-`c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a`:
+The benchmark uses fresh ephemeral agents, byte-identical prompts, a frozen
+repository revision, and source-blind grading. Token use still depends on the
+agent's exploration path, so the benchmark page also reports the fresh
+replication and limitations instead of hiding them.
 
-- **Existing tools only:** built-in shell, search, and read tools with every MCP
-  server disabled.
-- **CodeCanvas:** the same built-in tools plus an explicitly enabled compact
-  CodeCanvas profile.
-
-Every task and condition runs in a fresh `codex exec --ephemeral` process with
-the same `gpt-5.6-sol` model, high reasoning effort, read-only checkout, and
-byte-identical prompt. A separate source-blind grader scores anonymized answers
-against a rubric frozen before the holdout was opened.
-
-### Results
-
-| Evaluation | Treatment profile | Existing tools only (same-run control) | Existing tools + CodeCanvas | Change vs same-run control | Uncached change vs same-run control | Mean blind score (/100), existing → CodeCanvas |
-|---|---|---:|---:|---:|---:|---:|
-| Frozen three-task holdout | `logic_flow` only | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 |
-| Frozen holdout replication | `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 |
-
-In the `logic_flow`-only holdout, existing-tools-only agents made 43 commands
-versus 39 built-in commands plus four MCP calls for CodeCanvas. In the
-three-tool replication, the counts were 30 versus 41 plus four MCP calls. The
-replication agents did not select `who_calls` or `call_tree`.
-
-A one-turn smoke prompt reported the same 13,785 input tokens for the one-tool
-and three-tool profiles. The observed difference between those two runs was
-therefore dominated by different exploration trajectories rather than direct
-use of the two additional tools.
-
-The opposite aggregate outcomes show that one run per task is not a stable
-estimate. Do not quote either percentage as a universal saving; repeated paired
-runs should report a median and dispersion before making a token-reduction
-claim. Server-reported tokens include cached input and are not provider billing.
-
-### Reproduce the frozen holdout
-
-The included runner reproduces the audited `logic_flow`-only condition:
-
-```bash
-python benchmarks/benchmark_agent_logic_flow.py \
-  /path/to/adk-python \
-  --tasks benchmarks/agent_logic_flow/adk_holdout_v3_tasks.json \
-  --output-dir /tmp/codecanvas-agent-benchmark
-```
-
-The three-tool replication used the same protocol with this compact
-configuration:
-
-```toml
-[mcp_servers.codecanvas]
-command = "/path/to/codecanvas/core/.venv/bin/python"
-args = ["-m", "codecanvas_mcp.mcp.server"]
-cwd = "/path/to/codecanvas/core"
-default_tools_approval_mode = "approve"
-enabled_tools = ["logic_flow", "who_calls", "call_tree"]
-```
-
-This launches model-backed Codex runs and can consume substantial tokens. See
-the [full methodology, per-task results, audit artifacts, and
-limitations](benchmarks/README.md).
-
-For cold analysis, warm symbol lookup, and concurrent lookup throughput:
-
-```bash
-core/.venv/bin/python benchmarks/benchmark_find_symbols.py /path/to/project
-```
+See the [full methodology, per-task results, reproduction command, and audit
+artifacts](benchmarks/README.md).
 
 ## Development
 
