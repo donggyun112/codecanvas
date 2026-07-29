@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/codecanvas-banner.png" alt="CodeCanvas MCP — Trace the truth" width="100%">
+</p>
+
 # CodeCanvas MCP
 
 [![PyPI](https://img.shields.io/pypi/v/codecanvas-mcp)](https://pypi.org/project/codecanvas-mcp/)
