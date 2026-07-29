@@ -12,14 +12,13 @@ coding agents compact answers about call paths, control flow, and change impact
 without making them grep through an entire repository and guess how the pieces
 fit together.
 
-In three blinded agent evaluations on Google ADK's 433K-line Python codebase,
-answer quality remained comparable, but token outcomes varied substantially.
-The initial broad-tool profile used 46.11% more server-reported input + output
-tokens, a later `logic_flow`-only holdout used 52.58% fewer, and a fresh
-three-tool replication used 51.07% more. CodeCanvas therefore treats the
-current benchmark as evidence of quality retention, not yet as a stable
-token-reduction estimate. See the [methodology, all results, and
-limitations](benchmarks/README.md).
+In two blinded runs of the same three-task holdout on Google ADK's 433K-line
+Python codebase, answer quality remained comparable, but token outcomes varied
+substantially. The `logic_flow`-only run used 52.58% fewer server-reported input
++ output tokens than its same-run control, while a fresh three-tool replication
+used 51.07% more than its own control. CodeCanvas therefore treats the current
+benchmark as evidence of quality retention, not yet as a stable token-reduction
+estimate. See the [methodology, results, and limitations](benchmarks/README.md).
 
 Use it to answer questions such as:
 
@@ -189,10 +188,9 @@ with:
 
 ### Method
 
-The evaluation compares paired, zero-context agents on source-grounded questions
-about Google ADK commit
-`c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a`. It includes an initial four-task
-suite and a later three-task frozen holdout:
+The evaluation compares paired, zero-context agents on three frozen
+source-grounded questions about Google ADK commit
+`c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a`:
 
 - **Existing tools only:** built-in shell, search, and read tools with every MCP
   server disabled.
@@ -206,16 +204,14 @@ against a rubric frozen before the holdout was opened.
 
 ### Results
 
-| Evaluation | Treatment profile | Existing tools only | Existing tools + CodeCanvas | Total-token change | Uncached input + output change | Mean blind score (/100), existing → CodeCanvas |
+| Evaluation | Treatment profile | Existing tools only (same-run control) | Existing tools + CodeCanvas | Change vs same-run control | Uncached change vs same-run control | Mean blind score (/100), existing → CodeCanvas |
 |---|---|---:|---:|---:|---:|---:|
-| Initial four-task suite | Broad pre-compact tool profile | 2,018,662 | 2,949,473 | **46.11% more** | **23.73% more** | 88.0 → 89.0 |
 | Frozen three-task holdout | `logic_flow` only | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 |
 | Frozen holdout replication | `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 |
 
-In the initial suite, existing-tools-only agents made 58 commands. CodeCanvas
-agents made 61 built-in commands and 32 MCP calls. In the `logic_flow`-only
-holdout, the counts were 43 versus 39 built-in commands plus four MCP calls. In
-the three-tool replication, they were 30 versus 41 plus four MCP calls. The
+In the `logic_flow`-only holdout, existing-tools-only agents made 43 commands
+versus 39 built-in commands plus four MCP calls for CodeCanvas. In the
+three-tool replication, the counts were 30 versus 41 plus four MCP calls. The
 replication agents did not select `who_calls` or `call_tree`.
 
 A one-turn smoke prompt reported the same 13,785 input tokens for the one-tool

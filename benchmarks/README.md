@@ -17,12 +17,10 @@ The CodeCanvas condition explicitly pre-approves its read-only MCP tools because
 non-interactive Codex otherwise reports the misleading error
 `user cancelled MCP tool call`.
 
-Three treatment profiles have been measured:
+Two treatment profiles have been measured on the same holdout:
 
-1. An initial broad pre-compact profile exposing the available CodeCanvas tool
-   catalog.
-2. An audited `logic_flow`-only profile.
-3. The current product-oriented compact profile:
+1. An audited `logic_flow`-only profile.
+2. The current product-oriented compact profile:
 
 ```toml
 [mcp_servers.codecanvas]
@@ -38,38 +36,22 @@ unfamiliar-code investigation without exposing the full tool catalog.
 
 ### Frozen ADK holdout
 
-The initial evaluation used four independently authored tasks at ADK commit
-`c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a`. A later source-only agent created
-four new tasks at the same commit. One was used to calibrate the compact profile;
-the other three remained untouched until the configuration and implementation
-were frozen.
+An independent source-only agent created four tasks at ADK commit
+`c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a`. One task was used to calibrate
+the compact profile. The other three remained untouched until the configuration
+and implementation were frozen.
 
 ### Results
 
-The initial four-task suite and two fresh runs of the three-task holdout produced
-the following results:
+Two fresh runs of the same three-task holdout produced opposite aggregate token
+outcomes:
 
-| Evaluation | Treatment tools | Existing tools only | Existing tools + CodeCanvas | Total-token change | Uncached input + output change | Mean blind score (/100), existing → CodeCanvas |
+| Evaluation | Treatment tools | Existing tools only (same-run control) | Existing tools + CodeCanvas | Change vs same-run control | Uncached change vs same-run control | Mean blind score (/100), existing → CodeCanvas |
 |---|---|---:|---:|---:|---:|---:|
-| Initial four-task suite, 2026-07-29 | Broad pre-compact profile | 2,018,662 | 2,949,473 | **46.11% more** | **23.73% more** | 88.0 → 89.0 |
 | Audited holdout, 2026-07-29 | `logic_flow` | 1,363,087 | 646,436 | **52.58% fewer** | **14.39% fewer** | 100.0 → 99.5 |
 | Three-tool replication, 2026-07-30 | `logic_flow`, `who_calls`, `call_tree` | 595,556 | 899,687 | **51.07% more** | **5.27% more** | 98.17 → 99.0 |
 
-The per-task results include both sides of every comparison.
-
-#### Initial broad-tool run
-
-| Task | Existing tools tokens | Existing + CodeCanvas tokens | Change | Blind score (/25), existing → CodeCanvas | Built-in commands, existing → CodeCanvas |
-|---|---:|---:|---:|---:|---:|
-| State-scope persistence | 229,840 | 472,687 | 105.66% more | 25 → 25 | 11 → 18 |
-| Parallel-tool recovery | 540,189 | 597,579 | 10.62% more | 25 → 22 | 15 → 12 |
-| Dynamic-node replay | 202,639 | 795,493 | 292.57% more | 21 → 25 | 7 → 8 |
-| Runner function-response resume | 1,045,994 | 1,083,714 | 3.61% more | 17 → 17 | 25 → 23 |
-
-The CodeCanvas side made 32 MCP calls in addition to its 61 built-in commands.
-The `22/25` parallel-tool score lost three citation-format points because several
-citations used `functions.py` instead of the required repository-relative path;
-the grader awarded every substantive logic criterion.
+The per-task results include both sides of each holdout run.
 
 #### Audited `logic_flow`-only run
 
@@ -113,9 +95,9 @@ run are committed under:
 - `results/adk_holdout_v3.json`
 
 Raw traces are not committed because they contain large source excerpts. Their
-SHA-256 hashes are recorded in the original result file. The initial broad-tool
-run and three-tool replication used frozen rubrics and anonymized grading, but
-their temporary raw traces are not committed.
+SHA-256 hashes are recorded in the original result file. The three-tool
+replication used the same frozen tasks and rubric; its temporary raw traces are
+not committed.
 
 ### Reproduce
 
@@ -135,8 +117,8 @@ receive anonymized answers and a frozen rubric without seeing condition labels.
 
 ### What the numbers do not mean
 
-- They are one model, one repository commit, one four-task suite, and two
-  single-run evaluations of a three-task holdout.
+- They are one model, one repository commit, two single-run evaluations, and
+  three holdout tasks.
 - Server-reported tokens are not provider billing or dollar cost.
 - Cached input is included in the headline total and also reported separately.
 - The rubric did not define a pass threshold, so exact scores are reported
