@@ -1,0 +1,36 @@
+{
+  "name": "codecanvas",
+  "version": "0.1.14",
+  "description": "Evidence-backed Python code intelligence through the local CodeCanvas MCP server.",
+  "author": {
+    "name": "CodeCanvas contributors",
+    "url": "https://github.com/donggyun112/codecanvas"
+  },
+  "homepage": "https://github.com/donggyun112/codecanvas#readme",
+  "repository": "https://github.com/donggyun112/codecanvas",
+  "license": "MIT",
+  "keywords": [
+    "python",
+    "static-analysis",
+    "mcp",
+    "code-intelligence"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "CodeCanvas",
+    "shortDescription": "Trace Python behavior with evidence.",
+    "longDescription": "Analyze Python call paths, branches, side effects, and change impact with explicit evidence and uncertainty metadata.",
+    "developerName": "CodeCanvas contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/donggyun112/codecanvas",
+    "brandColor": "#2563EB",
+    "defaultPrompt": [
+      "Trace this Python function's branches, outcomes, and side effects.",
+      "Show who calls this function and what it reaches downstream.",
+      "Analyze the impact of my current diff with evidence."
+    ]
+  }
+}

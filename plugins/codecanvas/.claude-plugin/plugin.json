@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "codecanvas",
+  "displayName": "CodeCanvas",
+  "version": "0.1.14",
+  "description": "Evidence-backed Python code intelligence through the local CodeCanvas MCP server.",
+  "author": {
+    "name": "CodeCanvas contributors",
+    "url": "https://github.com/donggyun112/codecanvas"
+  },
+  "homepage": "https://github.com/donggyun112/codecanvas#readme",
+  "repository": "https://github.com/donggyun112/codecanvas",
+  "license": "MIT",
+  "keywords": [
+    "python",
+    "static-analysis",
+    "mcp",
+    "code-intelligence"
+  ],
+  "mcpServers": "./.mcp.json"
+}

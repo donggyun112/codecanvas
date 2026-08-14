@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "codecanvas",
+  "owner": {
+    "name": "CodeCanvas contributors",
+    "url": "https://github.com/donggyun112/codecanvas"
+  },
+  "description": "CodeCanvas plugins for evidence-backed Python code intelligence.",
+  "plugins": [
+    {
+      "name": "codecanvas",
+      "source": "./plugins/codecanvas",
+      "description": "Trace Python call paths, branches, effects, and change impact with explicit evidence.",
+      "version": "0.1.14",
+      "category": "Developer Tools",
+      "tags": [
+        "python",
+        "static-analysis",
+        "mcp"
+      ]
+    }
+  ]
+}

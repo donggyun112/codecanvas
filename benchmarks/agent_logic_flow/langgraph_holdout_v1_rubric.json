@@ -1,0 +1,201 @@
+{
+  "benchmark_id": "langgraph-holdout-v1",
+  "visibility": "hidden",
+  "target_repository": "https://github.com/langchain-ai/langgraph",
+  "target_revision": "49ae27c2ae983cfb92091b0dea9f7bc37a716479",
+  "project_subdir": "libs/langgraph",
+  "scoring": {
+    "per_task_total": 100,
+    "substantive_logic_total": 90,
+    "citation_format_total": 10,
+    "partial_credit": "Award proportionally within each point. Citation credit is independent of substantive correctness."
+  },
+  "tasks": [
+    {
+      "id": "langgraph-hv1-stategraph-compile",
+      "substantive_logic_points": [
+        {
+          "id": "checkpointer-serde",
+          "points": 18,
+          "criterion": "Covers checkpointer validation and, only in strict MessagePack mode, collection of state/input/output/context/node/branch schema types, allowlist construction, and application to the checkpointer.",
+          "answer_locations": [
+            "langgraph/graph/state.py:1218-1241",
+            "langgraph/_internal/_serde.py:43-135",
+            "langgraph/types.py:107-120"
+          ]
+        },
+        {
+          "id": "validation-channels",
+          "points": 18,
+          "criterion": "Explains interrupt normalization and validation, including graph source/target/entrypoint/interrupt failures, then distinguishes root-only versus non-managed output and stream channel selection.",
+          "answer_locations": [
+            "langgraph/graph/state.py:1116-1162",
+            "langgraph/graph/state.py:1244-1274"
+          ]
+        },
+        {
+          "id": "default-error-handler",
+          "points": 18,
+          "criterion": "Explains generated default error-handler creation, the reserved-name conflict, exclusion of handler nodes from handler routing, and construction of the node-to-handler map.",
+          "answer_locations": [
+            "langgraph/graph/state.py:1275-1298",
+            "langgraph/graph/state.py:1300-1331"
+          ]
+        },
+        {
+          "id": "node-default-precedence",
+          "points": 18,
+          "criterion": "States that existing per-node values win; retry and timeout defaults apply to all nodes, while cache defaults and error-handler routing apply only to regular nodes.",
+          "answer_locations": [
+            "langgraph/graph/state.py:1300-1327"
+          ]
+        },
+        {
+          "id": "assembly",
+          "points": 18,
+          "criterion": "Covers CompiledStateGraph configuration, serde allowlist, START and user-node attachment, output/state mapper selection, ordinary and waiting edges, branches, and final compiled.validate return.",
+          "answer_locations": [
+            "langgraph/graph/state.py:1333-1388",
+            "langgraph/graph/state.py:1391-1585"
+          ]
+        }
+      ],
+      "citation_format_points": [
+        {
+          "id": "inline-source-citations",
+          "points": 6,
+          "criterion": "Material claims have inline `relative/path.py:start-end` citations that resolve at the frozen revision."
+        },
+        {
+          "id": "helper-coverage",
+          "points": 4,
+          "criterion": "Citations cover validation/serialization helpers and compiled-graph assembly, not only the compile declaration."
+        }
+      ]
+    },
+    {
+      "id": "langgraph-hv1-bulk-update-state",
+      "substantive_logic_points": [
+        {
+          "id": "validation-delegation",
+          "points": 15,
+          "criterion": "Covers checkpointer resolution/allowlisting, missing-checkpointer and empty-superstep/update failures, and checkpoint-namespace subgraph delegation or failure.",
+          "answer_locations": [
+            "langgraph/pregel/main.py:1590-1638"
+          ]
+        },
+        {
+          "id": "checkpoint-setup",
+          "points": 15,
+          "criterion": "Explains saved checkpoint migration/copy versus empty creation, prior versions and step derivation, config merging, and channel/managed-value reconstruction.",
+          "answer_locations": [
+            "langgraph/pregel/main.py:1640-1680"
+          ]
+        },
+        {
+          "id": "end-input-modes",
+          "points": 15,
+          "criterion": "Explains END task clearing including pending/null writes and update checkpoint, plus INPUT mapping, its single-update constraint, input checkpoint metadata, put_writes, and no-input-writes failure.",
+          "answer_locations": [
+            "langgraph/pregel/main.py:1681-1813"
+          ]
+        },
+        {
+          "id": "copy-mode",
+          "points": 15,
+          "criterion": "Explains `__copy__` validation and fork checkpoint, optional grouped follow-up updates, next-task ID reuse by node occurrence, and recursive ordinary superstep application.",
+          "answer_locations": [
+            "langgraph/pregel/main.py:1815-1880"
+          ]
+        },
+        {
+          "id": "ordinary-update",
+          "points": 15,
+          "criterion": "Covers task-ID discovery, single-update as_node inference and ambiguity, multi-update requirements, node/writer validation, writer invocation context, and provided/prepared/deterministic task-ID precedence.",
+          "answer_locations": [
+            "langgraph/pregel/main.py:1882-1993"
+          ]
+        },
+        {
+          "id": "persistence-loop",
+          "points": 15,
+          "criterion": "Distinguishes pre-checkpoint non-PUSH writes and post-checkpoint PUSH writes; covers apply_writes, delta snapshot planning and metadata, checkpoint persistence/version deltas, checkpoint-map patching, thread-ID normalization, and sequential supersteps.",
+          "answer_locations": [
+            "langgraph/pregel/main.py:1994-2054",
+            "langgraph/pregel/_checkpoint.py:74-147"
+          ]
+        }
+      ],
+      "citation_format_points": [
+        {
+          "id": "inline-source-citations",
+          "points": 6,
+          "criterion": "Material claims have inline `relative/path.py:start-end` citations that resolve at the frozen revision."
+        },
+        {
+          "id": "helper-coverage",
+          "points": 4,
+          "criterion": "Citations cover validation, all three special modes, ordinary updates, and checkpoint persistence."
+        }
+      ]
+    },
+    {
+      "id": "langgraph-hv1-add-messages",
+      "substantive_logic_points": [
+        {
+          "id": "normalization",
+          "points": 18,
+          "criterion": "Covers scalar-to-list normalization, conversion through LangChain messages/chunks, and UUID assignment to missing IDs on both sides.",
+          "answer_locations": [
+            "langgraph/graph/message.py:189-208"
+          ]
+        },
+        {
+          "id": "remove-all",
+          "points": 18,
+          "criterion": "Explains that the last REMOVE_ALL marker index found in the right side causes an immediate return of only later right-side messages, bypassing ordinary merge and formatting.",
+          "answer_locations": [
+            "langgraph/graph/message.py:201-213"
+          ]
+        },
+        {
+          "id": "replace-append",
+          "points": 18,
+          "criterion": "Explains left-copy/index construction, in-place replacement for matching IDs, append for new IDs, and preservation of list position for replacements.",
+          "answer_locations": [
+            "langgraph/graph/message.py:216-233"
+          ]
+        },
+        {
+          "id": "delete-resurrect",
+          "points": 18,
+          "criterion": "Explains tombstoning of existing IDs, later non-remove replacement clearing the tombstone, final filtering, and the ValueError for removing an absent ID.",
+          "answer_locations": [
+            "langgraph/graph/message.py:218-235"
+          ]
+        },
+        {
+          "id": "formatting",
+          "points": 18,
+          "criterion": "Distinguishes OpenAI formatting via `_format_messages`, rejection of any other truthy format, and unchanged merged-message return for a falsey format.",
+          "answer_locations": [
+            "langgraph/graph/message.py:236-244",
+            "langgraph/graph/message.py:376-399"
+          ]
+        }
+      ],
+      "citation_format_points": [
+        {
+          "id": "inline-source-citations",
+          "points": 6,
+          "criterion": "Material claims have inline `relative/path.py:start-end` citations that resolve at the frozen revision."
+        },
+        {
+          "id": "helper-coverage",
+          "points": 4,
+          "criterion": "Citations cover normalization, REMOVE_ALL, ordinary merge/delete, and formatting branches."
+        }
+      ]
+    }
+  ]
+}

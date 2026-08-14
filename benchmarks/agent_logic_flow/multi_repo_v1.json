@@ -1,0 +1,52 @@
+{
+  "benchmark_id": "multi-repository-logic-flow-v1",
+  "benchmark_type": "repeated-paired-zero-context",
+  "repetitions": 3,
+  "profile": {
+    "baseline": "Codex built-in shell, search, and read tools; all MCP servers disabled",
+    "treatment": "Same tools plus CodeCanvas logic_flow only",
+    "pairing": "Each task's baseline and treatment run concurrently in fresh ephemeral processes",
+    "reporting": "Per-repository and suite-wide median, minimum, and maximum across repetitions"
+  },
+  "repositories": [
+    {
+      "id": "google-adk",
+      "repository": "https://github.com/google/adk-python",
+      "revision": "c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a",
+      "project_subdir": ".",
+      "tasks": "benchmarks/agent_logic_flow/adk_holdout_v3_tasks.json",
+      "rubric": "benchmarks/agent_logic_flow/adk_holdout_v3_rubric.json",
+      "task_ids": [
+        "adk-hv3-agent-callback-lifecycle",
+        "adk-hv3-compaction-arbitration",
+        "adk-hv3-file-artifact-load"
+      ]
+    },
+    {
+      "id": "langgraph",
+      "repository": "https://github.com/langchain-ai/langgraph",
+      "revision": "49ae27c2ae983cfb92091b0dea9f7bc37a716479",
+      "project_subdir": "libs/langgraph",
+      "tasks": "benchmarks/agent_logic_flow/langgraph_holdout_v1_tasks.json",
+      "rubric": "benchmarks/agent_logic_flow/langgraph_holdout_v1_rubric.json",
+      "task_ids": [
+        "langgraph-hv1-stategraph-compile",
+        "langgraph-hv1-bulk-update-state",
+        "langgraph-hv1-add-messages"
+      ]
+    },
+    {
+      "id": "fastapi",
+      "repository": "https://github.com/fastapi/fastapi",
+      "revision": "f336ff831c4af3d4f625c2593a27b1e0cae93eb7",
+      "project_subdir": ".",
+      "tasks": "benchmarks/agent_logic_flow/fastapi_holdout_v1_tasks.json",
+      "rubric": "benchmarks/agent_logic_flow/fastapi_holdout_v1_rubric.json",
+      "task_ids": [
+        "fastapi-hv1-solve-dependencies",
+        "fastapi-hv1-serialize-response",
+        "fastapi-hv1-include-router"
+      ]
+    }
+  ]
+}

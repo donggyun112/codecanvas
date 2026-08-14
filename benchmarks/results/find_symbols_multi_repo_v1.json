@@ -1,0 +1,94 @@
+{
+  "benchmark": "find_symbols_multi_repository_v1",
+  "measured_at": "2026-08-13",
+  "codecanvas_revision": "98d6596a330634ed03ca63a6bb54c9fbacc57ad0",
+  "environment": {
+    "os": "Darwin 25.5.0 arm64",
+    "cpu": "Apple M4 Pro",
+    "memory_bytes": 51539607552,
+    "python": "3.12.10"
+  },
+  "methodology": {
+    "runs": 1,
+    "iterations": 50,
+    "workers": 8,
+    "cold_analysis": "Each repository was copied without .git, .codecanvas, virtual environments, node_modules, or Python bytecode, then analyzed from scratch.",
+    "warm_search": "One first search followed by 50 sequential searches on the same in-memory builder.",
+    "concurrent_search": "50 searches submitted to an 8-worker thread pool on the same in-memory builder.",
+    "execution": "Repositories were measured sequentially."
+  },
+  "repositories": [
+    {
+      "id": "google-adk",
+      "repository": "https://github.com/google/adk-python",
+      "revision": "c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a",
+      "project_subdir": ".",
+      "query": "credential manager",
+      "python_files": 1650,
+      "symbols": 16960,
+      "cold_analysis_ms": 61624.74,
+      "first_search_ms": 303.271,
+      "warm_search_ms": {
+        "median": 293.778,
+        "p95": 306.492,
+        "max": 577.869
+      },
+      "concurrent": {
+        "workers": 8,
+        "calls": 50,
+        "wall_ms": 15328.71,
+        "calls_per_second": 3.26
+      }
+    },
+    {
+      "id": "langgraph",
+      "repository": "https://github.com/langchain-ai/langgraph",
+      "revision": "49ae27c2ae983cfb92091b0dea9f7bc37a716479",
+      "project_subdir": "libs/langgraph",
+      "query": "state graph",
+      "python_files": 148,
+      "symbols": 4468,
+      "cold_analysis_ms": 5991,
+      "first_search_ms": 83.814,
+      "warm_search_ms": {
+        "median": 83.087,
+        "p95": 86.011,
+        "max": 94.083
+      },
+      "concurrent": {
+        "workers": 8,
+        "calls": 50,
+        "wall_ms": 4337.14,
+        "calls_per_second": 11.53
+      }
+    },
+    {
+      "id": "fastapi",
+      "repository": "https://github.com/fastapi/fastapi",
+      "revision": "f336ff831c4af3d4f625c2593a27b1e0cae93eb7",
+      "project_subdir": ".",
+      "query": "dependency response",
+      "python_files": 1136,
+      "symbols": 5580,
+      "cold_analysis_ms": 4375.76,
+      "first_search_ms": 50.486,
+      "warm_search_ms": {
+        "median": 48.264,
+        "p95": 48.821,
+        "max": 49.345
+      },
+      "concurrent": {
+        "workers": 8,
+        "calls": 50,
+        "wall_ms": 2495.86,
+        "calls_per_second": 20.03
+      }
+    }
+  ],
+  "limitations": [
+    "This is one run on one machine, not a cross-machine throughput claim.",
+    "Repository queries differ so that each search returns relevant project symbols; latency therefore includes query-dependent ranking work.",
+    "Python file count includes the selected checkout subtree, while symbol count reflects functions indexed by CodeCanvas.",
+    "Cold analysis is dominated by repository structure and symbol complexity, not Python file count alone."
+  ]
+}

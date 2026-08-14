@@ -1,0 +1,45 @@
+{
+  "benchmark_id": "fastapi-holdout-v1",
+  "benchmark_type": "zero-context-logic-flow",
+  "target_repository": "https://github.com/fastapi/fastapi",
+  "target_revision": "f336ff831c4af3d4f625c2593a27b1e0cae93eb7",
+  "project_subdir": ".",
+  "participant_instructions": [
+    "Answer from the repository at the exact target revision.",
+    "Trace the named production entry point and any helpers needed to explain observable control flow, mutations, yielded/returned values, and exceptions.",
+    "Support each material claim with an inline citation in the form `relative/path.py:start-end`.",
+    "Do not rely on tests, runtime experiments, or prior benchmark answers as a substitute for source reasoning."
+  ],
+  "tasks": [
+    {
+      "id": "fastapi-hv1-solve-dependencies",
+      "title": "Recursive dependency injection",
+      "entrypoint": {
+        "symbol": "solve_dependencies",
+        "file": "fastapi/dependencies/utils.py",
+        "line": 586
+      },
+      "prompt": "Trace `solve_dependencies(...)` end to end. Explain request/function exit-stack requirements and accumulator initialization; recursive subdependency solving and override rebuilding; error propagation and cache-key semantics; how cached, generator, async, and sync callables execute (including generator scope); request parameter and body extraction; injection of request/websocket/background/response/security objects; and the exact contents returned."
+    },
+    {
+      "id": "fastapi-hv1-serialize-response",
+      "title": "Response validation and serialization",
+      "entrypoint": {
+        "symbol": "serialize_response",
+        "file": "fastapi/routing.py",
+        "line": 301
+      },
+      "prompt": "Trace `serialize_response(...)` for every branch. Explain behavior with and without a response field; event-loop versus threadpool validation; error construction and endpoint context; `dump_json` serializer selection; propagation of include/exclude/alias/default flags; and the fallback encoding path."
+    },
+    {
+      "id": "fastapi-hv1-include-router",
+      "title": "Lazy nested router inclusion",
+      "entrypoint": {
+        "symbol": "APIRouter.include_router",
+        "file": "fastapi/routing.py",
+        "line": 3133
+      },
+      "prompt": "Trace `APIRouter.include_router(...)` and the helpers that make an included router effective later. Explain direct and indirect cycle rejection; prefix and empty-path validation; how inherited include metadata is combined across nesting; what is appended and invalidated at include time; startup, shutdown, and lifespan merging; lazy route candidate caching/versioning; and how API, WebSocket, Starlette Route/Mount/Host, and nested-router candidates are materialized and matched."
+    }
+  ]
+}

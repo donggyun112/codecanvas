@@ -1,0 +1,204 @@
+{
+  "benchmark_id": "fastapi-holdout-v1",
+  "visibility": "hidden",
+  "target_repository": "https://github.com/fastapi/fastapi",
+  "target_revision": "f336ff831c4af3d4f625c2593a27b1e0cae93eb7",
+  "project_subdir": ".",
+  "scoring": {
+    "per_task_total": 100,
+    "substantive_logic_total": 90,
+    "citation_format_total": 10,
+    "partial_credit": "Award proportionally within each point. Citation credit is independent of substantive correctness."
+  },
+  "tasks": [
+    {
+      "id": "fastapi-hv1-solve-dependencies",
+      "substantive_logic_points": [
+        {
+          "id": "stacks-init",
+          "points": 18,
+          "criterion": "Covers asserted request and function AsyncExitStacks, fresh values/errors, default response normalization, and shared dependency/scope-cache initialization.",
+          "answer_locations": [
+            "fastapi/dependencies/utils.py:601-618"
+          ]
+        },
+        {
+          "id": "recursive-overrides",
+          "points": 18,
+          "criterion": "Explains per-subdependency recursion, override lookup by original callable, rebuilding the dependant with path/name/OAuth scopes/scope, shared accumulators, background-task propagation, and skipping execution when nested errors exist.",
+          "answer_locations": [
+            "fastapi/dependencies/utils.py:619-655",
+            "fastapi/dependencies/utils.py:271-349"
+          ]
+        },
+        {
+          "id": "cache-dispatch",
+          "points": 18,
+          "criterion": "Explains cache key derivation from the original sub_dependant, use_cache lookup, request-versus-function exit stack for generator dependencies, async direct calls, sync threadpool calls, named-value assignment, and cache population even when use_cache is false.",
+          "answer_locations": [
+            "fastapi/dependencies/utils.py:656-680",
+            "fastapi/dependencies/utils.py:566-576",
+            "fastapi/dependencies/models.py:82-98"
+          ]
+        },
+        {
+          "id": "request-data",
+          "points": 18,
+          "criterion": "Covers path/query/header/cookie extraction and ordered value merges, error accumulation, and conditional body extraction using embed_body_fields.",
+          "answer_locations": [
+            "fastapi/dependencies/utils.py:681-707",
+            "fastapi/dependencies/utils.py:780-1053"
+          ]
+        },
+        {
+          "id": "special-values-return",
+          "points": 18,
+          "criterion": "Covers HTTP connection plus Request-versus-WebSocket injection, lazy BackgroundTasks creation, response and SecurityScopes injection, and all five fields of SolvedDependency returned.",
+          "answer_locations": [
+            "fastapi/dependencies/utils.py:708-731",
+            "fastapi/dependencies/utils.py:578-584"
+          ]
+        }
+      ],
+      "citation_format_points": [
+        {
+          "id": "inline-source-citations",
+          "points": 6,
+          "criterion": "Material claims have inline `relative/path.py:start-end` citations that resolve at the frozen revision."
+        },
+        {
+          "id": "helper-coverage",
+          "points": 4,
+          "criterion": "Citations cover recursive solving, callable dispatch helpers, request/body parsing, and final injection."
+        }
+      ]
+    },
+    {
+      "id": "fastapi-hv1-serialize-response",
+      "substantive_logic_points": [
+        {
+          "id": "field-branch",
+          "points": 18,
+          "criterion": "States that a truthy field enables validation and a missing field bypasses validation and field serialization entirely.",
+          "answer_locations": [
+            "fastapi/routing.py:315-342"
+          ]
+        },
+        {
+          "id": "execution-context",
+          "points": 18,
+          "criterion": "Distinguishes direct validation for coroutine endpoints from threadpool validation otherwise, using the same response location.",
+          "answer_locations": [
+            "fastapi/routing.py:315-321"
+          ]
+        },
+        {
+          "id": "validation-error",
+          "points": 18,
+          "criterion": "Explains that validation errors raise ResponseValidationError with raw errors, original body, and supplied endpoint context or an empty context.",
+          "answer_locations": [
+            "fastapi/routing.py:322-329",
+            "fastapi/exceptions.py:234-244"
+          ]
+        },
+        {
+          "id": "serializer-flags",
+          "points": 18,
+          "criterion": "Explains serialize_json versus serialize selection from dump_json and forwarding of validated value plus include/exclude/by_alias/exclude_unset/exclude_defaults/exclude_none.",
+          "answer_locations": [
+            "fastapi/routing.py:330-340"
+          ]
+        },
+        {
+          "id": "fallback",
+          "points": 18,
+          "criterion": "States that without a field the original response content is returned through jsonable_encoder.",
+          "answer_locations": [
+            "fastapi/routing.py:341-342",
+            "fastapi/encoders.py:129-343"
+          ]
+        }
+      ],
+      "citation_format_points": [
+        {
+          "id": "inline-source-citations",
+          "points": 6,
+          "criterion": "Material claims have inline `relative/path.py:start-end` citations that resolve at the frozen revision."
+        },
+        {
+          "id": "helper-coverage",
+          "points": 4,
+          "criterion": "Citations cover both validation modes, the error branch, serializer choice, and no-field fallback."
+        }
+      ]
+    },
+    {
+      "id": "fastapi-hv1-include-router",
+      "substantive_logic_points": [
+        {
+          "id": "cycle-prefix-validation",
+          "points": 15,
+          "criterion": "Covers direct self-inclusion and indirect containment rejection, leading-slash/trailing-slash prefix assertions, and empty-prefix plus empty-route-path FastAPIError across lazy route contexts.",
+          "answer_locations": [
+            "fastapi/routing.py:2575-2602",
+            "fastapi/routing.py:3270-3295"
+          ]
+        },
+        {
+          "id": "include-context",
+          "points": 15,
+          "criterion": "Explains parent-plus-argument prefix/tags/dependencies/callbacks, response merge precedence, response-class and ID-function fallback, deprecated/include-in-schema semantics, and retained strict-content/dependency provider.",
+          "answer_locations": [
+            "fastapi/routing.py:1285-1341"
+          ]
+        },
+        {
+          "id": "nested-combination",
+          "points": 15,
+          "criterion": "Explains how parent and child include contexts combine recursively, including prefix/list concatenation, child response override, boolean rules, default selection, and path prefixing.",
+          "answer_locations": [
+            "fastapi/routing.py:1343-1371"
+          ]
+        },
+        {
+          "id": "include-time-effects",
+          "points": 15,
+          "criterion": "States that include time appends one `_IncludedRouter` wrapper rather than eagerly copying routes, marks route versions changed, copies startup/shutdown handlers, and merges lifespan contexts.",
+          "answer_locations": [
+            "fastapi/routing.py:3296-3321",
+            "fastapi/routing.py:1560-1600",
+            "fastapi/routing.py:2560-2574"
+          ]
+        },
+        {
+          "id": "lazy-materialization",
+          "points": 15,
+          "criterion": "Covers route-version keyed, lock-protected effective-candidate caching; recursive child wrapper creation; and effective contexts for APIRoute/frontend, API/Starlette WebSocket, Starlette Route, Mount, and Host with prefix/dependency transformations.",
+          "answer_locations": [
+            "fastapi/routing.py:1601-1740"
+          ]
+        },
+        {
+          "id": "matching-traversal",
+          "points": 15,
+          "criterion": "Explains full-before-first-partial matching, temporary FastAPI scope context for APIRoutes, nested-router delegation, default fallback, selected effective context installation, original APIRoute handling, and recursive effective-route iteration.",
+          "answer_locations": [
+            "fastapi/routing.py:1741-1849"
+          ]
+        }
+      ],
+      "citation_format_points": [
+        {
+          "id": "inline-source-citations",
+          "points": 6,
+          "criterion": "Material claims have inline `relative/path.py:start-end` citations that resolve at the frozen revision."
+        },
+        {
+          "id": "helper-coverage",
+          "points": 4,
+          "criterion": "Citations cover include-time validation and state changes plus lazy nested materialization and matching helpers."
+        }
+      ]
+    }
+  ]
+}

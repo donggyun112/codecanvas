@@ -1,0 +1,186 @@
+{
+  "benchmark": "multi-repository-logic-flow-v1",
+  "measured_at": "2026-08-14",
+  "codecanvas_revision": "98d6596a330634ed03ca63a6bb54c9fbacc57ad0",
+  "suite_sha256": "0b025169e6b5487ddba2e30c5d985d2514a702551b07e4fd7277cdfcce7c2a97",
+  "raw_report_sha256": "08ba2c98f6df1124f56ba6a1bad651648f1f7eb4cf39de3887412a0c13a716fe",
+  "runner": {
+    "codex_cli": "0.147.0",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "repetitions": 3,
+    "pairing": "Baseline and treatment ran concurrently in fresh ephemeral processes for each task.",
+    "baseline": "Built-in tools only; all MCP servers disabled.",
+    "treatment": "The same prompt and built-in tools plus CodeCanvas logic_flow only.",
+    "isolation": "CODEX_HOME contained only an auth.json symlink; user config and rules were ignored.",
+    "validation": "Every treatment trace required at least one completed codecanvas.logic_flow call."
+  },
+  "validation": {
+    "sessions_completed": 54,
+    "treatment_sessions": 27,
+    "treatment_sessions_with_completed_logic_flow": 27,
+    "answers_graded": false
+  },
+  "summary": {
+    "repositories": 3,
+    "tasks_per_repetition": 9,
+    "repetitions": 3,
+    "total_token_savings_percent": {
+      "values": [22.98, 22.95, 2.43],
+      "median": 22.95,
+      "min": 2.43,
+      "max": 22.98
+    },
+    "uncached_token_savings_percent": {
+      "values": [-0.78, -8.77, 8.41],
+      "median": -0.78,
+      "min": -8.77,
+      "max": 8.41
+    }
+  },
+  "repositories": [
+    {
+      "id": "google-adk",
+      "revision": "c3c40bcd74a5c8e98b8d764d5f5e76c6fccfde7a",
+      "runs": [
+        {
+          "repetition": 1,
+          "baseline_total_tokens": 1060711,
+          "codecanvas_total_tokens": 1025751,
+          "total_savings_percent": 3.3,
+          "baseline_uncached_input_plus_output": 186727,
+          "codecanvas_uncached_input_plus_output": 205015,
+          "uncached_savings_percent": -9.79
+        },
+        {
+          "repetition": 2,
+          "baseline_total_tokens": 1364816,
+          "codecanvas_total_tokens": 715012,
+          "total_savings_percent": 47.61,
+          "baseline_uncached_input_plus_output": 203088,
+          "codecanvas_uncached_input_plus_output": 211716,
+          "uncached_savings_percent": -4.25
+        },
+        {
+          "repetition": 3,
+          "baseline_total_tokens": 661273,
+          "codecanvas_total_tokens": 645044,
+          "total_savings_percent": 2.45,
+          "baseline_uncached_input_plus_output": 185369,
+          "codecanvas_uncached_input_plus_output": 157108,
+          "uncached_savings_percent": 15.25
+        }
+      ],
+      "summary": {
+        "total_token_savings_percent": {
+          "median": 3.3,
+          "min": 2.45,
+          "max": 47.61
+        },
+        "uncached_token_savings_percent": {
+          "median": -4.25,
+          "min": -9.79,
+          "max": 15.25
+        }
+      }
+    },
+    {
+      "id": "langgraph",
+      "revision": "49ae27c2ae983cfb92091b0dea9f7bc37a716479",
+      "runs": [
+        {
+          "repetition": 1,
+          "baseline_total_tokens": 771107,
+          "codecanvas_total_tokens": 576438,
+          "total_savings_percent": 25.25,
+          "baseline_uncached_input_plus_output": 161059,
+          "codecanvas_uncached_input_plus_output": 169910,
+          "uncached_savings_percent": -5.5
+        },
+        {
+          "repetition": 2,
+          "baseline_total_tokens": 646028,
+          "codecanvas_total_tokens": 498059,
+          "total_savings_percent": 22.9,
+          "baseline_uncached_input_plus_output": 135052,
+          "codecanvas_uncached_input_plus_output": 144267,
+          "uncached_savings_percent": -6.82
+        },
+        {
+          "repetition": 3,
+          "baseline_total_tokens": 674572,
+          "codecanvas_total_tokens": 609760,
+          "total_savings_percent": 9.61,
+          "baseline_uncached_input_plus_output": 145932,
+          "codecanvas_uncached_input_plus_output": 160736,
+          "uncached_savings_percent": -10.14
+        }
+      ],
+      "summary": {
+        "total_token_savings_percent": {
+          "median": 22.9,
+          "min": 9.61,
+          "max": 25.25
+        },
+        "uncached_token_savings_percent": {
+          "median": -6.82,
+          "min": -10.14,
+          "max": -5.5
+        }
+      }
+    },
+    {
+      "id": "fastapi",
+      "revision": "f336ff831c4af3d4f625c2593a27b1e0cae93eb7",
+      "runs": [
+        {
+          "repetition": 1,
+          "baseline_total_tokens": 1272804,
+          "codecanvas_total_tokens": 788912,
+          "total_savings_percent": 38.02,
+          "baseline_uncached_input_plus_output": 205540,
+          "codecanvas_uncached_input_plus_output": 182704,
+          "uncached_savings_percent": 11.11
+        },
+        {
+          "repetition": 2,
+          "baseline_total_tokens": 794565,
+          "codecanvas_total_tokens": 948545,
+          "total_savings_percent": -19.38,
+          "baseline_uncached_input_plus_output": 143813,
+          "codecanvas_uncached_input_plus_output": 168257,
+          "uncached_savings_percent": -17.0
+        },
+        {
+          "repetition": 3,
+          "baseline_total_tokens": 1127331,
+          "codecanvas_total_tokens": 1148430,
+          "total_savings_percent": -1.87,
+          "baseline_uncached_input_plus_output": 162467,
+          "codecanvas_uncached_input_plus_output": 134414,
+          "uncached_savings_percent": 17.27
+        }
+      ],
+      "summary": {
+        "total_token_savings_percent": {
+          "median": -1.87,
+          "min": -19.38,
+          "max": 38.02
+        },
+        "uncached_token_savings_percent": {
+          "median": 11.11,
+          "min": -17.0,
+          "max": 17.27
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "Positive savings means CodeCanvas used fewer tokens; negative savings means it used more.",
+    "The suite-wide result is weighted by each repetition's aggregate token totals, not an unweighted mean of repository percentages.",
+    "Total tokens include cached input. Uncached input plus output had a -0.78% median change and therefore does not establish a token reduction.",
+    "Answers have not yet been blind-graded against the frozen rubrics, so this is a token result rather than an efficiency-at-equal-quality claim.",
+    "The LangGraph and FastAPI tasks and rubrics were frozen before execution but have not been independently authored or audited.",
+    "Three repetitions show substantial trajectory variance and do not support a universal savings percentage."
+  ]
+}

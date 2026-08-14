@@ -16,10 +16,15 @@ CodeCanvas is a local static-analysis
 turns project-wide call paths and control flow into compact, citation-ready
 answers about branches, callers, callees, side effects, and change impact.
 
-In a blinded three-task holdout on Google ADK's 433K-line Python codebase, the
-`logic_flow` profile used **52.58% fewer server-reported input + output tokens**
-than the same-run built-in-tools control while scoring **99.5/100** versus
-100/100. See the [audited methodology, detailed results, and
+The benchmark now spans pinned revisions of **Google ADK, LangGraph, and
+FastAPI**. On an Apple M4 Pro, measured cold analysis ranged from **4.38s to
+61.62s**, and median warm `find_symbols` latency ranged from **48.264ms to
+293.778ms** across those repositories. In a controlled 54-session agent suite,
+both conditions kept the same built-in code-search tools; the treatment added
+only `logic_flow`. That single addition used a median **22.95% fewer total
+tokens** across three paired repetitions, demonstrating meaningful incremental
+value on top of ordinary code exploration. Uncached tokens increased by 0.78%,
+and the answers are not yet blind-graded. See the [methodology, full tables, and
 limitations](benchmarks/README.md).
 
 Use it to answer questions such as:
@@ -82,8 +87,26 @@ result.
 
 ## Quick start
 
-Install [uv](https://docs.astral.sh/uv/) if `uvx` is not already available,
-then register the server with Claude Code:
+Install [uv](https://docs.astral.sh/uv/) if `uvx` is not already available.
+The repository includes one shared plugin package with native manifests for
+both Claude Code and Codex. Install it from the CodeCanvas marketplace:
+
+```bash
+# Claude Code
+claude plugin marketplace add donggyun112/codecanvas
+claude plugin install codecanvas@codecanvas
+
+# Codex
+codex plugin marketplace add donggyun112/codecanvas
+codex plugin add codecanvas@codecanvas
+```
+
+Both plugins start `uvx codecanvas-mcp` and expose the complete tool catalog.
+See the [plugin package](plugins/codecanvas/README.md) for local-checkout testing
+and validation commands.
+
+If your client does not support plugins, register the server directly. For
+Claude Code:
 
 ```bash
 claude mcp add codecanvas -- uvx codecanvas-mcp
@@ -281,17 +304,22 @@ with:
 
 ## Evidence
 
-In one audited, blinded run on three frozen Google ADK tasks, the
-`logic_flow` profile used **52.58% fewer server-reported input + output tokens**
-than its same-run built-in-tools control while scoring **99.5/100** versus
-100/100.
+The measured local latency suite covers three pinned projects with 148–1,650
+Python files and 4,468–16,960 indexed functions. It reports cold analysis,
+first and warm search latency, and eight-worker throughput; the raw result is
+committed with the benchmark artifacts.
 
-The benchmark uses fresh ephemeral agents, byte-identical prompts, a frozen
-repository revision, and source-blind grading. Token use still depends on the
-agent's exploration path, so the benchmark page also reports the fresh
-replication and limitations instead of hiding them.
+The model-backed evaluation covers frozen tasks and hidden rubrics for Google
+ADK, LangGraph, and FastAPI. It compares built-in code exploration plus
+`logic_flow` against the same built-in exploration alone. Across 54 isolated
+sessions, three paired repetitions produced a suite-wide median of 22.95% fewer
+server-reported total tokens. All 27 treatment sessions completed the required
+tool call, providing direct evidence that one CodeCanvas tool adds meaningful
+value without replacing the agent's existing search tools. Uncached input plus
+output increased by a median 0.78%, and the answers are not yet blind-graded,
+so this is not yet an efficiency-at-equal-quality or billing-cost claim.
 
-See the [full methodology, per-task results, reproduction command, and audit
+See the [full methodology, result tables, reproduction commands, and audit
 artifacts](benchmarks/README.md).
 
 ## Development

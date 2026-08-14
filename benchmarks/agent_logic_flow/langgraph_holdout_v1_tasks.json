@@ -1,0 +1,45 @@
+{
+  "benchmark_id": "langgraph-holdout-v1",
+  "benchmark_type": "zero-context-logic-flow",
+  "target_repository": "https://github.com/langchain-ai/langgraph",
+  "target_revision": "49ae27c2ae983cfb92091b0dea9f7bc37a716479",
+  "project_subdir": "libs/langgraph",
+  "participant_instructions": [
+    "Answer from the repository at the exact target revision.",
+    "Trace the named production entry point and any helpers needed to explain observable control flow, mutations, yielded/returned values, and exceptions.",
+    "Support each material claim with an inline citation in the form `relative/path.py:start-end`.",
+    "Do not rely on tests, runtime experiments, or prior benchmark answers as a substitute for source reasoning."
+  ],
+  "tasks": [
+    {
+      "id": "langgraph-hv1-stategraph-compile",
+      "title": "StateGraph compilation pipeline",
+      "entrypoint": {
+        "symbol": "StateGraph.compile",
+        "file": "langgraph/graph/state.py",
+        "line": 1164
+      },
+      "prompt": "Trace `StateGraph.compile(...)` end to end. Explain checkpointer and strict-serialization preparation; graph and interrupt validation; output and stream channel selection; how graph-level error-handler, retry, cache, and timeout defaults mutate node specs and where per-node settings win; how the `CompiledStateGraph` is configured; and the order in which nodes, mappers, edges, waiting edges, and branches are attached before final validation."
+    },
+    {
+      "id": "langgraph-hv1-bulk-update-state",
+      "title": "Bulk checkpoint state updates",
+      "entrypoint": {
+        "symbol": "Pregel.bulk_update_state",
+        "file": "langgraph/pregel/main.py",
+        "line": 1590
+      },
+      "prompt": "Trace `Pregel.bulk_update_state(config, supersteps)` through every major mode. Explain initial validation and subgraph delegation; saved-versus-fresh checkpoint setup; the special END, INPUT, and `__copy__` paths and their invalid cases; ordinary `as_node` inference and ambiguity rules; writer execution and task-ID reuse; how normal, PUSH, and pending writes are persisted; how delta snapshot metadata is chosen; and how multiple supersteps advance the returned config."
+    },
+    {
+      "id": "langgraph-hv1-add-messages",
+      "title": "Message reducer replacement and deletion",
+      "entrypoint": {
+        "symbol": "add_messages",
+        "file": "langgraph/graph/message.py",
+        "line": 61
+      },
+      "prompt": "Trace `add_messages(left, right, format=...)` from input normalization to its return. Explain scalar/list and message-chunk conversion, missing-ID assignment, REMOVE_ALL behavior, replacement versus append ordering, deletion and later resurrection of an existing ID, the nonexistent-ID deletion error, and both supported and rejected formatting paths."
+    }
+  ]
+}

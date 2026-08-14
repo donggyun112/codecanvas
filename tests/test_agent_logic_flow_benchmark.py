@@ -15,6 +15,16 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(BENCHMARK)
 
 
+def test_participant_prompt_requires_logic_flow_only_when_available():
+    prompt = BENCHMARK._participant_prompt(
+        {"id": "task", "prompt": "Trace the entry point."}
+    )
+
+    assert "If a CodeCanvas logic_flow tool is available" in prompt
+    assert "If it is unavailable, continue with the built-in tools" in prompt
+    assert "through its `function` argument" in prompt
+
+
 def test_treatment_command_exposes_only_logic_flow(tmp_path):
     command = BENCHMARK._codex_command(
         condition="codecanvas",
@@ -27,8 +37,28 @@ def test_treatment_command_exposes_only_logic_flow(tmp_path):
 
     joined = " ".join(command)
     assert 'default_tools_approval_mode="approve"' in joined
+    assert "mcp_servers.codecanvas.enabled=true" in joined
+    assert "mcp_servers.codecanvas.required=true" in joined
     assert 'enabled_tools=["logic_flow"]' in joined
     assert "mcp_servers={}" not in joined
+
+
+def test_treatment_command_preserves_virtualenv_python_symlink(tmp_path):
+    real_python = tmp_path / "real-python"
+    real_python.touch()
+    venv_python = tmp_path / "venv-python"
+    venv_python.symlink_to(real_python)
+
+    command = BENCHMARK._codex_command(
+        condition="codecanvas",
+        project=tmp_path,
+        answer_path=tmp_path / "answer.md",
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+        codecanvas_python=venv_python,
+    )
+
+    assert f'mcp_servers.codecanvas.command="{venv_python}"' in command
 
 
 def test_baseline_command_disables_mcp(tmp_path):
@@ -43,6 +73,29 @@ def test_baseline_command_disables_mcp(tmp_path):
 
     assert "mcp_servers={}" in command
     assert not any("enabled_tools" in item for item in command)
+
+
+def test_parse_trace_accepts_recovered_transport_error(tmp_path):
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(
+        "\n".join(
+            [
+                '{"type":"error","message":"Reconnecting..."}',
+                (
+                    '{"type":"turn.completed","usage":'
+                    '{"input_tokens":10,"cached_input_tokens":2,'
+                    '"output_tokens":3}}'
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    parsed = BENCHMARK._parse_trace(trace)
+
+    assert parsed["total_tokens"] == 13
+    assert parsed["uncached_input_plus_output"] == 11
 
 
 def test_aggregate_reports_total_and_uncached_comparisons():

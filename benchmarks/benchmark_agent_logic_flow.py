@@ -22,12 +22,10 @@ COMMON_CONFIG = [
     "agents.enabled=false",
     "project_doc_max_bytes=0",
     "skills.include_instructions=false",
-    "include_apps_instructions=false",
     "include_collaboration_mode_instructions=false",
     "features.memories=false",
     "memories.use_memories=false",
     "memories.generate_memories=false",
-    "apps._default.enabled=false",
     "check_for_update_on_startup=false",
 ]
 
@@ -47,6 +45,11 @@ def _participant_prompt(task: dict[str, Any]) -> str:
         "The target repository is the current working directory and is "
         "read-only.\n"
         "Answer the task below using only the tools available in this session.\n"
+        "If a CodeCanvas logic_flow tool is available, you must call it first "
+        "on the named production entry point. If it is unavailable, continue "
+        "with the built-in tools. Pass the entry point through its `function` "
+        "argument and the current repository through `project_path`. Use "
+        "built-in tools afterward as needed.\n"
         "Begin with no assumptions beyond the task.\n"
         "Ground every required claim in the repository and cite exact "
         "repository-relative file:line evidence.\n"
@@ -94,7 +97,7 @@ def _codex_command(
             [
                 (
                     "mcp_servers.codecanvas.command="
-                    f'"{codecanvas_python.resolve()}"'
+                    f'"{codecanvas_python.absolute()}"'
                 ),
                 'mcp_servers.codecanvas.args=["-m","codecanvas_mcp.mcp.server"]',
                 (
@@ -105,6 +108,8 @@ def _codex_command(
                     "mcp_servers.codecanvas.default_tools_approval_mode="
                     '"approve"'
                 ),
+                "mcp_servers.codecanvas.enabled=true",
+                "mcp_servers.codecanvas.required=true",
                 'mcp_servers.codecanvas.enabled_tools=["logic_flow"]',
             ]
         )
@@ -123,11 +128,7 @@ def _parse_trace(path: Path) -> dict[str, Any]:
         if line.strip()
     ]
     completed = [event for event in events if event.get("type") == "turn.completed"]
-    failures = [
-        event
-        for event in events
-        if event.get("type") in {"turn.failed", "error"}
-    ]
+    failures = [event for event in events if event.get("type") == "turn.failed"]
     if len(completed) != 1 or failures:
         raise RuntimeError(
             f"invalid trace {path}: completed={len(completed)}, "
@@ -205,6 +206,18 @@ def _run_condition(
             f"see {stderr_path}"
         )
     measurement = _parse_trace(trace_path)
+    if condition == "codecanvas":
+        successful_logic_flow_calls = sum(
+            count
+            for name, count in measurement["calls"].items()
+            if name.startswith("codecanvas.logic_flow:")
+            and name.endswith(":completed")
+        )
+        if successful_logic_flow_calls < 1:
+            raise RuntimeError(
+                f"{condition}/{task['id']} completed without logic_flow; "
+                f"see {trace_path}"
+            )
     measurement.update(
         {
             "answer_sha256": _sha256(answer_path),

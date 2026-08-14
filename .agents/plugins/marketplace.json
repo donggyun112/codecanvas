@@ -1,0 +1,20 @@
+{
+  "name": "codecanvas",
+  "interface": {
+    "displayName": "CodeCanvas"
+  },
+  "plugins": [
+    {
+      "name": "codecanvas",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codecanvas"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
