@@ -1,5 +1,7 @@
 # CodeCanvas MCP
 
+<!-- mcp-name: io.github.donggyun112/codecanvas -->
+
 Evidence-backed code intelligence for Python coding agents.
 
 CodeCanvas is a local static-analysis

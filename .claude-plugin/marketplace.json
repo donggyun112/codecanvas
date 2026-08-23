@@ -11,7 +11,7 @@
       "name": "codecanvas",
       "source": "./plugins/codecanvas",
       "description": "Trace Python call paths, branches, effects, and change impact with explicit evidence.",
-      "version": "0.1.16",
+      "version": "0.1.17",
       "category": "Developer Tools",
       "tags": [
         "python",

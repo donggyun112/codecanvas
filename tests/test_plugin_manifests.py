@@ -49,6 +49,13 @@ def test_marketplaces_point_to_the_shared_plugin_package() -> None:
     assert claude["name"] == codex["name"] == "codecanvas"
     assert claude["plugins"][0]["version"] == project["version"]
     assert claude["plugins"][0]["source"] == "./plugins/codecanvas"
+
+    registry = _json(ROOT / "server.json")
+    assert registry["version"] == project["version"]
+    assert registry["packages"][0]["version"] == project["version"]
+    assert registry["packages"][0]["identifier"] == project["name"]
+    marker = f"mcp-name: {registry['name']}"
+    assert marker in (ROOT / "core" / "README.md").read_text(encoding="utf-8")
     assert codex["plugins"][0]["source"] == {
         "source": "local",
         "path": "./plugins/codecanvas",
