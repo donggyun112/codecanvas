@@ -42,7 +42,12 @@ def test_marketplaces_point_to_the_shared_plugin_package() -> None:
     claude = _json(ROOT / ".claude-plugin" / "marketplace.json")
     codex = _json(ROOT / ".agents" / "plugins" / "marketplace.json")
 
+    project = tomllib.loads(
+        (ROOT / "core" / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+
     assert claude["name"] == codex["name"] == "codecanvas"
+    assert claude["plugins"][0]["version"] == project["version"]
     assert claude["plugins"][0]["source"] == "./plugins/codecanvas"
     assert codex["plugins"][0]["source"] == {
         "source": "local",

@@ -22,6 +22,14 @@ Python 3.10 or newer is required.
 claude mcp add codecanvas -- uvx codecanvas-mcp
 ```
 
+Claude Code and Codex users can install the plugin instead, which registers
+the server and its full tool catalog in one step:
+
+```bash
+claude plugin marketplace add donggyun112/codecanvas
+claude plugin install codecanvas@codecanvas
+```
+
 For another MCP client, use the equivalent stdio configuration:
 
 ```json
