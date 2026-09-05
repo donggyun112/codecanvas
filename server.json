@@ -6,12 +6,12 @@
     "url": "https://github.com/donggyun112/codecanvas",
     "source": "github"
   },
-  "version": "0.1.17",
+  "version": "0.1.19",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "codecanvas-mcp",
-      "version": "0.1.17",
+      "version": "0.1.19",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
