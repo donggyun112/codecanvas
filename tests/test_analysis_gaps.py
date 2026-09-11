@@ -3,7 +3,8 @@
 1. ``verify_claim`` silently ignored condition qualifiers it cannot model
    (``dry-run ...``, ``without OPENAI_API_KEY ...``, ``wake=false ...``) and
    still answered ``true`` with ``safe_to_summarize: true``.
-2. Calls made inside a ``lambda`` body never became call-graph edges.
+2. Calls inside a ``lambda`` or through a directly imported module could lose
+   their call-graph edges.
 3. ``find_symbols(search_mode="semantic")`` could not reach a concept whose
    wording differs from the query, and scored a one-token-of-many overlap as
    highly as a full match.
@@ -119,7 +120,7 @@ class TestClaimConditionQualifiers:
 
 
 # --------------------------------------------------------------- gap 2
-class TestLambdaCallEdges:
+class TestCallEdges:
     LAMBDA_APP = {"app.py": """
         def _with_builder(fn):
             return fn(1)
@@ -176,6 +177,113 @@ class TestLambdaCallEdges:
             "pkg.mod_b.alias_caller",
             "pkg.mod_b.lambda_caller",
         }, callers
+
+    def test_directly_imported_module_calls_resolve_to_edges(self, tmp_path):
+        b = _builder(tmp_path, {
+            "acceptance_flow.py": """
+                def after_lock():
+                    return True
+            """,
+            "caller.py": """
+                import acceptance_flow
+
+                def first():
+                    return acceptance_flow.after_lock()
+
+                def second():
+                    return acceptance_flow.after_lock()
+            """,
+        })
+        callers = {c["caller"] for c in queries.who_calls(
+            b, "acceptance_flow.after_lock",
+        )["callers"]}
+        assert callers == {"caller.first", "caller.second"}
+
+    def test_local_binding_shadowing_module_import_does_not_resolve(self, tmp_path):
+        b = _builder(tmp_path, {
+            "acceptance_flow.py": """
+                def after_lock():
+                    return True
+            """,
+            "caller.py": """
+                import acceptance_flow
+
+                def caller(acceptance_flow):
+                    return acceptance_flow.after_lock()
+            """,
+        })
+        callers = queries.who_calls(
+            b, "acceptance_flow.after_lock",
+        )["callers"]
+        assert callers == []
+
+    def test_closure_binding_shadowing_module_import_does_not_resolve(self, tmp_path):
+        b = _builder(tmp_path, {
+            "acceptance_flow.py": """
+                def after_lock():
+                    return True
+            """,
+            "caller.py": """
+                import acceptance_flow
+
+                def outer():
+                    acceptance_flow = object()
+
+                    def inner():
+                        return acceptance_flow.after_lock()
+
+                    return inner
+            """,
+        })
+        callers = queries.who_calls(
+            b, "acceptance_flow.after_lock",
+        )["callers"]
+        assert callers == []
+
+    def test_global_declaration_uses_module_import_not_closure_binding(self, tmp_path):
+        b = _builder(tmp_path, {
+            "acceptance_flow.py": """
+                def after_lock():
+                    return True
+            """,
+            "caller.py": """
+                import acceptance_flow as flow
+
+                def outer():
+                    flow = object()
+
+                    def inner():
+                        global flow
+                        return flow.after_lock()
+
+                    return inner
+            """,
+        })
+        callers = {c["caller"] for c in queries.who_calls(
+            b, "acceptance_flow.after_lock",
+        )["callers"]}
+        assert callers == {"caller.outer.inner"}
+
+    def test_direct_import_does_not_resolve_unimported_sibling(self, tmp_path):
+        b = _builder(tmp_path, {
+            "pkg/__init__.py": "",
+            "pkg/mod_a.py": """
+                def unrelated():
+                    return True
+            """,
+            "pkg/mod_b.py": """
+                def target():
+                    return True
+            """,
+            "caller.py": """
+                import pkg.mod_a
+
+                def caller():
+                    return pkg.mod_b.target()
+            """,
+        })
+        callers = queries.who_calls(b, "pkg.mod_b.target")["callers"]
+        assert callers == []
 
     def test_unimported_receiver_does_not_resolve(self, tmp_path):
         b = _builder(tmp_path, {"svc.py": """

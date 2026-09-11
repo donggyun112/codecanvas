@@ -40,7 +40,7 @@ MAX_FILES = int(os.environ.get("CODECANVAS_MAX_FILES", MAX_FILES_DEFAULT))
 # risk if a user clones a project that ships its own .codecanvas/ dir.
 CACHE_DIR_NAME = ".codecanvas"
 CACHE_FILE_NAME = "callgraph.json"
-CACHE_FORMAT_VERSION = 1  # bump when serialized layout changes
+CACHE_FORMAT_VERSION = 2  # bump when serialized layout changes
 
 
 class ProjectTooLargeError(RuntimeError):
@@ -150,6 +150,7 @@ class FunctionDef:
     local_types: dict[str, str] = field(default_factory=dict)
     runtime_types: dict[str, str] = field(default_factory=dict)
     bound_names: list[str] = field(default_factory=list)
+    global_names: list[str] = field(default_factory=list)
     logic_steps: list[LogicStep] = field(default_factory=list)
     bases: list[str] = field(default_factory=list)
     is_protocol: bool = False
@@ -244,6 +245,7 @@ def _function_to_dict(func: "FunctionDef") -> dict[str, Any]:
         "local_types": dict(func.local_types),
         "runtime_types": dict(func.runtime_types),
         "bound_names": list(func.bound_names),
+        "global_names": list(func.global_names),
         "logic_steps": [_logic_to_dict(ls) for ls in func.logic_steps],
         "bases": list(func.bases),
         "is_protocol": func.is_protocol,
@@ -271,6 +273,7 @@ def _function_from_dict(d: dict[str, Any]) -> "FunctionDef":
         local_types=dict(d.get("local_types", {})),
         runtime_types=dict(d.get("runtime_types", {})),
         bound_names=list(d.get("bound_names", [])),
+        global_names=list(d.get("global_names", [])),
         logic_steps=[_logic_from_dict(ls) for ls in d.get("logic_steps", [])],
         bases=list(d.get("bases", [])),
         is_protocol=bool(d.get("is_protocol", False)),
@@ -708,6 +711,7 @@ class CallGraphBuilder:
         self._class_public_method_cache: dict[str, frozenset[str]] = {}
         self._module_global_types: dict[str, dict[str, str]] = {}
         self._module_imports: dict[str, dict[str, str]] = {}
+        self._direct_module_imports: dict[str, set[str]] = {}
         self._dependency_overrides: dict[str, set[str]] = {}
         self._caller_index: dict[str, list[CallerReference]] | None = None
         self._last_resolve_candidates: list[FunctionDef] = []
@@ -810,6 +814,10 @@ class CallGraphBuilder:
             self._module_imports = {
                 k: dict(v) for k, v in payload.get("module_imports", {}).items()
             }
+            self._direct_module_imports = {
+                k: set(v)
+                for k, v in payload.get("direct_module_imports", {}).items()
+            }
             self._dependency_overrides = {
                 k: set(v) for k, v in payload.get("dependency_overrides", {}).items()
             }
@@ -821,6 +829,7 @@ class CallGraphBuilder:
             self._class_attr_types.clear()
             self._module_global_types.clear()
             self._module_imports.clear()
+            self._direct_module_imports.clear()
             self._dependency_overrides.clear()
             return False
         return True
@@ -843,6 +852,9 @@ class CallGraphBuilder:
                 "class_attr_types": self._class_attr_types,
                 "module_global_types": self._module_global_types,
                 "module_imports": self._module_imports,
+                "direct_module_imports": {
+                    k: sorted(v) for k, v in self._direct_module_imports.items()
+                },
                 "dependency_overrides": {
                     k: sorted(v) for k, v in self._dependency_overrides.items()
                 },
@@ -1035,6 +1047,11 @@ class CallGraphBuilder:
         self._module_imports[file_path] = self._extract_module_imports(
             tree, module_name, file_path,
         )
+        self._direct_module_imports[file_path] = {
+            alias.name
+            for stmt in tree.body if isinstance(stmt, ast.Import)
+            for alias in stmt.names
+        }
         self._module_global_types[file_path] = self._extract_module_global_types(tree)
 
         self._visit_definitions(tree, module_name, file_path)
@@ -1052,6 +1069,7 @@ class CallGraphBuilder:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 qname = f"{namespace}.{node.name}"
                 local_types, self_attr_types = self._extract_assignment_types(node)
+                bound_names, global_names = self._extract_scope_names(node)
                 enclosing = self._functions.get(class_qname) if class_qname else None
                 decorators = [self._decorator_name(d) for d in node.decorator_list]
                 func_def = FunctionDef(
@@ -1072,7 +1090,8 @@ class CallGraphBuilder:
                     is_protocol=bool(enclosing and enclosing.is_protocol),
                     is_abstract=any(d.endswith("abstractmethod") for d in decorators),
                     local_types=local_types,
-                    bound_names=self._extract_bound_names(node),
+                    bound_names=bound_names,
+                    global_names=global_names,
                     logic_steps=self._extract_logic_steps(node),
                 )
                 self._functions[qname] = func_def
@@ -1089,6 +1108,7 @@ class CallGraphBuilder:
                         nested_qname = f"{qname}.{child.name}"
                         if nested_qname not in self._functions:
                             nested_local_types, _ = self._extract_assignment_types(child)
+                            nested_bound_names, nested_global_names = self._extract_scope_names(child)
                             self._functions[nested_qname] = FunctionDef(
                                 name=child.name,
                                 qualified_name=nested_qname,
@@ -1103,7 +1123,8 @@ class CallGraphBuilder:
                                 return_annotation=self._annotation_str(child.returns),
                                 class_qname=class_qname,
                                 local_types=nested_local_types,
-                                bound_names=self._extract_bound_names(child),
+                                bound_names=nested_bound_names,
+                                global_names=nested_global_names,
                                 logic_steps=self._extract_logic_steps(child),
                             )
                             self._ast_nodes[nested_qname] = child
@@ -2415,10 +2436,27 @@ class CallGraphBuilder:
         owner_parts = call.owner_parts
         if not owner_parts or not caller.file_path:
             return None
+        root = owner_parts[0]
+        scope: FunctionDef | None = caller
+        while scope is not None:
+            if root in scope.global_names:
+                break
+            if root in scope.bound_names:
+                return None
+            scope = self._enclosing_function(scope)
         reference = ".".join((*owner_parts, call.func_name.split(".")[-1]))
         expanded = self._expand_import_reference(reference, caller.file_path)
-        if expanded == reference:
+        imports = self._module_imports.get(caller.file_path, {})
+        if root not in imports:
             return None
+        if expanded == reference:
+            receiver = ".".join(owner_parts)
+            direct_imports = self._direct_module_imports.get(caller.file_path, set())
+            if not any(
+                receiver == imported or imported.startswith(receiver + ".")
+                for imported in direct_imports
+            ):
+                return None
         return self._functions.get(expanded)
 
     def _resolve_imported_global_type(
@@ -4468,10 +4506,10 @@ class CallGraphBuilder:
         return imports
 
     @staticmethod
-    def _extract_bound_names(
+    def _extract_scope_names(
         func_node: ast.FunctionDef | ast.AsyncFunctionDef,
-    ) -> list[str]:
-        """Return names lexically bound in a function, including untyped names."""
+    ) -> tuple[list[str], list[str]]:
+        """Return names lexically bound and declared global in a function."""
         bound = set(_param_names(func_node.args))
         declared_global: set[str] = set()
 
@@ -4507,7 +4545,7 @@ class CallGraphBuilder:
         visitor = BindingVisitor()
         for stmt in func_node.body:
             visitor.visit(stmt)
-        return sorted(bound - declared_global)
+        return sorted(bound - declared_global), sorted(declared_global)
 
     @staticmethod
     def _describe_exception(call: CallSite) -> str:
